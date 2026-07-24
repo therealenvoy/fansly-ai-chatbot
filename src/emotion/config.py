@@ -1,6 +1,7 @@
 """Configuration for emotion detection and sentiment analysis."""
 
-from pydantic import BaseModel
+from enum import Enum
+from pydantic import BaseModel, model_validator
 
 
 class EmotionConfig(BaseModel):
@@ -23,9 +24,17 @@ class EmotionConfig(BaseModel):
     intent_keyword_weight: float = 0.3
     intent_sentiment_weight: float = 0.4
     intent_question_weight: float = 0.3
+    
+    @model_validator(mode='after')
+    def validate_intent_weights(self):
+        """Ensure intent weights sum to 1.0"""
+        total = self.intent_keyword_weight + self.intent_sentiment_weight + self.intent_question_weight
+        if abs(total - 1.0) > 0.001:  # Allow small floating point errors
+            raise ValueError(f"Intent weights must sum to 1.0, got {total}")
+        return self
 
 
-class SentimentLabel(str):
+class SentimentLabel(str, Enum):
     """Sentiment labels"""
     VERY_NEGATIVE = "very_negative"
     NEGATIVE = "negative"
@@ -34,7 +43,7 @@ class SentimentLabel(str):
     VERY_POSITIVE = "very_positive"
 
 
-class EmotionLabel(str):
+class EmotionLabel(str, Enum):
     """Emotion labels from BERT model"""
     ANGER = "anger"
     DISGUST = "disgust"
@@ -43,3 +52,10 @@ class EmotionLabel(str):
     NEUTRAL = "neutral"
     SADNESS = "sadness"
     SURPRISE = "surprise"
+
+
+class TrendLabel(str, Enum):
+    """Sentiment trend labels"""
+    WARMING = "warming"
+    COOLING = "cooling"
+    NEUTRAL = "neutral"

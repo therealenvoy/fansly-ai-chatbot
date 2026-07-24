@@ -5,6 +5,8 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional, List
 
+from .config import SentimentLabel, EmotionLabel, TrendLabel
+
 
 class EmotionAnalysis(BaseModel):
     """Single message emotion analysis result"""
@@ -20,10 +22,10 @@ class EmotionAnalysis(BaseModel):
     vader_neu: float = Field(..., ge=0.0, le=1.0)
     
     # Sentiment classification
-    sentiment: str  # very_negative | negative | neutral | positive | very_positive
+    sentiment: SentimentLabel  # very_negative | negative | neutral | positive | very_positive
     
     # BERT emotion classification
-    emotion: str  # anger | disgust | fear | joy | neutral | sadness | surprise
+    emotion: EmotionLabel  # anger | disgust | fear | joy | neutral | sadness | surprise
     emotion_confidence: float = Field(..., ge=0.0, le=1.0)
     
     # Purchase intent score (0-10)
@@ -42,17 +44,17 @@ class EmotionalArc(BaseModel):
     conversation_id: str
     
     # Message history
-    messages: List[EmotionAnalysis] = []
+    messages: List[EmotionAnalysis] = Field(default_factory=list)
     
     # Arc metrics
     average_sentiment: float = Field(default=0.0, ge=-1.0, le=1.0)
-    sentiment_trend: str = "neutral"  # warming | cooling | neutral
-    dominant_emotion: str = "neutral"
+    sentiment_trend: TrendLabel = TrendLabel.NEUTRAL  # warming | cooling | neutral
+    dominant_emotion: EmotionLabel = EmotionLabel.NEUTRAL
     
     # Engagement signals
     is_engaged: bool = False
     is_cooling_off: bool = False
-    warning_signals: List[str] = []  # ["negative_sentiment", "short_responses", etc]
+    warning_signals: List[str] = Field(default_factory=list)  # ["negative_sentiment", "short_responses", etc]
     
     # Purchase readiness
     purchase_readiness_index: float = Field(default=0.0, ge=0.0, le=1.0)
