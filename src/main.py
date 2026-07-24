@@ -8,6 +8,8 @@ Requires:
     - FANSLY_API_KEY env var (your apifansly.com API key)
     - FANSLY_ACCOUNT_ID env var (your connected account ID)
     - config/creators/{creator_id}.yaml persona file
+
+Runs a polling bot loop + lightweight health check HTTP server on port 8080.
 """
 
 import os
@@ -15,6 +17,8 @@ import sys
 import time
 import logging
 import signal
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
 
@@ -33,14 +37,15 @@ logger = logging.getLogger("fansly-bot")
 
 # ─── Config ────────────────────────────────────────────
 
-API_KEY = os.getenv("FANSLY_API_KEY", "")
+API_KEY = os.getenv("FANSLY_API_KEY", "") or os.getenv("APIFANSLY_API_KEY", "")
 ACCOUNT_ID = os.getenv("FANSLY_ACCOUNT_ID", "")
 CREATOR_ID = os.getenv("CREATOR_ID", "sunny_charm")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # seconds
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///data/fansly_bot.db")
+PORT = int(os.getenv("PORT", "8080"))
 
 if not API_KEY or not ACCOUNT_ID:
-    logger.error("Missing FANSLY_API_KEY or FANSLY_ACCOUNT_ID. Set in .env file.")
+    logger.error("Missing FANSLY_API_KEY or FANSLY_ACCOUNT_ID. Set as env vars.")
     sys.exit(1)
 
 # ─── Initialize ────────────────────────────────────────
@@ -70,6 +75,31 @@ def shutdown(signum, frame):
 
 signal.signal(signal.SIGINT, shutdown)
 signal.signal(signal.SIGTERM, shutdown)
+
+# ─── Health Check Server ───────────────────────────────
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health" or self.path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"status":"ok","service":"fansly-bot"}')
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # suppress HTTP logs in production
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    logger.info(f"Health check server on port {PORT}")
+    while running:
+        server.handle_request()
+
+health_thread = threading.Thread(target=run_health_server, daemon=True)
+health_thread.start()
 
 # ─── Main Loop ─────────────────────────────────────────
 
