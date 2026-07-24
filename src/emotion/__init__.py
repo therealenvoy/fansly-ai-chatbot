@@ -3,6 +3,7 @@
 from .pipeline import EmotionPipeline
 from .models import EmotionAnalysis, EmotionalArc
 from .config import EmotionConfig, SentimentLabel, EmotionLabel, TrendLabel
+from .arc_tracker import EmotionalArcTracker
 
 __all__ = [
     'EmotionPipeline',
@@ -12,4 +13,5 @@ __all__ = [
     'SentimentLabel',
     'EmotionLabel',
     'TrendLabel',
+    'EmotionalArcTracker',
 ]
