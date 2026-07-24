@@ -12,19 +12,21 @@ from pydantic import BaseModel, Field
 
 
 class PersonalityType(str, Enum):
-    """4 subscriber personality types from research"""
+    """5 subscriber personality types from research"""
     INSTANT_BUYER = "instant_buyer"      # Buys first PPV, eager
     QUIET_LURKER = "quiet_lurker"        # Reads, rarely responds
     ATTENTION_SEEKER = "attention_seeker" # Constant messages, validation
     TESTER = "tester"                     # Questions everything, skeptical
+    CHATTY_FAN = "chatty_fan"            # Overly enthusiastic, messages constantly
 
 
 class ConversationStage(str, Enum):
-    """S.E.L.L. Framework stages"""
-    START_CONNECTION = "start"           # Building rapport (1-3 exchanges)
-    EXPLORE_NEEDS = "explore"            # Identifying opportunities (2-4 exchanges)
-    LEAD_OPPORTUNITY = "lead"            # Presenting offer (1-2 exchanges)
-    LOCK_SALE = "lock"                   # Closing (1-3 exchanges)
+    """5-Stage Funnel: RAPPORT → TEASE → OFFER → HANDLE → CLOSE"""
+    RAPPORT = "rapport"     # Building rapport (1-3 exchanges)
+    TEASE = "tease"         # Creating curiosity/demand (2-4 exchanges)
+    OFFER = "offer"         # Presenting offer (1-2 exchanges)
+    HANDLE = "handle"       # Objection handling (1-3 exchanges)
+    CLOSE = "close"         # Closing the sale (1-3 exchanges)
 
 
 class SentimentLabel(str, Enum):
@@ -46,6 +48,7 @@ class Message(BaseModel):
     sentiment: Optional[SentimentLabel] = None
     purchase_intent_score: Optional[int] = Field(None, ge=0, le=10)  # 0-10 scale
     stage: Optional[ConversationStage] = None
+    fan_archetype: Optional[str] = None  # Fan personality archetype tag
     
     # Metadata
     response_time_seconds: Optional[float] = None
@@ -115,7 +118,7 @@ if __name__ == "__main__":
                 content="Hey! Love your content 😍",
                 sentiment=SentimentLabel.VERY_POSITIVE,
                 purchase_intent_score=7,
-                stage=ConversationStage.START_CONNECTION,
+                stage=ConversationStage.RAPPORT,
                 message_length=25,
                 contains_emoji=True
             ),
@@ -124,7 +127,7 @@ if __name__ == "__main__":
                 sender="creator",
                 content="Aww thank you babe! 💕 What's your favorite kind of content?",
                 sentiment=SentimentLabel.POSITIVE,
-                stage=ConversationStage.EXPLORE_NEEDS,
+                stage=ConversationStage.TEASE,
                 message_length=55,
                 contains_emoji=True
             ),
@@ -133,10 +136,11 @@ if __name__ == "__main__":
         total_exchanges=12,
         conversation_duration_minutes=18.5,
         stages_completed=[
-            ConversationStage.START_CONNECTION,
-            ConversationStage.EXPLORE_NEEDS,
-            ConversationStage.LEAD_OPPORTUNITY,
-            ConversationStage.LOCK_SALE
+            ConversationStage.RAPPORT,
+            ConversationStage.TEASE,
+            ConversationStage.OFFER,
+            ConversationStage.HANDLE,
+            ConversationStage.CLOSE
         ]
     )
     
