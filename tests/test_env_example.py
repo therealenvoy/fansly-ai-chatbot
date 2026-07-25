@@ -9,11 +9,13 @@ ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env.exampl
 
 REQUIRED_VARS = [
     "FANSLY_API_KEY",
-    "FANSLY_ACCOUNT_ID",
+    "FANSLY_PROVIDER",
     "CREATOR_ID",
     "POLL_INTERVAL",
     "DATABASE_URL",
     "PORT",
+    "DASHBOARD_USER",
+    "DASHBOARD_PASSWORD",
     "DEEPSEEK_API_KEY",
 ]
 

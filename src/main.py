@@ -4,8 +4,7 @@ Usage:
     python -m src.main
 
 Requires:
-    - FANSLY_API_KEY env var (your apifansly.com API key)
-    - FANSLY_ACCOUNT_ID env var (your connected account ID)
+    - FANSLY_API_KEY env var (OnlyFansAPI Fansly closed-beta token)
     - config/creators/{creator_id}.yaml persona file
 
 Runs a polling bot loop + lightweight health check HTTP server on port 8080.
@@ -13,7 +12,6 @@ Performs startup auth validation and exponential backoff on failures.
 """
 
 import os
-import sys
 import time
 import logging
 import signal
@@ -41,8 +39,7 @@ logger = logging.getLogger("fansly-bot")
 
 # ─── Config ────────────────────────────────────────────
 
-API_KEY = os.getenv("FANSLY_API_KEY", "") or os.getenv("APIFANSLY_API_KEY", "")
-ACCOUNT_ID = os.getenv("FANSLY_ACCOUNT_ID", "")
+API_KEY = os.getenv("FANSLY_API_KEY", "")
 CREATOR_ID = os.getenv("CREATOR_ID", "sunny_charm")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))   # seconds, fast/active interval
 IDLE_BACKOFF_MAX = int(os.getenv("IDLE_BACKOFF_MAX", "600"))  # cap for idle backoff
@@ -51,8 +48,10 @@ DB_URL = os.getenv("DATABASE_URL", "sqlite:///data/fansly_bot.db")
 PORT = int(os.getenv("PORT", "8080"))
 
 if not API_KEY:
-    logger.error("Missing FANSLY_API_KEY. Set as env var.")
-    sys.exit(1)
+    logger.warning(
+        "FANSLY_API_KEY is not configured for OnlyFansAPI's Fansly product. "
+        "The dashboard will start, but polling remains disabled."
+    )
 
 # ─── Initialize ────────────────────────────────────────
 
@@ -167,7 +166,7 @@ server_thread.start()
 # ─── Poll Loop with Backoff ────────────────────────────
 
 logger.info(f"Starting Fansly Bot for creator '{CREATOR_ID}'")
-logger.info(f"Account: {ACCOUNT_ID or '(resolved via API)'}, Poll interval: {POLL_INTERVAL}s")
+logger.info(f"Account: (resolved via OnlyFansAPI), Poll interval: {POLL_INTERVAL}s")
 logger.info(f"Max failure backoff: {MAX_BACKOFF}s, max idle backoff: {IDLE_BACKOFF_MAX}s")
 
 consecutive_failures = 0
