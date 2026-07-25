@@ -40,7 +40,6 @@ class FanslyApiClientImpl(FanslyApiClient):
             base_url=BASE_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
             },
             timeout=timeout,
         )
