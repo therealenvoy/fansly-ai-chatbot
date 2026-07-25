@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from .fansly_client import FanslyClient, FanslyConfig, ChatInfo, MessageInfo
+from .fansly_client import ApifanslyClient, FanslyApiClient, FanslyConfig, ChatInfo, MessageInfo
 from .persona.loader import PersonaLoader
 from .persona.validator import PersonaValidator
 from .funnel.spiral import SpiralStateMachine, SpiralPhase
@@ -47,7 +47,7 @@ class FanslyBot:
 
     def __init__(
         self,
-        client: FanslyClient,
+        client: FanslyApiClient,
         persona_loader: PersonaLoader,
         note_repo: FanNoteRepository,
         creator_id: str = "sunny_charm",

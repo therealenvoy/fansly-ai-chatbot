@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from datetime import datetime, timezone
 
 from src.bot import FanslyBot
-from src.fansly_client import FanslyClient, FanslyConfig, ChatInfo, MessageInfo
+from src.fansly_client import ApifanslyClient as FanslyClient, FanslyConfig, ChatInfo, MessageInfo
 from src.funnel.session import FanSession
 from src.notes.models import FanNote
 

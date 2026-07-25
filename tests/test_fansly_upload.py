@@ -12,7 +12,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from src.fansly_client import (
-    FanslyClient, FanslyConfig,
+    ApifanslyClient as FanslyClient, FanslyConfig,
 )
 
 
