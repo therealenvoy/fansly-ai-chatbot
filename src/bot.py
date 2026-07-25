@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from .fansly_client import ApifanslyClient, FanslyApiClient, FanslyConfig, ChatInfo, MessageInfo
+from .fansly_client import FanslyApiClient, ChatInfo, MessageInfo
 from .persona.loader import PersonaLoader
 from .persona.validator import PersonaValidator
 from .funnel.spiral import SpiralStateMachine, SpiralPhase
@@ -56,7 +56,7 @@ class FanslyBot:
     ):
         self.client = client
         self.creator_id = creator_id
-        self.account_id = client.config.account_id
+        self.account_id = client.account_id
 
         # Load persona + validator for voice consistency
         self.persona = persona_loader.load(creator_id)
@@ -118,19 +118,27 @@ class FanslyBot:
 
     # ─── MAIN LOOP ──────────────────────────────────────
 
-    def poll_and_process(self, filter_type: str = "all", max_chats: int = 50):
-        """Main loop: fetch chats, process unread messages, send replies."""
+    def poll_and_process(self, filter_type: str = "all", max_chats: int = 50) -> bool:
+        """Main loop: fetch chats, process chats with unread messages, send replies.
+
+        Returns True if any chat had unread messages this cycle, False otherwise —
+        the caller uses this to drive idle-adaptive polling.
+        """
         if not self.enabled:
             logger.debug("Bot disabled — skipping poll cycle")
-            return
-        chats = self.client.get_all_chats(filter_type=filter_type)
-        logger.info(f"Processing {len(chats)} chats")
+            return False
 
-        for chat in chats[:max_chats]:
+        chats = self.client.get_all_chats(filter_type=filter_type)
+        unread_chats = [c for c in chats if c.unread_count > 0]
+        logger.info(f"{len(chats)} chats total, {len(unread_chats)} with unread messages")
+
+        for chat in unread_chats[:max_chats]:
             try:
                 self._process_chat(chat)
             except Exception as e:
                 logger.error(f"Error processing chat {chat.chat_id}: {e}")
+
+        return len(unread_chats) > 0
 
     def toggle(self, force: Optional[bool] = None) -> bool:
         """Toggle bot on/off. Returns new enabled state.
