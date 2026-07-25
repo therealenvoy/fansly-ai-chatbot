@@ -1,20 +1,79 @@
-"""
-Fansly API Client — integration layer between apifansly.com and our 17-system chatbot.
+"""Fansly API Client — integration layer between apifansly.com and our 17-system chatbot.
 
 Base URL: https://v1.apifansly.com/api/fansly
 Auth: x-api-key header
 Docs: https://docs.apifansly.com
 """
 
+import os
 import time
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
 import httpx
+from httpx import HTTPStatusError
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://v1.apifansly.com/api/fansly"
+
+
+# ─── Exception Hierarchy ───────────────────────────────────
+
+class FanslyClientError(Exception):
+    """Base exception for Fansly client errors."""
+
+
+class PaymentRequiredError(FanslyClientError):
+    """402 Payment Required — account needs billing attention."""
+
+
+class NotFoundError(FanslyClientError):
+    """404 Not Found — resource doesn't exist."""
+
+
+class AuthError(FanslyClientError):
+    """401/403 — authentication/authorization failed."""
+
+
+# ─── Response Parser ───────────────────────────────────────
+
+class ResponseParser:
+    """Validates API response structure before extracting data.
+
+    Expected API response shape (from docs.apifansly.com):
+    {
+        "statusCode": 200,
+        "data": {
+            "data": {
+                "response": <actual_data>,
+                ...
+            },
+            "nextCursor": "..."
+        },
+        "message": "..."
+    }
+    """
+
+    @staticmethod
+    def parse(data: dict, path: str = "response", default=None):
+        """Safely extract data from nested API response.
+
+        path: which key inside data["data"]["data"] to extract
+        default: fallback value if path missing
+        """
+        try:
+            inner = data.get("data", {}).get("data", {})
+            if path:
+                return inner.get(path, default)
+            return inner
+        except (AttributeError, TypeError) as e:
+            raise ValueError(f"Unexpected API response shape: {e}")
+
+    @staticmethod
+    def get_cursor(data: dict) -> str | None:
+        """Extract pagination cursor if present."""
+        return data.get("data", {}).get("nextCursor")
 
 
 @dataclass
@@ -98,28 +157,48 @@ class FanslyClient:
         for attempt in range(self.config.max_retries):
             try:
                 response = self.client.request(method, path, **kwargs)
-                data = response.json()
 
-                if response.status_code == 429:
-                    retry_after = int(response.headers.get("X-RateLimit-Retry-After", 5))
-                    logger.warning(f"Rate limited, retrying in {retry_after}s")
-                    time.sleep(retry_after)
-                    continue
-
-                if response.status_code >= 500:
-                    logger.warning(f"Server error {response.status_code}, attempt {attempt + 1}")
-                    time.sleep(self.config.retry_delay * (attempt + 1))
-                    continue
+                # Categorize errors by status code
+                if response.status_code == 401 or response.status_code == 403:
+                    raise AuthError(f"Authentication failed: {response.status_code} on {method} {path}")
+                if response.status_code == 402:
+                    raise PaymentRequiredError(f"Payment required: {response.text}")
+                if response.status_code == 404:
+                    raise NotFoundError(f"Resource not found: {path}")
 
                 response.raise_for_status()
+                data = response.json()
+
+                # Check for API-level errors in response body
+                if isinstance(data, dict) and data.get("statusCode") and data["statusCode"] != 200:
+                    if data["statusCode"] in (401, 403):
+                        raise AuthError(data.get("message", "Auth failed"))
+                    if data["statusCode"] == 402:
+                        raise PaymentRequiredError(data.get("message", "Payment required"))
+
                 return data
 
-            except httpx.TimeoutException:
-                logger.warning(f"Timeout on attempt {attempt + 1}")
+            except (AuthError, PaymentRequiredError, NotFoundError):
+                raise  # Re-raise, don't retry
+            except HTTPStatusError as e:
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", 5))
+                    logger.warning(f"Rate limited on {path}, retrying in {retry_after}s")
+                    time.sleep(retry_after)
+                    continue
+                if response.status_code >= 500:
+                    delay = self.config.retry_delay * (attempt + 1)
+                    logger.warning(f"Server error {response.status_code} on {path}, retry {attempt+1} in {delay}s")
+                    time.sleep(delay)
+                    continue
+                raise  # Other 4xx: re-raise
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
                 if attempt < self.config.max_retries - 1:
-                    time.sleep(self.config.retry_delay * (attempt + 1))
-                else:
-                    raise
+                    delay = self.config.retry_delay * (attempt + 1)
+                    logger.warning(f"Connection error on {path}, retry {attempt+1} in {delay}s")
+                    time.sleep(delay)
+                    continue
+                raise
 
         raise Exception(f"Request failed after {self.config.max_retries} attempts")
 
@@ -140,9 +219,9 @@ class FanslyClient:
             params["search"] = search
 
         data = self._request("GET", f"/{self.config.account_id}/chats", params=params)
-        response = data["data"]["data"]["response"]
+        response = ResponseParser.parse(data)
         chats_raw = response.get("data", [])
-        next_cursor = data["data"].get("nextCursor")
+        next_cursor = ResponseParser.get_cursor(data)
 
         # Build lookup for account details
         accounts = {}
@@ -196,7 +275,7 @@ class FanslyClient:
         data = self._request(
             "GET", f"/{self.config.account_id}/chats/{chat_id}/messages", params=params
         )
-        response = data["data"]["data"]["response"]
+        response = ResponseParser.parse(data)
         messages_raw = response.get("messages", [])
         next_cursor = response.get("cursor")
 
@@ -250,7 +329,7 @@ class FanslyClient:
             json=body,
         )
 
-        msg = data["data"]["data"]["response"]
+        msg = ResponseParser.parse(data)
         return SentMessage(
             message_id=msg["id"],
             content=msg.get("content", ""),
@@ -292,19 +371,36 @@ class FanslyClient:
     def get_earnings(self) -> dict:
         """Get pending balance."""
         data = self._request("GET", f"/{self.config.account_id}/earnings")
-        return data["data"]["data"]["response"]
+        return ResponseParser.parse(data)
 
     def get_fan_earnings(self, fan_id: str) -> list[dict]:
         """Get per-fan earnings breakdown (monthly)."""
         data = self._request(
             "GET", f"/{self.config.account_id}/earnings/fans/{fan_id}"
         )
-        return data["data"]["data"]["response"]
+        return ResponseParser.parse(data)
 
     # ─── MEDIA ───────────────────────────────────────────
 
     def upload_media(self, file_path: str) -> str:
-        """Upload a file, poll until complete, return mediaId."""
+        """Upload a file, poll until complete, return mediaId.
+
+        Validates file existence, extension, and size before making any HTTP calls.
+        Uses account_id in the status polling URL (fixes C4 bug).
+        """
+        # ─── File validation (R3) ───────────────────────
+        VALID_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".mov", ".avi"}
+        MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Upload file not found: {file_path}")
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in VALID_EXTENSIONS:
+            raise ValueError(f"Unsupported file type '{ext}'. Allowed: {', '.join(sorted(VALID_EXTENSIONS))}")
+        size = os.path.getsize(file_path)
+        if size > MAX_UPLOAD_SIZE:
+            raise ValueError(f"File too large: {size / 1024 / 1024:.1f}MB (max {MAX_UPLOAD_SIZE / 1024 / 1024:.0f}MB)")
+
         # Step 1: Initiate upload
         with open(file_path, "rb") as f:
             # Use a raw httpx call for multipart
@@ -318,17 +414,18 @@ class FanslyClient:
             response.raise_for_status()
             job_data = response.json()
 
-        job_id = job_data["data"]["jobId"]
+        job_id = job_data.get("data", {}).get("jobId")
         logger.info(f"Upload job {job_id} queued for {file_path}")
 
         # Step 2: Poll until complete
         media_id = None
         for _ in range(30):  # max 60s of polling
             time.sleep(2)
-            status_data = self._request("GET", f"/media/upload/{job_id}/status")
-            state = status_data["data"].get("state", "")
+            status_data = self._request("GET", f"/{self.config.account_id}/media/upload/{job_id}/status")
+            inner = status_data.get("data", {})
+            state = inner.get("state", "")
             if state == "completed":
-                media_id = status_data["data"]["result"]["mediaId"]
+                media_id = inner.get("result", {}).get("mediaId")
                 logger.info(f"Upload complete: mediaId={media_id}")
                 break
             elif state == "failed":
@@ -360,7 +457,7 @@ class FanslyClient:
     def list_albums(self) -> list[dict]:
         """Get all vault albums."""
         data = self._request("GET", f"/{self.config.account_id}/vault/albums")
-        return data["data"]["data"]["response"].get("albums", [])
+        return ResponseParser.parse(data).get("albums", [])
 
     def get_album_media(self, album_id: str, cursor: Optional[str] = None) -> tuple[list[dict], Optional[str]]:
         """Get media from a vault album."""
@@ -372,8 +469,8 @@ class FanslyClient:
             f"/{self.config.account_id}/vault/albums/{album_id}/media",
             params=params,
         )
-        response = data["data"]["data"]["response"]
-        return response if isinstance(response, list) else response.get("media", []), data["data"]["data"].get("cursor")
+        response = ResponseParser.parse(data)
+        return response if isinstance(response, list) else response.get("media", []), ResponseParser.parse(data, path="cursor")
 
     # ─── ANALYTICS ───────────────────────────────────────
 
@@ -394,7 +491,7 @@ class FanslyClient:
             f"/{self.config.account_id}/analytics/profilestats",
             params=params,
         )
-        return data["data"]["data"]["response"]
+        return ResponseParser.parse(data)
 
     # ─── CLOSE ───────────────────────────────────────────
 

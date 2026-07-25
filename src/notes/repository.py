@@ -4,9 +4,10 @@ import json
 from datetime import datetime
 from sqlalchemy import (
     create_engine, MetaData, Table, Column, String, Float, Integer,
-    DateTime, Text
+    DateTime, Text, text
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.notes.models import FanNote
 
 
@@ -23,6 +24,7 @@ FAN_NOTES_TABLE = Table(
     Column("last_purchase_at", DateTime, nullable=True),
     Column("emotional_triggers", Text, default="[]"),
     Column("hard_limits", Text, default="[]"),
+    Column("facts", Text, default="[]"),
     Column("notes", Text, default=""),
     Column("first_contact_at", DateTime, nullable=True),
     Column("relationship_stage", String, default="new"),
@@ -42,6 +44,7 @@ def _note_to_row(note: FanNote) -> dict:
         "last_purchase_at": note.last_purchase_at,
         "emotional_triggers": json.dumps(note.emotional_triggers),
         "hard_limits": json.dumps(note.hard_limits),
+        "facts": json.dumps(note.facts),
         "notes": note.notes,
         "first_contact_at": note.first_contact_at,
         "relationship_stage": note.relationship_stage,
@@ -55,6 +58,7 @@ def _row_to_note(row) -> FanNote:
     row_dict["preferences"] = json.loads(row_dict.get("preferences", "[]") or "[]")
     row_dict["emotional_triggers"] = json.loads(row_dict.get("emotional_triggers", "[]") or "[]")
     row_dict["hard_limits"] = json.loads(row_dict.get("hard_limits", "[]") or "[]")
+    row_dict["facts"] = json.loads(row_dict.get("facts", "[]") or "[]")
     return FanNote(**row_dict)
 
 
@@ -66,29 +70,52 @@ class FanNoteRepository:
         self.metadata = MetaData()
 
     def create_table(self):
-        """Create the fan_notes table if it doesn't exist."""
+        """Create the fan_notes table if it doesn't exist, and migrate new columns."""
         FAN_NOTES_TABLE.create(self.engine, checkfirst=True)
+        # Dialect-agnostic migration: add columns introduced after initial deploys.
+        from sqlalchemy import inspect as sa_inspect
+        insp = sa_inspect(self.engine)
+        try:
+            existing = {c["name"] for c in insp.get_columns("fan_notes")}
+        except Exception:
+            existing = set()
+        with self.engine.connect() as conn:
+            for col, ddl in [("facts", "TEXT DEFAULT '[]'")]:
+                if col not in existing:
+                    conn.execute(
+                        text(f"ALTER TABLE fan_notes ADD COLUMN {col} {ddl}")
+                    )
+            conn.commit()
 
     def save(self, note: FanNote):
         """Upsert a FanNote (fan_id + creator_id as composite key)."""
         row = _note_to_row(note)
-        stmt = sqlite_insert(FAN_NOTES_TABLE).values(**row)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["fan_id", "creator_id"],
-            set_={
-                "display_name": stmt.excluded.display_name,
-                "preferences": stmt.excluded.preferences,
-                "occupation": stmt.excluded.occupation,
-                "total_spent": stmt.excluded.total_spent,
-                "purchase_count": stmt.excluded.purchase_count,
-                "last_purchase_at": stmt.excluded.last_purchase_at,
-                "emotional_triggers": stmt.excluded.emotional_triggers,
-                "hard_limits": stmt.excluded.hard_limits,
-                "notes": stmt.excluded.notes,
-                "first_contact_at": stmt.excluded.first_contact_at,
-                "relationship_stage": stmt.excluded.relationship_stage,
-            },
-        )
+        set_dict = {
+            "display_name": "display_name",
+            "preferences": "preferences",
+            "occupation": "occupation",
+            "total_spent": "total_spent",
+            "purchase_count": "purchase_count",
+            "last_purchase_at": "last_purchase_at",
+            "emotional_triggers": "emotional_triggers",
+            "hard_limits": "hard_limits",
+            "facts": "facts",
+            "notes": "notes",
+            "first_contact_at": "first_contact_at",
+            "relationship_stage": "relationship_stage",
+        }
+        if self.engine.dialect.name == "postgresql":
+            stmt = pg_insert(FAN_NOTES_TABLE).values(**row)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["fan_id", "creator_id"],
+                set_={k: getattr(stmt.excluded, k) for k in set_dict},
+            )
+        else:
+            stmt = sqlite_insert(FAN_NOTES_TABLE).values(**row)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["fan_id", "creator_id"],
+                set_={k: getattr(stmt.excluded, k) for k in set_dict},
+            )
         with self.engine.connect() as conn:
             conn.execute(stmt)
             conn.commit()

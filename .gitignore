@@ -1,3 +1,17 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Local databases - never commit fan data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+*.db
+
+# Environment secrets
+.env
+.env.local
+
+# OS/editor
+.DS_Store
+.vscode/

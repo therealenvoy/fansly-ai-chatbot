@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from src.funnel.state_machine import FunnelStateMachine
+from src.funnel.spiral import SpiralStateMachine
 
 
 class FanSession:
@@ -11,7 +11,7 @@ class FanSession:
     def __init__(self, fan_id: str, creator_id: str) -> None:
         self.fan_id = fan_id
         self.creator_id = creator_id
-        self.funnel = FunnelStateMachine()
+        self.funnel = SpiralStateMachine()
         self.messages: list[dict] = []
         self.last_activity: datetime | None = None
 
@@ -28,4 +28,4 @@ class FanSession:
             "timestamp": datetime.now(timezone.utc),
         })
         self.last_activity = datetime.now(timezone.utc)
-        self.funnel.messages_in_stage += 1
+        self.funnel.messages_in_phase += 1

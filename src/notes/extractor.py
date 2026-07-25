@@ -40,7 +40,7 @@ class NoteExtractor:
             note.occupation = extracted["occupation"]
 
         # Append unique values to list fields
-        for field_name in ["preferences", "emotional_triggers", "hard_limits"]:
+        for field_name in ["preferences", "emotional_triggers", "hard_limits", "facts"]:
             new_items = extracted.get(field_name, [])
             if new_items:
                 existing = list(getattr(note, field_name, []))

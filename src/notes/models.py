@@ -18,6 +18,7 @@ class FanNote(BaseModel):
     last_purchase_at: Optional[datetime] = None
     emotional_triggers: list[str] = Field(default_factory=list)
     hard_limits: list[str] = Field(default_factory=list)
+    facts: list[str] = Field(default_factory=list)
     notes: str = Field(default="")
     first_contact_at: Optional[datetime] = None
     relationship_stage: str = Field(default="new")
