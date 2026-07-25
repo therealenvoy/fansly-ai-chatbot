@@ -312,26 +312,34 @@ class TestExponentialBackoff:
         )
         assert iterations >= 5, f"Expected ≥5 poll iterations, got {iterations}"
 
-    def test_fatal_auth_error_in_loop_exits(self, module, caplog, mock_deps):
-        """AuthError in the loop stops polling immediately (no backoff) — logged
-        CRITICAL, but the process doesn't sys.exit (dashboard keeps running,
-        same non-fatal philosophy as the startup check)."""
+    @pytest.mark.parametrize(
+        "api_error",
+        [
+            AuthError("Token expired"),
+            PaymentRequiredError("Insufficient credits"),
+        ],
+    )
+    def test_api_access_error_disables_bot_but_keeps_dashboard_alive(
+        self, module, caplog, mock_deps, api_error
+    ):
+        """API access failures stop polling without terminating the web process."""
         os.environ["POLL_INTERVAL"] = "2"
         os.environ["MAX_BACKOFF"] = "8"
 
         bot, iter_idx = _make_controlled_bot(
-            poll_side_effects=[None, AuthError("Token expired")],
+            poll_side_effects=[None, api_error, None],
             module_ref=lambda: module,
         )
         mock_deps["bot_cls"].return_value = bot
 
         importlib.reload(module)
 
-        assert iter_idx[0] >= 1, "Expected at least 1 poll iteration"
+        assert iter_idx[0] >= 4, "The main process exited instead of keeping the dashboard alive"
+        assert bot.enabled is False
         assert any(
-            "Fatal API error" in r.message and r.levelname == "CRITICAL"
+            "Bot disabled" in r.message and "dashboard remains available" in r.message
             for r in caplog.records
-        ), "Expected CRITICAL log about the fatal API error"
+        ), "Expected a non-fatal API access warning"
 
 
 class TestIdleAdaptiveBackoff:

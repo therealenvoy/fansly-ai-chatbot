@@ -14,6 +14,7 @@ def get_fansly_client(env: dict) -> FanslyApiClient:
     api_key = env.get("FANSLY_API_KEY", "")
 
     if provider == "apifansly":
+        api_key = api_key or env.get("APIFANSLY_API_KEY", "")
         account_id = env.get("FANSLY_ACCOUNT_ID", "")
         if not account_id:
             raise ValueError("FANSLY_ACCOUNT_ID is required for FANSLY_PROVIDER=apifansly")

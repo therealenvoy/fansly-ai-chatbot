@@ -179,9 +179,13 @@ while running:
         had_activity = bot.poll_and_process()
         consecutive_failures = 0  # reset on success
     except (AuthError, PaymentRequiredError) as e:
-        logger.critical(f"Fatal API error: {e}. Shutting down.")
-        running = False
-        break
+        bot.enabled = False
+        settings_store.set("bot_enabled", "false")
+        consecutive_failures = 0
+        logger.warning(
+            f"API access unavailable: {e}. "
+            "Bot disabled; dashboard remains available."
+        )
     except Exception as e:
         consecutive_failures += 1
         logger.error(f"Error in main loop ({consecutive_failures} consecutive): {e}", exc_info=True)

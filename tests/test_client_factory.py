@@ -19,6 +19,13 @@ def test_returns_apifansly_when_explicitly_set():
     assert client.config.account_id == "a"
 
 
+def test_apifansly_accepts_legacy_api_key_environment_name():
+    env = {"APIFANSLY_API_KEY": "legacy-k", "FANSLY_ACCOUNT_ID": "a"}
+    client = get_fansly_client(env)
+    assert isinstance(client, ApifanslyClient)
+    assert client.config.api_key == "legacy-k"
+
+
 def test_returns_fanslyapi_when_set():
     env = {"FANSLY_PROVIDER": "fanslyapi", "FANSLY_API_KEY": "sk_test"}
     client = get_fansly_client(env)
