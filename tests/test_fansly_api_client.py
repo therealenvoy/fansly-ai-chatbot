@@ -116,6 +116,15 @@ class TestFanslyApiClientImplIsAFanslyApiClient:
 
 
 class TestAccountIdResolution:
+    def test_empty_api_key_fails_locally_without_sending_invalid_header(self):
+        client = FanslyApiClientImpl(api_key="  ")
+        client.client.request = MagicMock()
+
+        assert "authorization" not in client.client.headers
+        with pytest.raises(AuthError, match="not configured"):
+            client.verify_auth()
+        client.client.request.assert_not_called()
+
     def test_verify_auth_resolves_and_caches_account_id(self):
         client = FanslyApiClientImpl(api_key="sk_test")
         client.client.request = MagicMock(return_value=_resp(LIST_ACCOUNTS_BODY))

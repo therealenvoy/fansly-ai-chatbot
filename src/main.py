@@ -73,44 +73,44 @@ else:
 settings_store = SettingsStore(db_url=DB_URL)
 settings_store.create_table()
 
-bot = FanslyBot(
-    client=client,
-    persona_loader=persona_loader,
-    note_repo=note_repo,
-    creator_id=CREATOR_ID,
-    message_store=message_store,
-    fact_extractor=fact_extractor,
-)
-
-# Initialize PPV sequence system
-bot.sequence_repo.create_tables()
-
-# Initialize bot enabled state from persistent settings
-bot_enabled_str = settings_store.get("bot_enabled", "true")
-bot.enabled = bot_enabled_str.lower() == "true"
-logger.info(f"Bot enabled state from DB: {bot.enabled}")
-
 # ─── Startup Auth Validation ───────────────────────────
 
-try:
-    client.verify_auth()
-    logger.info("API authentication verified")
-    api_ok = True
-except AuthError as e:
-    logger.warning(f"API AUTH FAILED: {e}. Dashboard will still work, bot will not poll.")
-    api_ok = False
-except PaymentRequiredError as e:
-    logger.warning(f"API PAYMENT REQUIRED: {e}. Bot will not poll until credits added.")
-    api_ok = False
-except Exception as e:
-    logger.warning(f"API check failed: {e}. Bot will not poll.")
-    api_ok = False
+api_ok = False
+if API_KEY:
+    try:
+        client.verify_auth()
+        logger.info("API authentication verified")
+        api_ok = True
+    except AuthError as e:
+        logger.warning(f"API AUTH FAILED: {e}. Dashboard will still work, bot will not poll.")
+    except PaymentRequiredError as e:
+        logger.warning(f"API PAYMENT REQUIRED: {e}. Bot will not poll until credits added.")
+    except Exception as e:
+        logger.warning(f"API check failed: {e}. Bot will not poll.")
 
-# If API is down, disable bot by default
-if not api_ok:
-    bot.enabled = False
+bot = None
+if api_ok:
+    try:
+        bot = FanslyBot(
+            client=client,
+            persona_loader=persona_loader,
+            note_repo=note_repo,
+            creator_id=CREATOR_ID,
+            message_store=message_store,
+            fact_extractor=fact_extractor,
+        )
+        bot.sequence_repo.create_tables()
+        bot_enabled_str = settings_store.get("bot_enabled", "true")
+        bot.enabled = bot_enabled_str.lower() == "true"
+        logger.info(f"Bot enabled state from DB: {bot.enabled}")
+    except Exception as e:
+        logger.warning(f"Bot initialization failed: {e}. Dashboard will still work.", exc_info=True)
+        api_ok = False
+        bot = None
+
+if bot is None:
     settings_store.set("bot_enabled", "false")
-    logger.info("Bot auto-disabled due to API unavailability — toggle on from dashboard when ready")
+    logger.info("Bot unavailable; starting dashboard-only mode")
 
 # ─── Credit Awareness ──────────────────────────────────
 
@@ -165,8 +165,11 @@ server_thread.start()
 
 # ─── Poll Loop with Backoff ────────────────────────────
 
-logger.info(f"Starting Fansly Bot for creator '{CREATOR_ID}'")
-logger.info(f"Account: (resolved via OnlyFansAPI), Poll interval: {POLL_INTERVAL}s")
+if bot is None:
+    logger.info("Dashboard-only mode active; Fansly polling is disabled")
+else:
+    logger.info(f"Starting Fansly Bot for creator '{CREATOR_ID}'")
+    logger.info(f"Account: (resolved via OnlyFansAPI), Poll interval: {POLL_INTERVAL}s")
 logger.info(f"Max failure backoff: {MAX_BACKOFF}s, max idle backoff: {IDLE_BACKOFF_MAX}s")
 
 consecutive_failures = 0
@@ -175,7 +178,7 @@ consecutive_idle_cycles = 0
 while running:
     had_activity = False
     try:
-        had_activity = bot.poll_and_process()
+        had_activity = bot.poll_and_process() if bot is not None else False
         consecutive_failures = 0  # reset on success
     except (AuthError, PaymentRequiredError) as e:
         bot.enabled = False

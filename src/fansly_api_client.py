@@ -33,14 +33,15 @@ class FanslyApiClientImpl(FanslyApiClient):
     """HTTP client for OnlyFansAPI's Fansly product."""
 
     def __init__(self, api_key: str, timeout: float = 30.0):
-        self.api_key = api_key
+        self.api_key = api_key.strip()
         self.timeout = timeout
         self._account_id: Optional[str] = None
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         self.client = httpx.Client(
             base_url=BASE_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-            },
+            headers=headers,
             timeout=timeout,
         )
 
@@ -51,6 +52,8 @@ class FanslyApiClientImpl(FanslyApiClient):
         return self._account_id
 
     def _resolve_account_id(self):
+        if not self.api_key:
+            raise AuthError("FANSLY_API_KEY is not configured")
         data = self._request("GET", "/api/fansly/accounts")
         accounts = data if isinstance(data, list) else []
         if not accounts:

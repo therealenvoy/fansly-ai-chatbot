@@ -70,7 +70,12 @@ def _make_note_repo():
 @pytest.fixture(autouse=True)
 def fast_time():
     """Make time.sleep a no-op so tests don't block."""
-    with patch("time.sleep"):
+    def _sleep(_seconds):
+        mod = sys.modules.get("src.main")
+        if mod is not None and getattr(mod, "bot", object()) is None:
+            mod.running = False
+
+    with patch("time.sleep", side_effect=_sleep):
         yield
 
 
@@ -221,7 +226,7 @@ class TestStartupAuthValidation:
             "API AUTH FAILED" in r.message and r.levelname == "WARNING"
             for r in caplog.records
         ), "Expected WARNING log about API AUTH FAILED"
-        assert mock_deps["bot"].enabled is False
+        assert module.bot is None
 
     def test_auth_check_warns_and_disables_bot_on_402(self, module, caplog, mock_deps):
         """PaymentRequiredError logs a warning and disables the bot — no sys.exit."""
@@ -233,7 +238,7 @@ class TestStartupAuthValidation:
             "API PAYMENT REQUIRED" in r.message and r.levelname == "WARNING"
             for r in caplog.records
         ), "Expected WARNING log about API PAYMENT REQUIRED"
-        assert mock_deps["bot"].enabled is False
+        assert module.bot is None
 
     def test_auth_check_catches_other_errors_too(self, module, caplog, mock_deps):
         """Any other exception (e.g. NotFoundError) is also caught non-fatally —
@@ -246,7 +251,7 @@ class TestStartupAuthValidation:
             "API check failed" in r.message and r.levelname == "WARNING"
             for r in caplog.records
         ), "Expected WARNING log about API check failed"
-        assert mock_deps["bot"].enabled is False
+        assert module.bot is None
 
     def test_auth_check_failure_still_starts_poll_loop(self, module, caplog, mock_deps):
         """On auth failure, the dashboard/poll loop still starts (non-fatal) —
@@ -256,9 +261,26 @@ class TestStartupAuthValidation:
         importlib.reload(module)
 
         assert any(
-            "Starting Fansly Bot" in r.message
+            "Dashboard-only mode active" in r.message
             for r in caplog.records
-        ), "Bot loop should still start when auth fails — only polling is disabled"
+        ), "Dashboard-only mode should start when authentication fails"
+
+    def test_missing_api_key_starts_dashboard_without_constructing_bot(
+        self, module, caplog, mock_deps
+    ):
+        os.environ.pop("FANSLY_API_KEY", None)
+        mock_deps["client"].verify_auth.reset_mock()
+        mock_deps["bot_cls"].reset_mock()
+
+        importlib.reload(module)
+
+        mock_deps["client"].verify_auth.assert_not_called()
+        mock_deps["bot_cls"].assert_not_called()
+        assert module.bot is None
+        assert any(
+            "Dashboard-only mode active" in r.message
+            for r in caplog.records
+        )
 
 
 # ═══════════════════════════════════════════════════════════════
