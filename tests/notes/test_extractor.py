@@ -20,7 +20,7 @@ def make_mock_llm(return_value: dict):
 class TestNoteExtractor:
     """NoteExtractor: extract and merge methods."""
 
-    @pytest.mark.asyncio
+    @pytest.mark.anyio
     async def test_extract_returns_dict(self):
         """extract should return a dict with extracted fields."""
         mock = make_mock_llm({

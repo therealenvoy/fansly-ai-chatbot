@@ -1,6 +1,5 @@
 """Tests for SettingsStore — key-value persistence."""
 import pytest
-import os
 from src.settings.store import SettingsStore, BOT_SETTINGS_TABLE
 
 
@@ -41,17 +40,14 @@ def test_get_nonexistent_returns_default(store):
     assert store.get("nah", 42) == 42
 
 
-def test_persists_across_instances():
+def test_persists_across_instances(tmp_path):
     """Values should survive store re-initialization."""
-    db_path = "/tmp/test_settings_persist.db"
-    try:
-        s1 = SettingsStore(f"sqlite:///{db_path}")
-        s1.create_table()
-        s1.set("bot_enabled", "false")
+    db_path = tmp_path / "test_settings_persist.db"
 
-        s2 = SettingsStore(f"sqlite:///{db_path}")
-        s2.create_table()
-        assert s2.get("bot_enabled") == "false"
-    finally:
-        if os.path.exists(db_path):
-            os.remove(db_path)
+    s1 = SettingsStore(f"sqlite:///{db_path}")
+    s1.create_table()
+    s1.set("bot_enabled", "false")
+
+    s2 = SettingsStore(f"sqlite:///{db_path}")
+    s2.create_table()
+    assert s2.get("bot_enabled") == "false"
