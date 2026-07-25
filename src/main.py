@@ -96,12 +96,22 @@ try:
     # Minimal API call to verify credentials before entering poll loop
     client._request("GET", f"/{ACCOUNT_ID}/chats", params={"limit": 1})
     logger.info("API authentication verified")
+    api_ok = True
 except AuthError as e:
-    logger.critical(f"API AUTH FAILED: {e}. Check your FANSLY_API_KEY and FANSLY_ACCOUNT_ID.")
-    sys.exit(1)
+    logger.warning(f"API AUTH FAILED: {e}. Dashboard will still work, bot will not poll.")
+    api_ok = False
 except PaymentRequiredError as e:
-    logger.critical(f"API PAYMENT REQUIRED: {e}. Update your billing at apifansly.com.")
-    sys.exit(1)
+    logger.warning(f"API PAYMENT REQUIRED: {e}. Bot will not poll until credits added.")
+    api_ok = False
+except Exception as e:
+    logger.warning(f"API check failed: {e}. Bot will not poll.")
+    api_ok = False
+
+# If API is down, disable bot by default
+if not api_ok:
+    bot.enabled = False
+    settings_store.set("bot_enabled", "false")
+    logger.info("Bot auto-disabled due to API unavailability — toggle on from dashboard when ready")
 
 # ─── Credit Awareness ──────────────────────────────────
 
