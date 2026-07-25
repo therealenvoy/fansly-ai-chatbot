@@ -13,12 +13,13 @@ class FanSession:
         self.creator_id = creator_id
         self.funnel = SpiralStateMachine()
         self.messages: list[dict] = []
+        self.persisted_message_count: int = 0
         self.last_activity: datetime | None = None
 
     @property
     def message_count(self) -> int:
         """Total number of messages exchanged in this session."""
-        return len(self.messages)
+        return self.persisted_message_count + len(self.messages)
 
     def add_message(self, sender: str, content: str) -> None:
         """Append a message and bump last_activity + funnel counter."""

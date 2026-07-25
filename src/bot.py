@@ -8,7 +8,7 @@ aftercare, and tier systems before a response is generated.
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from .fansly_client import FanslyApiClient, ChatInfo, MessageInfo
 from .persona.loader import PersonaLoader
@@ -39,6 +39,9 @@ from .sequences.models import StepStatus
 from .humanize.filter import HumanizerFilter
 from .humanize.variation import VariationPool
 
+if TYPE_CHECKING:
+    from .persistence.state import ConversationStateRepository
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,6 +56,7 @@ class FanslyBot:
         creator_id: str = "sunny_charm",
         message_store: Optional[MessageStore] = None,
         fact_extractor: Optional[LLMFactExtractor] = None,
+        state_repo: Optional["ConversationStateRepository"] = None,
     ):
         self.client = client
         self.creator_id = creator_id
@@ -67,11 +71,13 @@ class FanslyBot:
         self.note_repo = note_repo
 
         # PPV Sequence System
-        self.sequence_repo = SequenceRepository(db_url=self.note_repo.engine.url.render_as_string(hide_password=False) if hasattr(self.note_repo.engine.url, 'render_as_string') else str(self.note_repo.engine.url))
+        self.sequence_repo = SequenceRepository(engine=self.note_repo.engine)
 
         # Memory: persistent history + LLM fact extraction
         self.message_store = message_store
         self.fact_extractor = fact_extractor
+        self.state_repo = state_repo
+        self._runtime_state_versions: dict[str, int] = {}
         self.note_extractor = NoteExtractor(llm_client=None)  # merge() only
         self._extract_counters: dict[str, int] = {}
 
@@ -137,6 +143,8 @@ class FanslyBot:
                 self._process_chat(chat)
             except Exception as e:
                 logger.error(f"Error processing chat {chat.chat_id}: {e}")
+            finally:
+                self._persist_runtime_state(chat.partner_account_id)
 
         return len(unread_chats) > 0
 
@@ -156,11 +164,34 @@ class FanslyBot:
         """Process one chat: read messages, decide action, reply."""
         fan_id = chat.partner_account_id
 
+        if self.state_repo:
+            self.state_repo.ensure_conversation(
+                self.creator_id,
+                fan_id,
+                chat.chat_id,
+                display_name=chat.partner_display_name,
+            )
+
         # Get or create fan session
         if fan_id not in self.sessions:
-            self.sessions[fan_id] = FanSession(
-                fan_id=fan_id, creator_id=self.creator_id
-            )
+            if self.state_repo:
+                session, durable_state = self.state_repo.load_session(
+                    self.creator_id,
+                    fan_id,
+                )
+                self.sessions[fan_id] = session
+                self._runtime_state_versions[fan_id] = durable_state.version
+                self._extract_counters[fan_id] = durable_state.extract_counter
+                self._purchase_count_cache[fan_id] = (
+                    durable_state.purchase_count_seen
+                )
+                self.rhythm_engines[fan_id] = self.state_repo.restore_rhythm(
+                    durable_state
+                )
+            else:
+                self.sessions[fan_id] = FanSession(
+                    fan_id=fan_id, creator_id=self.creator_id
+                )
 
         # Get fan notes
         note = self.note_repo.get(fan_id, self.creator_id)
@@ -193,7 +224,7 @@ class FanslyBot:
         if self._has_processed(fan_id, latest.message_id):
             logger.debug(f"Skipping already-processed message {latest.message_id} for {fan_id}")
             return
-        self._mark_processed(fan_id, latest.message_id)
+        self._mark_processed(fan_id, latest.message_id, chat.chat_id)
 
         session = self.sessions[fan_id]
         session.add_message("subscriber", latest.content)
@@ -592,10 +623,28 @@ class FanslyBot:
 
     def _has_processed(self, fan_id: str, message_id: str) -> bool:
         """Check if a message has already been processed."""
+        if self.state_repo:
+            return self.state_repo.has_processed(
+                self.creator_id,
+                message_id,
+            )
         return fan_id in self._processed_message_ids and message_id in self._processed_message_ids[fan_id]
 
-    def _mark_processed(self, fan_id: str, message_id: str):
+    def _mark_processed(
+        self,
+        fan_id: str,
+        message_id: str,
+        chat_id: str | None = None,
+    ):
         """Mark a message as processed. LRU eviction at max_dedup_entries."""
+        if self.state_repo:
+            self.state_repo.mark_processed(
+                self.creator_id,
+                message_id,
+                fan_id,
+                chat_id,
+            )
+            return
         if fan_id not in self._processed_message_ids:
             self._processed_message_ids[fan_id] = set()
         self._processed_message_ids[fan_id].add(message_id)
@@ -605,3 +654,26 @@ class FanslyBot:
             # Remove the fan with the most entries
             worst = max(self._processed_message_ids, key=lambda fid: len(self._processed_message_ids[fid]))
             self._processed_message_ids[worst].clear()
+
+    def _persist_runtime_state(self, fan_id: str):
+        if not self.state_repo:
+            return
+        session = self.sessions.get(fan_id)
+        if session is None:
+            return
+        try:
+            rhythm = self.rhythm_engines.get(fan_id)
+            state = self.state_repo.capture_session(
+                session,
+                extract_counter=self._extract_counters.get(fan_id, 0),
+                purchase_count_seen=self._purchase_count_cache.get(fan_id, 0),
+                rhythm=rhythm,
+                version=self._runtime_state_versions.get(fan_id, 1),
+            )
+            saved = self.state_repo.save_state(state)
+            self._runtime_state_versions[fan_id] = saved.version
+        except Exception as e:
+            logger.error(
+                f"Failed to persist runtime state for {fan_id}: {e}",
+                exc_info=True,
+            )

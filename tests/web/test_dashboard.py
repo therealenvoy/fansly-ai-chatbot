@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.settings.store import SettingsStore
+from src.persistence.database import create_database_engine
 from src.web.dashboard import DASHBOARD_HTML, MAX_BODY_BYTES, DashboardServer
 
 
@@ -92,9 +93,10 @@ def _make_bot(db_url):
     bot.creator_id = "test_creator"
     bot.account_id = "account-123"
     bot.client.list_chats.return_value = []
-    # note_repo.engine.url as a plain string takes the `str(...)` fallback
-    # branch in dashboard.py's _bot_toggle (no render_as_string attribute).
-    bot.note_repo.engine.url = db_url
+    bot.note_repo.engine = create_database_engine(
+        db_url,
+        environment={"APP_ENV": "test"},
+    )
 
     def _toggle(force=None):
         bot.enabled = bool(force) if force is not None else not bot.enabled
@@ -273,19 +275,18 @@ class TestDashboardSecurity:
 
     def test_oversized_body_is_rejected(self, running_server):
         host, _, _ = running_server
-        headers = {
-            "Authorization": _authorization(),
-            "X-CSRF-Token": TEST_CSRF_TOKEN,
-            "Origin": f"http://{host}",
-            "Content-Type": "text/markdown",
-        }
-        status, body, _ = _request(
-            host,
-            "POST",
-            "/api/brand-bible",
-            body="x" * (MAX_BODY_BYTES + 1),
-            headers=headers,
-        )
+        conn = HTTPConnection(host, timeout=5)
+        conn.putrequest("POST", "/api/brand-bible")
+        conn.putheader("Authorization", _authorization())
+        conn.putheader("X-CSRF-Token", TEST_CSRF_TOKEN)
+        conn.putheader("Origin", f"http://{host}")
+        conn.putheader("Content-Type", "text/markdown")
+        conn.putheader("Content-Length", str(MAX_BODY_BYTES + 1))
+        conn.endheaders()
+        response = conn.getresponse()
+        status = response.status
+        body = json.loads(response.read())
+        conn.close()
 
         assert status == 413
         assert body == {"error": "request body too large"}
@@ -324,7 +325,10 @@ class TestBotToggleEndpoint:
         assert status == 200
         assert body == {"enabled": False}
         assert bot.enabled is False
-        assert SettingsStore(db_url=url).get("bot_enabled") == "false"
+        assert SettingsStore(
+            db_url=url,
+            creator_id=bot.creator_id,
+        ).get("bot_enabled") == "false"
 
     def test_toggle_on_flips_bot_and_persists(self, running_server):
         host, bot, url = running_server
@@ -335,7 +339,10 @@ class TestBotToggleEndpoint:
         assert status == 200
         assert body == {"enabled": True}
         assert bot.enabled is True
-        assert SettingsStore(db_url=url).get("bot_enabled") == "true"
+        assert SettingsStore(
+            db_url=url,
+            creator_id=bot.creator_id,
+        ).get("bot_enabled") == "true"
 
     def test_toggle_with_no_body_flips_current_state(self, running_server):
         host, bot, _ = running_server
@@ -355,7 +362,10 @@ class TestBotToggleEndpoint:
 
         _post(host, "/api/bot/toggle", {"enabled": False})
 
-        fresh_store = SettingsStore(db_url=url)
+        fresh_store = SettingsStore(
+            db_url=url,
+            creator_id=bot.creator_id,
+        )
         assert fresh_store.get("bot_enabled", "true").lower() == "false"
 
     def test_toggle_without_bot_returns_503(self, db_url):

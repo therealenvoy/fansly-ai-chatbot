@@ -28,6 +28,9 @@ from .memory.llm import LLMFactExtractor
 from .bot import FanslyBot
 from .web.dashboard import DashboardServer
 from .settings.store import SettingsStore
+from .persistence.database import create_database_engine
+from .persistence.migrations import upgrade_database
+from .persistence.state import ConversationStateRepository
 
 load_dotenv()
 
@@ -55,13 +58,15 @@ if not API_KEY:
 
 # ─── Initialize ────────────────────────────────────────
 
+database_engine = create_database_engine(DB_URL)
+upgrade_database(DB_URL, engine=database_engine)
 client = get_fansly_client(os.environ)
 persona_loader = PersonaLoader(config_dir="config/creators")
-note_repo = FanNoteRepository(db_url=DB_URL)
+note_repo = FanNoteRepository(engine=database_engine)
 note_repo.create_table()
 
 # Long-term memory: persistent message history + LLM fact extraction
-message_store = MessageStore(db_url=DB_URL)
+message_store = MessageStore(engine=database_engine)
 message_store.create_table()
 fact_extractor = LLMFactExtractor(api_key=os.getenv("DEEPSEEK_API_KEY", ""))
 if fact_extractor.enabled:
@@ -70,8 +75,13 @@ else:
     logger.warning("DEEPSEEK_API_KEY not set — fact extraction disabled")
 
 # Persistent bot settings (on/off toggle, etc.)
-settings_store = SettingsStore(db_url=DB_URL)
+settings_store = SettingsStore(
+    engine=database_engine,
+    creator_id=CREATOR_ID,
+)
 settings_store.create_table()
+state_repo = ConversationStateRepository(database_engine)
+state_repo.ensure_creator(CREATOR_ID)
 
 # ─── Startup Auth Validation ───────────────────────────
 
@@ -98,6 +108,7 @@ if api_ok:
             creator_id=CREATOR_ID,
             message_store=message_store,
             fact_extractor=fact_extractor,
+            state_repo=state_repo,
         )
         bot.sequence_repo.create_tables()
         bot_enabled_str = settings_store.get("bot_enabled", "true")

@@ -1,58 +1,95 @@
-"""SettingsStore — key-value persistence for bot settings.
+"""Creator-scoped settings persisted through the shared database engine."""
 
-Uses SQLAlchemy Core with a simple key-value table.
-Values are stored as text; callers handle type conversion.
-"""
-from sqlalchemy import create_engine, MetaData, Table, Column, String, Text, select
+from __future__ import annotations
+
+from sqlalchemy import and_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+from src.persistence.database import create_database_engine
+from src.persistence.schema import CREATORS, CREATOR_SETTINGS, metadata, utcnow
 
 
-BOT_SETTINGS_TABLE = Table(
-    "bot_settings",
-    MetaData(),
-    Column("key", String, primary_key=True),
-    Column("value", Text, nullable=True),
-)
+BOT_SETTINGS_TABLE = CREATOR_SETTINGS
 
 
 class SettingsStore:
-    """Simple key-value store for bot settings, persisted to SQLite/Postgres."""
+    """Creator-scoped key-value settings store.
 
-    def __init__(self, db_url: str):
-        self.engine = create_engine(db_url)
+    ``global`` remains the default creator for backwards-compatible local
+    callers, while the application always supplies its real creator id.
+    """
+
+    def __init__(
+        self,
+        db_url: str | None = None,
+        *,
+        engine=None,
+        creator_id: str = "global",
+    ):
+        if engine is None and db_url is None:
+            raise ValueError("db_url or engine is required")
+        self.engine = engine or create_database_engine(db_url)
+        self.creator_id = creator_id
 
     def create_table(self):
-        """Create the bot_settings table if it doesn't exist."""
-        BOT_SETTINGS_TABLE.create(self.engine, checkfirst=True)
+        metadata.create_all(
+            self.engine,
+            tables=[CREATORS, CREATOR_SETTINGS],
+            checkfirst=True,
+        )
 
     def get(self, key: str, default=None):
-        """Get a value by key. Returns default if key doesn't exist."""
-        with self.engine.connect() as conn:
-            result = conn.execute(
-                select(BOT_SETTINGS_TABLE.c.value).where(
-                    BOT_SETTINGS_TABLE.c.key == key
-                )
-            ).scalar_one_or_none()
-        return result if result is not None else default
+        value = self._get_for_creator(self.creator_id, key)
+        if value is None and self.creator_id != "global":
+            value = self._get_for_creator("global", key)
+        return value if value is not None else default
 
     def set(self, key: str, value: str):
-        """Set a value by key. Creates or overwrites."""
-        from sqlalchemy import select as _select
+        self._ensure_creator(self.creator_id)
+        now = utcnow()
+        stmt = self._insert(CREATOR_SETTINGS).values(
+            creator_id=self.creator_id,
+            key=key,
+            value=str(value),
+            updated_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["creator_id", "key"],
+            set_={"value": str(value), "updated_at": now},
+        )
         with self.engine.begin() as conn:
-            # Check if key exists
-            existing = conn.execute(
-                _select(BOT_SETTINGS_TABLE.c.key).where(
-                    BOT_SETTINGS_TABLE.c.key == key
-                )
-            ).scalar_one_or_none()
-            if existing:
-                conn.execute(
-                    BOT_SETTINGS_TABLE.update()
-                    .where(BOT_SETTINGS_TABLE.c.key == key)
-                    .values(value=str(value))
-                )
-            else:
-                conn.execute(
-                    BOT_SETTINGS_TABLE.insert().values(
-                        key=key, value=str(value)
-                    )
-                )
+            conn.execute(stmt)
+
+    def _get_for_creator(self, creator_id: str, key: str):
+        stmt = select(CREATOR_SETTINGS.c.value).where(
+            and_(
+                CREATOR_SETTINGS.c.creator_id == creator_id,
+                CREATOR_SETTINGS.c.key == key,
+            )
+        )
+        with self.engine.connect() as conn:
+            return conn.execute(stmt).scalar_one_or_none()
+
+    def _ensure_creator(self, creator_id: str):
+        now = utcnow()
+        stmt = self._insert(CREATORS).values(
+            id=creator_id,
+            created_at=now,
+            updated_at=now,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["id"],
+            set_={"updated_at": now},
+        )
+        with self.engine.begin() as conn:
+            conn.execute(stmt)
+
+    def _insert(self, table):
+        if self.engine.dialect.name == "postgresql":
+            return pg_insert(table)
+        if self.engine.dialect.name == "sqlite":
+            return sqlite_insert(table)
+        raise RuntimeError(
+            f"Unsupported database dialect: {self.engine.dialect.name}"
+        )

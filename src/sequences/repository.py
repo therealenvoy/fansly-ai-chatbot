@@ -9,11 +9,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
-    create_engine, MetaData, Table, Column, String, Float, Integer,
+    MetaData, Table, Column, String, Float, Integer,
     DateTime, Text, Boolean, UniqueConstraint, desc
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from src.persistence.database import create_database_engine
 
 from .models import (
     Sequence, SequenceStep, FanSequenceProgress,
@@ -115,8 +116,10 @@ def _progress_row_to_progress(row) -> FanSequenceProgress:
 class SequenceRepository:
     """SQLite/Postgres repository for PPV sequences, steps, and fan progress."""
 
-    def __init__(self, db_url: str):
-        self.engine = create_engine(db_url)
+    def __init__(self, db_url: str | None = None, *, engine=None):
+        if engine is None and db_url is None:
+            raise ValueError("db_url or engine is required")
+        self.engine = engine or create_database_engine(db_url)
 
     def create_tables(self):
         """Create all sequence tables if they don't exist."""

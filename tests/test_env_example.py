@@ -66,6 +66,16 @@ class TestEnvExampleContent:
             # "your_api_key_here" is OK as placeholder
             pass
 
+    def test_production_database_example_is_postgresql(self):
+        with open(ENV_PATH) as f:
+            content = f.read()
+
+        database_line = next(
+            line for line in content.splitlines()
+            if line.startswith("DATABASE_URL=")
+        )
+        assert database_line.startswith("DATABASE_URL=postgresql://")
+
     def test_env_file_structure(self):
         """.env.example should have standard env file structure (comments + key=value)."""
         with open(ENV_PATH) as f:

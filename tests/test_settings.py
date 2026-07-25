@@ -51,3 +51,16 @@ def test_persists_across_instances(tmp_path):
     s2 = SettingsStore(f"sqlite:///{db_path}")
     s2.create_table()
     assert s2.get("bot_enabled") == "false"
+
+
+def test_settings_are_scoped_per_creator(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'creator_settings.db'}"
+    first = SettingsStore(db_url, creator_id="creator-a")
+    second = SettingsStore(db_url, creator_id="creator-b")
+    first.create_table()
+
+    first.set("bot_enabled", "true")
+    second.set("bot_enabled", "false")
+
+    assert first.get("bot_enabled") == "true"
+    assert second.get("bot_enabled") == "false"

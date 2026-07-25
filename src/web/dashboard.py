@@ -1090,9 +1090,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # Persist to DB
             from ..settings.store import SettingsStore
             store = SettingsStore(
-                db_url=self.bot.note_repo.engine.url.render_as_string(hide_password=False)
-                if hasattr(self.bot.note_repo.engine.url, 'render_as_string')
-                else str(self.bot.note_repo.engine.url)
+                engine=self.bot.note_repo.engine,
+                creator_id=self.bot.creator_id,
             )
             store.create_table()
             store.set("bot_enabled", str(new_state).lower())

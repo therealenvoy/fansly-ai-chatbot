@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
-    create_engine, MetaData, Table, Column, String, Integer, DateTime, Text, select, desc
+    MetaData, Table, Column, String, Integer, DateTime, Text, select, desc
 )
+from src.persistence.database import create_database_engine
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,12 @@ MESSAGES_TABLE = Table(
 
 
 class MessageStore:
-    """SQLite-backed store for all fan conversation messages."""
+    """SQLAlchemy-backed store for all fan conversation messages."""
 
-    def __init__(self, db_url: str):
-        self.engine = create_engine(db_url)
+    def __init__(self, db_url: str | None = None, *, engine=None):
+        if engine is None and db_url is None:
+            raise ValueError("db_url or engine is required")
+        self.engine = engine or create_database_engine(db_url)
 
     def create_table(self):
         MESSAGES_TABLE.create(self.engine, checkfirst=True)

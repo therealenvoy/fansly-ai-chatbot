@@ -1,14 +1,15 @@
-"""FanNoteRepository — SQLAlchemy Core + SQLite storage with upsert support."""
+"""FanNoteRepository — SQLAlchemy Core storage with dialect-aware upserts."""
 
 import json
 from datetime import datetime
 from sqlalchemy import (
-    create_engine, MetaData, Table, Column, String, Float, Integer,
+    MetaData, Table, Column, String, Float, Integer,
     DateTime, Text, text
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.notes.models import FanNote
+from src.persistence.database import create_database_engine
 
 
 FAN_NOTES_TABLE = Table(
@@ -63,10 +64,12 @@ def _row_to_note(row) -> FanNote:
 
 
 class FanNoteRepository:
-    """SQLite-backed repository for FanNote with upsert (fan_id + creator_id composite key)."""
+    """SQLAlchemy repository for FanNote with a shared-engine option."""
 
-    def __init__(self, db_url: str):
-        self.engine = create_engine(db_url)
+    def __init__(self, db_url: str | None = None, *, engine=None):
+        if engine is None and db_url is None:
+            raise ValueError("db_url or engine is required")
+        self.engine = engine or create_database_engine(db_url)
         self.metadata = MetaData()
 
     def create_table(self):
