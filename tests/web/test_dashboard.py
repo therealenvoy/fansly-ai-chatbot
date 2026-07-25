@@ -11,7 +11,27 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.settings.store import SettingsStore
-from src.web.dashboard import DashboardServer, DashboardHandler
+from src.web.dashboard import DASHBOARD_HTML, DashboardServer, DashboardHandler
+
+
+class TestDashboardShell:
+    """Regression checks for the responsive dashboard navigation."""
+
+    def test_all_primary_destinations_are_semantic_buttons(self):
+        for tab in ("funnel", "vault", "fans", "scripts", "kpis", "sequences", "settings"):
+            assert f'class="nav-item' in DASHBOARD_HTML
+            assert f'data-tab="{tab}"' in DASHBOARD_HTML
+        assert '<nav aria-label="Primary">' in DASHBOARD_HTML
+
+    def test_mobile_navigation_is_not_hidden(self):
+        assert "@media(max-width:720px)" in DASHBOARD_HTML
+        assert ".sidebar nav{display:grid" in DASHBOARD_HTML
+        assert "aside{display:none}" not in DASHBOARD_HTML
+
+    def test_bot_status_is_global_and_accessible(self):
+        assert 'id="bot-toggle"' in DASHBOARD_HTML
+        assert 'aria-label="Toggle bot"' in DASHBOARD_HTML
+        assert "button.setAttribute('aria-pressed'" in DASHBOARD_HTML
 
 
 def _get(host, path):
