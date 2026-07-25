@@ -32,6 +32,9 @@ aside{width:220px;min-width:220px;background:var(--panel);border-right:1px solid
 aside .logo{height:48px;display:flex;align-items:center;padding:0 16px;gap:8px;border-bottom:1px solid var(--bsub)}
 aside .logo .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 6px rgba(39,166,68,0.4)}
 aside .logo .dot.off{background:#f87171;box-shadow:0 0 6px rgba(248,113,113,0.4)}
+.toggle-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 10px 3px 6px;border-radius:9999px;cursor:pointer;transition:all .15s;border:1px solid var(--bsub);background:var(--surf);font-size:10px;font-weight:600;letter-spacing:.3px;user-select:none}
+.toggle-pill:hover{background:var(--hover)}
+.toggle-pill #toggle-label{font-size:10px;font-weight:600;letter-spacing:.3px;color:var(--green)}
 aside .logo span{font-size:13px;font-weight:600;letter-spacing:-0.13px}
 aside nav{flex:1;padding:8px}
 aside nav a{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:6px;font-size:13px;font-weight:500;color:var(--tx3);text-decoration:none;cursor:pointer;transition:all .12s;margin-bottom:2px}
@@ -133,7 +136,7 @@ tr.clickable:hover td{background:var(--hover)}
 </head>
 <body>
 <aside>
-<div class="logo"><span class="dot" id="dot"></span><span>Sunny Charm</span></div>
+<div class="logo"><span class="toggle-pill" id="bot-toggle" onclick="toggleBot()"><span class="dot" id="dot"></span><span id="toggle-label">ON</span></span><span>Sunny Charm</span></div>
 <nav>
 <a class="active" data-tab="funnel" onclick="navTo('funnel')"><span class="ico">&#9889;</span>Funnel</a>
 <a data-tab="vault" onclick="navTo('vault')"><span class="ico">&#128193;</span>Vault</a>
@@ -245,6 +248,25 @@ function fanDetail(fanId){
 }
 function closeDrawer(){document.getElementById('drawer').classList.remove('open')}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+async function loadBotStatus(){
+  var r=await fetch('/api/bot/status');
+  var d=await r.json();
+  updateToggleUI(d.enabled);
+}
+function updateToggleUI(enabled){
+  var dot=document.getElementById('dot');
+  var label=document.getElementById('toggle-label');
+  if(!dot||!label)return;
+  dot.className='dot'+(enabled?'':' off');
+  label.textContent=enabled?'ON':'OFF';
+  label.style.color=enabled?'var(--green)':'#f87171';
+}
+async function toggleBot(){
+  var r=await fetch('/api/bot/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  var d=await r.json();
+  updateToggleUI(d.enabled);
+}
 
 function loadVault(){
   var c=document.getElementById('content');
@@ -410,9 +432,10 @@ function deleteSeq(id){
   fetch('/api/sequences/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadSequences()});
 }
 
-setInterval(function(){loadFunnel()},60000);
+loadBotStatus();
+setInterval(function(){loadBotStatus()},15000);
 loadFunnel();
-setInterval(function(){F('/health').then(function(r){var d=document.getElementById('dot');if(r&&r.status==='ok'){d.className='dot'}else{d.className='dot off'}})},30000);
+setInterval(function(){loadFunnel()},60000);
 </script>
 </body>
 </html>"""
