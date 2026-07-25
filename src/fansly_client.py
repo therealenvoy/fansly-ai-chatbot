@@ -8,6 +8,7 @@ Docs: https://docs.apifansly.com
 import os
 import time
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional
 import httpx
@@ -34,6 +35,66 @@ class NotFoundError(FanslyClientError):
 
 class AuthError(FanslyClientError):
     """401/403 — authentication/authorization failed."""
+
+
+# ─── Abstract API Client Interface ───────────────────────────
+
+class FanslyApiClient(ABC):
+    """Abstract interface for a Fansly API provider. Bot code depends only on this."""
+
+    @property
+    @abstractmethod
+    def account_id(self) -> str: ...
+
+    @abstractmethod
+    def verify_auth(self) -> bool:
+        """Verify credentials are valid. Raises AuthError/PaymentRequiredError on failure."""
+        ...
+
+    @abstractmethod
+    def get_all_chats(self, filter_type: str = "all") -> list["ChatInfo"]: ...
+
+    @abstractmethod
+    def list_messages(
+        self, chat_id: str, limit: int = 10, cursor: Optional[str] = None
+    ) -> tuple[list["MessageInfo"], Optional[str]]: ...
+
+    @abstractmethod
+    def send_message(
+        self,
+        chat_id: str,
+        content: str,
+        media_ids: Optional[list[dict]] = None,
+        access_type: Optional[list[str]] = None,
+        price: Optional[float] = None,
+    ) -> "SentMessage": ...
+
+    @abstractmethod
+    def send_ppv(
+        self,
+        chat_id: str,
+        content: str,
+        media_id: str,
+        price: float,
+        preview_id: Optional[str] = None,
+    ) -> "SentMessage": ...
+
+    @abstractmethod
+    def like_message(self, chat_id: str, message_id: str) -> bool: ...
+
+    @abstractmethod
+    def upload_media(self, file_path: str) -> str: ...
+
+    @abstractmethod
+    def list_albums(self) -> list[dict]: ...
+
+    @abstractmethod
+    def get_album_media(
+        self, album_id: str, cursor: Optional[str] = None
+    ) -> tuple[list[dict], Optional[str]]: ...
+
+    @abstractmethod
+    def close(self): ...
 
 
 # ─── Response Parser ───────────────────────────────────────
@@ -122,13 +183,22 @@ class SentMessage:
     success: bool
 
 
-class FanslyClient:
+class ApifanslyClient(FanslyApiClient):
     """HTTP client for apifansly.com API."""
 
     def __init__(self, config: FanslyConfig):
         self.config = config
         self._client: Optional[httpx.Client] = None
         self._last_request_time: float = 0
+
+    @property
+    def account_id(self) -> str:
+        return self.config.account_id
+
+    def verify_auth(self) -> bool:
+        """Minimal API call to confirm credentials are valid before polling starts."""
+        self._request("GET", f"/{self.config.account_id}/chats", params={"limit": 1})
+        return True
 
     @property
     def client(self) -> httpx.Client:

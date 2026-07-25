@@ -7,7 +7,7 @@ import httpx
 from unittest.mock import MagicMock
 
 from src.fansly_client import (
-    FanslyClient, FanslyConfig, ResponseParser,
+    ApifanslyClient as FanslyClient, FanslyConfig, ResponseParser,
     FanslyClientError, PaymentRequiredError, NotFoundError, AuthError,
     ChatInfo, MessageInfo, SentMessage,
 )
@@ -364,3 +364,42 @@ class TestExceptionHierarchy:
 
     def test_fansly_client_error_is_exception(self):
         assert issubclass(FanslyClientError, Exception)
+
+
+# ─── ABC Contract Tests ─────────────────────────────────────
+
+class TestFanslyApiClientABC:
+    """The abstract interface cannot be instantiated; ApifanslyClient implements it fully."""
+
+    def test_abc_cannot_be_instantiated(self):
+        from src.fansly_client import FanslyApiClient
+        with pytest.raises(TypeError):
+            FanslyApiClient()
+
+    def test_apifansly_client_is_a_fansly_api_client(self):
+        from src.fansly_client import ApifanslyClient, FanslyApiClient, FanslyConfig
+        config = FanslyConfig(api_key="k", account_id="a")
+        client = ApifanslyClient(config)
+        assert isinstance(client, FanslyApiClient)
+
+    def test_apifansly_account_id_property(self):
+        from src.fansly_client import ApifanslyClient, FanslyConfig
+        config = FanslyConfig(api_key="k", account_id="acct_789")
+        client = ApifanslyClient(config)
+        assert client.account_id == "acct_789"
+
+    def test_apifansly_verify_auth_success(self):
+        from src.fansly_client import ApifanslyClient, FanslyConfig
+        config = FanslyConfig(api_key="k", account_id="a")
+        client = ApifanslyClient(config)
+        client._request = MagicMock(return_value={"statusCode": 200, "data": {"data": {"response": []}}})
+        assert client.verify_auth() is True
+        client._request.assert_called_once_with("GET", "/a/chats", params={"limit": 1})
+
+    def test_apifansly_verify_auth_raises_on_auth_error(self):
+        from src.fansly_client import ApifanslyClient, FanslyConfig, AuthError
+        config = FanslyConfig(api_key="k", account_id="a")
+        client = ApifanslyClient(config)
+        client._request = MagicMock(side_effect=AuthError("bad key"))
+        with pytest.raises(AuthError):
+            client.verify_auth()

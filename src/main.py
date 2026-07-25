@@ -21,7 +21,8 @@ import threading
 
 from dotenv import load_dotenv
 
-from .fansly_client import FanslyClient, FanslyConfig, AuthError, PaymentRequiredError
+from .fansly_client import AuthError, PaymentRequiredError
+from .client_factory import get_fansly_client
 from .persona.loader import PersonaLoader
 from .notes.repository import FanNoteRepository
 from .memory.store import MessageStore
@@ -43,19 +44,19 @@ logger = logging.getLogger("fansly-bot")
 API_KEY = os.getenv("FANSLY_API_KEY", "") or os.getenv("APIFANSLY_API_KEY", "")
 ACCOUNT_ID = os.getenv("FANSLY_ACCOUNT_ID", "")
 CREATOR_ID = os.getenv("CREATOR_ID", "sunny_charm")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # seconds
-MAX_BACKOFF = int(os.getenv("MAX_BACKOFF", "600"))      # max seconds between polls
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))   # seconds, fast/active interval
+IDLE_BACKOFF_MAX = int(os.getenv("IDLE_BACKOFF_MAX", "600"))  # cap for idle backoff
+MAX_BACKOFF = int(os.getenv("MAX_BACKOFF", "600"))      # max seconds between polls on error
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///data/fansly_bot.db")
 PORT = int(os.getenv("PORT", "8080"))
 
-if not API_KEY or not ACCOUNT_ID:
-    logger.error("Missing FANSLY_API_KEY or FANSLY_ACCOUNT_ID. Set as env vars.")
+if not API_KEY:
+    logger.error("Missing FANSLY_API_KEY. Set as env var.")
     sys.exit(1)
 
 # ─── Initialize ────────────────────────────────────────
 
-config = FanslyConfig(api_key=API_KEY, account_id=ACCOUNT_ID)
-client = FanslyClient(config)
+client = get_fansly_client(os.environ)
 persona_loader = PersonaLoader(config_dir="config/creators")
 note_repo = FanNoteRepository(db_url=DB_URL)
 note_repo.create_table()
@@ -93,8 +94,7 @@ logger.info(f"Bot enabled state from DB: {bot.enabled}")
 # ─── Startup Auth Validation ───────────────────────────
 
 try:
-    # Minimal API call to verify credentials before entering poll loop
-    client._request("GET", f"/{ACCOUNT_ID}/chats", params={"limit": 1})
+    client.verify_auth()
     logger.info("API authentication verified")
     api_ok = True
 except AuthError as e:
@@ -116,11 +116,15 @@ if not api_ok:
 # ─── Credit Awareness ──────────────────────────────────
 
 estimated_daily = 86400 // POLL_INTERVAL
-logger.info(f"Estimated API requests: ~{estimated_daily}/day at {POLL_INTERVAL}s interval")
+logger.info(
+    f"Estimated API requests (worst case, no idle backoff): ~{estimated_daily}/day "
+    f"at {POLL_INTERVAL}s interval"
+)
 if estimated_daily > 20000:
     logger.warning(
-        f"At ~{estimated_daily} requests/day, you may exceed Pro plan limits (24K credits/mo). "
-        f"Consider increasing POLL_INTERVAL."
+        f"At ~{estimated_daily} requests/day worst case, you may exceed Basic plan limits "
+        f"(20,000 credits/mo). Idle-adaptive backoff reduces real usage below this when "
+        f"chats are quiet, but consider raising POLL_INTERVAL if this concerns you."
     )
 
 # ─── Main Loop ─────────────────────────────────────────
@@ -163,14 +167,16 @@ server_thread.start()
 # ─── Poll Loop with Backoff ────────────────────────────
 
 logger.info(f"Starting Fansly Bot for creator '{CREATOR_ID}'")
-logger.info(f"Account: {ACCOUNT_ID}, Poll interval: {POLL_INTERVAL}s")
-logger.info(f"Max backoff: {MAX_BACKOFF}s")
+logger.info(f"Account: {ACCOUNT_ID or '(resolved via API)'}, Poll interval: {POLL_INTERVAL}s")
+logger.info(f"Max failure backoff: {MAX_BACKOFF}s, max idle backoff: {IDLE_BACKOFF_MAX}s")
 
 consecutive_failures = 0
+consecutive_idle_cycles = 0
 
 while running:
+    had_activity = False
     try:
-        bot.poll_and_process()
+        had_activity = bot.poll_and_process()
         consecutive_failures = 0  # reset on success
     except (AuthError, PaymentRequiredError) as e:
         logger.critical(f"Fatal API error: {e}. Shutting down.")
@@ -180,12 +186,18 @@ while running:
         consecutive_failures += 1
         logger.error(f"Error in main loop ({consecutive_failures} consecutive): {e}", exc_info=True)
 
-    # Calculate backoff
+    # Failure backoff takes priority over idle backoff for this cycle.
     if consecutive_failures > 0:
+        consecutive_idle_cycles = 0
         backoff = min(POLL_INTERVAL * (2 ** (consecutive_failures - 1)), MAX_BACKOFF)
         logger.warning(f"Backoff: sleeping {backoff}s (failure #{consecutive_failures})")
-    else:
+    elif had_activity:
+        consecutive_idle_cycles = 0
         backoff = POLL_INTERVAL
+    else:
+        consecutive_idle_cycles += 1
+        backoff = min(POLL_INTERVAL * (2 ** consecutive_idle_cycles), IDLE_BACKOFF_MAX)
+        logger.debug(f"Idle: sleeping {backoff}s (idle cycle #{consecutive_idle_cycles})")
 
     sleep_with_interrupt(backoff)
 
