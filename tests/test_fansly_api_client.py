@@ -174,6 +174,7 @@ class TestAccountIdResolution:
 
         assert client.verify_auth() is True
         assert client.account_id == "fansly_acct_123"
+        assert client.creator_fansly_id == "111222333"
         # Cached — a second access does not re-request.
         client.client.request.assert_called_once()
 
@@ -248,6 +249,7 @@ class TestListMessages:
     def test_parses_messages_from_real_response_shape(self):
         client = FanslyApiClientImpl(api_key="sk_test")
         client._account_id = "fansly_acct_123"
+        client._creator_fansly_id = "111222333"
         client.client.request = MagicMock(return_value=_resp(LIST_MESSAGES_BODY))
 
         messages, cursor = client.list_messages("200000000000000001")
@@ -255,7 +257,38 @@ class TestListMessages:
         assert len(messages) == 1
         assert messages[0].message_id == "400000000000000001"
         assert messages[0].content == "hey"
-        assert messages[0].is_from_fan is True  # senderId != our account_id
+        assert messages[0].is_from_fan is True
+
+    def test_creator_message_uses_numeric_fansly_id_not_wrapper_account_id(self):
+        creator_message = {
+            "data": {
+                "messages": [
+                    {
+                        "id": "400000000000000010",
+                        "content": "creator reply",
+                        "groupId": "200000000000000001",
+                        "senderId": "111222333",
+                        "createdAt": 1700000001,
+                        "attachments": [],
+                        "totalTipAmount": 0,
+                    }
+                ],
+                "hasMore": False,
+            }
+        }
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client.client.request = MagicMock(
+            side_effect=[
+                _resp(LIST_ACCOUNTS_BODY),
+                _resp(creator_message),
+            ]
+        )
+
+        messages, _ = client.list_messages("200000000000000001")
+
+        assert client.account_id == "fansly_acct_123"
+        assert client.creator_fansly_id == "111222333"
+        assert messages[0].is_from_fan is False
 
 
 class TestSendMessage:

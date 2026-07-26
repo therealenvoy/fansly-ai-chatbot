@@ -39,6 +39,7 @@ class FanslyApiClientImpl(FanslyApiClient):
         self.api_key = api_key.strip()
         self.timeout = timeout
         self._account_id: Optional[str] = None
+        self._creator_fansly_id: Optional[str] = None
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -64,6 +65,13 @@ class FanslyApiClientImpl(FanslyApiClient):
             self._resolve_account_id()
         return self._account_id
 
+    @property
+    def creator_fansly_id(self) -> str:
+        """Numeric Fansly creator ID used by message ``senderId`` fields."""
+        if self._creator_fansly_id is None:
+            self._resolve_account_id()
+        return self._creator_fansly_id
+
     def _resolve_account_id(self):
         if not self.api_key:
             raise AuthError("FANSLY_API_KEY is not configured")
@@ -71,7 +79,17 @@ class FanslyApiClientImpl(FanslyApiClient):
         accounts = data if isinstance(data, list) else []
         if not accounts:
             raise AuthError("No connected Fansly account found on this API key")
-        self._account_id = accounts[0]["id"]
+        account = accounts[0]
+        creator_fansly_id = (
+            account.get("fansly_id")
+            or account.get("fansly_user_data", {}).get("id")
+        )
+        if not creator_fansly_id:
+            raise AuthError(
+                "Connected Fansly account does not expose a numeric fansly_id"
+            )
+        self._account_id = account["id"]
+        self._creator_fansly_id = str(creator_fansly_id)
 
     def verify_auth(self) -> bool:
         """Resolve and cache the connected account id — also proves the key works."""
@@ -189,7 +207,7 @@ class FanslyApiClientImpl(FanslyApiClient):
 
         messages = []
         for msg in messages_raw:
-            is_fan = msg.get("senderId") != self.account_id
+            is_fan = str(msg.get("senderId", "")) != self.creator_fansly_id
             messages.append(MessageInfo(
                 message_id=msg["id"],
                 content=msg.get("content", ""),
