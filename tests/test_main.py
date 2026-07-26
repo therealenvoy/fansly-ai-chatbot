@@ -315,6 +315,10 @@ class TestStartupAuthValidation:
             "Dashboard-only mode active" in r.message
             for r in caplog.records
         )
+        runtime = module.runtime_monitor.snapshot()
+        assert runtime["last_poll_started_at"] is None
+        assert runtime["last_poll_succeeded_at"] is None
+        assert runtime["last_error"] == "ProviderBlocked"
 
 
 # ═══════════════════════════════════════════════════════════════

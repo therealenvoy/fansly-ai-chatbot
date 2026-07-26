@@ -96,3 +96,15 @@ def test_docker_context_excludes_secrets_history_and_test_artifacts():
         "tests",
         ".runtime-deps",
     } <= ignored
+
+
+def test_production_uptime_monitor_checks_ready_twice():
+    workflow = (
+        ROOT / ".github" / "workflows" / "production-monitor.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "schedule:" in workflow
+    assert "*/15 * * * *" in workflow
+    assert "https://sunny-charm-production.up.railway.app/ready" in workflow
+    assert "for attempt in 1 2" in workflow
+    assert "sleep 30" in workflow

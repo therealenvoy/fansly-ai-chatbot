@@ -1,0 +1,43 @@
+name: Production readiness monitor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-readiness
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    name: Railway /ready
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      READY_URL: https://sunny-charm-production.up.railway.app/ready
+    steps:
+      - name: Require two consecutive failures
+        shell: bash
+        run: |
+          set -uo pipefail
+          for attempt in 1 2; do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 20 \
+              "$READY_URL" >/dev/null; then
+              echo "Production readiness check passed."
+              exit 0
+            fi
+            if [ "$attempt" -eq 1 ]; then
+              echo "First readiness check failed; retrying in 30 seconds."
+              sleep 30
+            fi
+          done
+          echo "Production readiness failed twice consecutively." >&2
+          exit 1

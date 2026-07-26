@@ -9,30 +9,46 @@
   readiness, provider state, bot/launch state, durable inbox/outbox counts, and
   polling timestamps/failures. It never returns credentials.
 - Railway deployment health checks run during deployment, not continuously.
-  Configure an external HTTPS uptime check against `/ready`; alert on two
-  consecutive failures. Also alert when `/api/operations` shows a growing
-  `outbox_delivery_unknown` or `inbound_failed` count.
+  `.github/workflows/production-monitor.yml` checks `/ready` every 15 minutes
+  and fails only after two consecutive failed probes. Scheduled workflows run
+  from GitHub's default branch, so the monitor is not active until this
+  workflow is present there and Actions notifications are enabled.
+- Review `/api/operations` for a growing `outbox_delivery_unknown` or
+  `inbound_failed` count. This authenticated operational check is deliberately
+  not placed in GitHub Actions because the dashboard password should not be
+  duplicated into another secret store.
 
 ## Backup and restore
 
-Production state lives in Railway PostgreSQL. Persona and brand files may live
-on the mounted `/data` volume.
+The current production `DATABASE_URL` points to Neon PostgreSQL. The Railway
+app service also has a separate volume mounted at `/data` for persona and brand
+files. These are two independent backup domains: a Railway volume backup does
+not protect Neon, and a Neon restore does not protect `/data`.
 
-1. Enable daily and weekly Railway backups before launch and verify the
-   retention shown in the Backups tab. Consider PostgreSQL point-in-time
-   recovery when the required recovery point is shorter than one day.
-2. Before a schema migration or broad rollout, create an on-demand backup.
-3. Monthly, perform a restore drill. Prefer point-in-time recovery because it
-   creates a sibling PostgreSQL service without modifying the source. Native
-   volume backups can only restore in the same project and environment, so do
-   not initiate that workflow against live production without a maintenance
-   plan and verified copy.
-4. Run `alembic upgrade head`, then verify `/ready`, dashboard reads, and inbox,
-   outbox, settings, conversations, purchases, and sequence progress.
-5. Record the backup timestamp, restore duration, row-count checks, and operator.
-6. Back up the app service's `/data/config` volume separately after persona or
-   brand changes; a backup of the PostgreSQL service's volume does not include
-   the app service's volume.
+### Neon PostgreSQL
+
+1. In the Neon console, open **Backup & Restore** and verify the production
+   branch's instant-restore window.
+2. On plans that support scheduled snapshots, configure daily and weekly
+   snapshots with explicit retention. Before a schema migration or broad
+   rollout, create an on-demand snapshot.
+3. Monthly, restore to a new temporary branch and run `alembic upgrade head`.
+   Verify `/ready`, dashboard reads, inbox, outbox, settings, conversations,
+   purchases, and sequence progress against that isolated branch.
+4. Never finalize a restore onto the production branch as a drill. Use an
+   isolated restore branch, record row-count checks, then delete it after the
+   drill.
+
+### Railway `/data` volume
+
+1. In `fansly-bot / sunny-charm / Backups`, enable daily and weekly schedules
+   for `sunny-charm-volume`.
+2. Create an on-demand volume backup after persona or brand changes.
+3. Railway volume restores are limited to the same project and environment and
+   replace the mounted volume after staged changes are deployed. Test restores
+   only under a maintenance plan and never by overwriting live production.
+4. Record each backup timestamp, retention, restore duration, verification
+   result, and operator.
 
 Never test a restore by overwriting production.
 
@@ -42,11 +58,16 @@ Required production variables:
 
 ```text
 FANSLY_PROVIDER=fanslyapi
+FANSLY_API_KEY=<OnlyFansAPI key with approved Fansly beta access>
 CONTROLLED_LAUNCH=true
 BOT_ENABLED_DEFAULT=false
 FAN_ALLOWLIST=<one or more exact Fansly account IDs>
 MAX_MESSAGES_PER_POLL=5
 ```
+
+OnlyFansAPI currently limits its Fansly product to approved closed-beta
+participants. A general OnlyFans API key is not proof of Fansly access: startup
+must successfully resolve a connected `fansly_acct_...` account before launch.
 
 Run this inside the configured deployment environment:
 

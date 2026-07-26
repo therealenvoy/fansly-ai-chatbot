@@ -181,6 +181,7 @@ if api_ok:
 
 if bot is None:
     settings_store.set("bot_enabled", "false")
+    runtime_monitor.provider_blocked(api_error or "ProviderUnavailable")
     logger.info("Bot unavailable; starting dashboard-only mode")
 
 # ─── Credit Awareness ──────────────────────────────────
@@ -258,13 +259,15 @@ consecutive_failures = 0
 consecutive_idle_cycles = 0
 
 while running:
+    if bot is None:
+        sleep_with_interrupt(IDLE_BACKOFF_MAX)
+        continue
+
     had_activity = False
     runtime_monitor.poll_started()
     try:
-        had_activity = (
-            bot.poll_and_process(max_chats=MAX_MESSAGES_PER_POLL)
-            if bot is not None
-            else False
+        had_activity = bot.poll_and_process(
+            max_chats=MAX_MESSAGES_PER_POLL
         )
         consecutive_failures = 0  # reset on success
         runtime_monitor.poll_succeeded(had_activity=bool(had_activity))
