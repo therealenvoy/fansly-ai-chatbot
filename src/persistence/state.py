@@ -119,7 +119,10 @@ class ConversationStateRepository:
                 "created_at": now,
                 "updated_at": now,
             }
-            unique_chats[chat_id] = {
+            # The schema deliberately keeps one active provider conversation
+            # per creator/fan. A provider may rotate that chat ID, so dedupe
+            # and upsert on the same identity enforced by the database.
+            unique_chats[fan_id] = {
                 "creator_id": creator_id,
                 "chat_id": chat_id,
                 "fan_id": fan_id,
@@ -151,10 +154,21 @@ class ConversationStateRepository:
             list(unique_chats.values())
         )
         conversation_excluded = conversation_stmt.excluded
+        chat_changed = (
+            CONVERSATIONS.c.chat_id != conversation_excluded.chat_id
+        )
         conversation_stmt = conversation_stmt.on_conflict_do_update(
-            index_elements=["creator_id", "chat_id"],
+            index_elements=["creator_id", "fan_id"],
             set_={
-                "fan_id": conversation_excluded.fan_id,
+                "chat_id": conversation_excluded.chat_id,
+                "provider_cursor": case(
+                    (chat_changed, None),
+                    else_=CONVERSATIONS.c.provider_cursor,
+                ),
+                "last_platform_message_id": case(
+                    (chat_changed, None),
+                    else_=CONVERSATIONS.c.last_platform_message_id,
+                ),
                 "updated_at": now,
             },
         )

@@ -1,8 +1,9 @@
 import pytest
+from sqlalchemy import select
 
 from src.funnel.spiral import SpiralPhase
 from src.persistence.database import create_database_engine
-from src.persistence.schema import metadata
+from src.persistence.schema import CONVERSATIONS, metadata
 from src.persistence.state import (
     ConcurrentStateUpdate,
     ConversationStateRepository,
@@ -96,6 +97,40 @@ def test_conversation_identity_is_upserted():
         "chat-a",
         display_name="Updated",
     )
+
+
+def test_conversation_upsert_replaces_changed_chat_id_for_same_fan():
+    repo = _repo()
+    repo.ensure_conversation(
+        "creator-a",
+        "fan-a",
+        "old-chat",
+    )
+    repo.update_conversation_checkpoint(
+        "creator-a",
+        "old-chat",
+        last_platform_message_id="old-message",
+        provider_cursor="old-cursor",
+    )
+
+    repo.ensure_conversation(
+        "creator-a",
+        "fan-a",
+        "new-chat",
+    )
+
+    with repo.engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                CONVERSATIONS.c.fan_id,
+                CONVERSATIONS.c.chat_id,
+            ).where(CONVERSATIONS.c.creator_id == "creator-a")
+        ).all()
+    assert rows == [("fan-a", "new-chat")]
+    assert repo.get_conversation_checkpoint(
+        "creator-a",
+        "new-chat",
+    ) == (None, None)
 
 
 def test_stale_runtime_state_write_is_rejected():
