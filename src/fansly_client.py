@@ -50,6 +50,7 @@ class ProviderCapabilities:
     supports_paid_messages: bool = False
     supports_attributed_purchases: bool = False
     supports_wallet_transactions: bool = False
+    supports_vault_albums: bool = False
 
 
 @dataclass(frozen=True)

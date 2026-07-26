@@ -40,8 +40,9 @@ class TestSequenceRepo:
     def test_delete_sequence(self, repo):
         s = repo.save_sequence(Sequence("Del", SequenceTrigger.WELCOME, "rapport"))
         assert repo.get_sequence(s.id) is not None
-        repo.delete_sequence(s.id)
+        assert repo.delete_sequence(s.id) is True
         assert repo.get_sequence(s.id) is None
+        assert repo.delete_sequence(s.id) is False
 
     def test_save_sequence_with_steps(self, repo):
         s = Sequence("Ladder", SequenceTrigger.NEW_SUB, "rapport")
@@ -56,6 +57,76 @@ class TestSequenceRepo:
         assert steps[0].position == 1
         assert steps[0].tease_script == "Want to see?"
         assert steps[1].price == 24.99
+
+    def test_atomic_sequence_replace_updates_ordered_steps(self, repo):
+        sequence = Sequence(
+            "Ladder",
+            SequenceTrigger.WELCOME,
+            "offer",
+            steps=[
+                SequenceStep(
+                    sequence_id=0,
+                    position=5,
+                    media_id="fansly_media_1",
+                    price=10,
+                ),
+                SequenceStep(
+                    sequence_id=0,
+                    position=2,
+                    media_id="fansly_media_2",
+                    price=20,
+                ),
+            ],
+        )
+
+        saved = repo.save_sequence_with_steps(sequence)
+
+        assert saved.id is not None
+        steps = repo.get_steps(saved.id)
+        assert [step.position for step in steps] == [1, 2]
+        assert [step.media_id for step in steps] == [
+            "fansly_media_2",
+            "fansly_media_1",
+        ]
+
+    def test_atomic_sequence_replace_rolls_back_on_invalid_step(
+        self,
+        repo,
+    ):
+        sequence = repo.save_sequence_with_steps(
+            Sequence(
+                "Original",
+                SequenceTrigger.WELCOME,
+                "offer",
+                steps=[
+                    SequenceStep(
+                        sequence_id=0,
+                        position=1,
+                        media_id="fansly_media_1",
+                        price=10,
+                    )
+                ],
+            )
+        )
+        replacement = repo.get_sequence(sequence.id)
+        replacement.name = "Broken update"
+        replacement.steps = [
+            SequenceStep(
+                sequence_id=replacement.id,
+                position=1,
+                media_id=None,
+                price=20,
+            )
+        ]
+
+        with pytest.raises(Exception):
+            repo.save_sequence_with_steps(replacement)
+
+        persisted = repo.get_sequence(sequence.id)
+        assert persisted.name == "Original"
+        assert [step.media_id for step in persisted.steps] == [
+            "fansly_media_1"
+        ]
 
     def test_update_step(self, repo):
         s = repo.save_sequence(Sequence("Test", SequenceTrigger.WELCOME, "rapport"))

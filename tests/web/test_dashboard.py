@@ -12,8 +12,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.fansly_client import ProviderCapabilities
+from src.notes.repository import FAN_NOTES_TABLE
 from src.settings.store import SettingsStore
 from src.persistence.database import create_database_engine
+from src.persistence.schema import metadata
+from src.sequences.models import (
+    Sequence,
+    SequenceStep,
+    SequenceTrigger,
+)
+from src.sequences.repository import SequenceRepository
 from src.web.dashboard import DASHBOARD_HTML, MAX_BODY_BYTES, DashboardServer
 
 
@@ -85,6 +94,17 @@ def _post(host, path, payload=None, *, authenticated=True, csrf=True, origin=Non
     return status, data
 
 
+def _delete(host, path, *, authenticated=True, csrf=True, origin=None):
+    headers = {}
+    if authenticated:
+        headers["Authorization"] = _authorization()
+    if csrf:
+        headers["X-CSRF-Token"] = TEST_CSRF_TOKEN
+    headers["Origin"] = origin or f"http://{host}"
+    status, data, _ = _request(host, "DELETE", path, headers=headers)
+    return status, data
+
+
 def _make_bot(db_url):
     """A MagicMock bot with real toggle() semantics and a real DB url for
     _bot_toggle's SettingsStore(db_url=...) reconstruction to use."""
@@ -93,10 +113,20 @@ def _make_bot(db_url):
     bot.creator_id = "test_creator"
     bot.account_id = "account-123"
     bot.client.list_chats.return_value = []
-    bot.note_repo.engine = create_database_engine(
+    bot.client.verify_auth.return_value = True
+    bot.client.capabilities = ProviderCapabilities(
+        supports_free_media_messages=True,
+        supports_wallet_transactions=True,
+    )
+    engine = create_database_engine(
         db_url,
         environment={"APP_ENV": "test"},
     )
+    metadata.create_all(engine)
+    FAN_NOTES_TABLE.create(engine, checkfirst=True)
+    bot.note_repo.engine = engine
+    bot.sequence_repo = SequenceRepository(engine=engine)
+    bot.sequence_repo.create_tables()
 
     def _toggle(force=None):
         bot.enabled = bool(force) if force is not None else not bot.enabled
@@ -112,15 +142,21 @@ def db_url(tmp_path):
 
 
 @pytest.fixture
-def running_server(db_url):
+def running_server(db_url, tmp_path):
     """Spin up a real DashboardServer on an OS-assigned free port."""
     bot = _make_bot(db_url)
+    SettingsStore(
+        db_url=db_url,
+        creator_id=bot.creator_id,
+    ).create_table()
     server = DashboardServer(
         bot,
         port=0,
         dashboard_user=TEST_USER,
         dashboard_password=TEST_PASSWORD,
         csrf_token=TEST_CSRF_TOKEN,
+        persona_dir=str(tmp_path / "personas"),
+        brand_bible_path=str(tmp_path / "brand_bible.md"),
     )
     port = server.server.server_address[1]
 
@@ -148,7 +184,10 @@ class TestBotStatusEndpoints:
         bot.enabled = False
         status, body = _get(host, "/api/bot/status")
         assert status == 200
-        assert body == {"enabled": False}
+        assert body["available"] is True
+        assert body["enabled"] is False
+        assert body["persisted_enabled"] is None
+        assert body["consistent"] is True
 
     def test_connection_check_is_post_only(self, running_server):
         host, bot, _ = running_server
@@ -163,10 +202,35 @@ class TestBotStatusEndpoints:
 
         assert status == 200
         assert body["connected"] is True
-        bot.client.list_chats.assert_called_once_with(
-            filter_type="all",
-            sort="newest",
+        assert body["status"] == "live_verified"
+        bot.client.verify_auth.assert_called_once_with()
+        bot.client.list_chats.assert_not_called()
+
+        status, persisted = _get(host, "/api/connection")
+        assert status == 200
+        assert persisted["status"] == "live_verified"
+        assert persisted["live_checked"] is True
+
+    def test_failed_live_connection_check_updates_truthful_status(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        bot.client.verify_auth.side_effect = RuntimeError(
+            "provider unavailable"
         )
+
+        status, body = _post(host, "/api/connection/test", {})
+
+        assert status == 200
+        assert body["connected"] is False
+        assert body["status"] == "offline"
+        assert body["error"] == "provider unavailable"
+
+        status, persisted = _get(host, "/api/connection")
+        assert status == 200
+        assert persisted["connected"] is False
+        assert persisted["status"] == "offline"
 
 
 class TestDashboardSecurity:
@@ -323,7 +387,9 @@ class TestBotToggleEndpoint:
         status, body = _post(host, "/api/bot/toggle", {"enabled": False})
 
         assert status == 200
-        assert body == {"enabled": False}
+        assert body["enabled"] is False
+        assert body["persisted_enabled"] is False
+        assert body["consistent"] is True
         assert bot.enabled is False
         assert SettingsStore(
             db_url=url,
@@ -337,7 +403,9 @@ class TestBotToggleEndpoint:
         status, body = _post(host, "/api/bot/toggle", {"enabled": True})
 
         assert status == 200
-        assert body == {"enabled": True}
+        assert body["enabled"] is True
+        assert body["persisted_enabled"] is True
+        assert body["consistent"] is True
         assert bot.enabled is True
         assert SettingsStore(
             db_url=url,
@@ -351,7 +419,8 @@ class TestBotToggleEndpoint:
         status, body = _post(host, "/api/bot/toggle")
 
         assert status == 200
-        assert body == {"enabled": False}
+        assert body["enabled"] is False
+        assert body["persisted_enabled"] is False
         assert bot.enabled is False
 
     def test_toggle_persists_across_settings_store_instances(self, running_server):
@@ -386,3 +455,278 @@ class TestBotToggleEndpoint:
         finally:
             server.shutdown()
             thread.join(timeout=2)
+
+    def test_non_boolean_target_is_rejected_without_state_change(
+        self,
+        running_server,
+    ):
+        host, bot, url = running_server
+        bot.enabled = True
+
+        status, body = _post(
+            host,
+            "/api/bot/toggle",
+            {"enabled": "false"},
+        )
+
+        assert status == 400
+        assert body == {"error": "enabled must be a boolean"}
+        assert bot.enabled is True
+        assert SettingsStore(
+            db_url=url,
+            creator_id=bot.creator_id,
+        ).get("bot_enabled") is None
+
+    def test_persistence_failure_does_not_change_runtime_state(
+        self,
+        running_server,
+        monkeypatch,
+    ):
+        host, bot, _ = running_server
+        bot.enabled = True
+
+        def fail_set(self, key, value):
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(SettingsStore, "set", fail_set)
+        status, body = _post(
+            host,
+            "/api/bot/toggle",
+            {"enabled": False},
+        )
+
+        assert status == 500
+        assert body == {"error": "database unavailable"}
+        assert bot.enabled is True
+        bot.toggle.assert_not_called()
+
+
+class TestTruthfulDashboardControls:
+    def test_kpis_use_durable_events_and_report_unavailable_values(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body = _get(host, "/api/kpis")
+
+        assert status == 200
+        assert body["source"] == "durable_attributed_events"
+        assert body["sent_outbounds"] == 0
+        assert body["attributed_purchases"] == 0
+        assert body["attributed_revenue"] == 0
+        assert body["ppv_unlock_rate"] is None
+        assert body["chatting_ratio"] is None
+        assert body["script_completion_rate"] is None
+
+    def test_vault_endpoints_report_provider_capability(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, albums = _get(host, "/api/vault-albums")
+        assert status == 200
+        assert albums["supported"] is False
+        assert albums["albums"] == []
+        assert "not present" in albums["reason"]
+        bot.client.list_albums.assert_not_called()
+
+        status, media = _get(
+            host,
+            "/api/vault-albums/example/media",
+        )
+        assert status == 200
+        assert media["supported"] is False
+        assert media["media"] == []
+        bot.client.get_album_media.assert_not_called()
+
+    def test_active_sequence_is_rejected_when_paid_send_is_unsupported(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = {
+            "name": "Draft ladder",
+            "trigger": "welcome",
+            "funnel_stage": "offer",
+            "is_active": True,
+            "steps": [
+                {
+                    "media_id": "fansly_media_1",
+                    "price": 10,
+                    "tease_script": "look",
+                    "offer_script": "unlock",
+                }
+            ],
+        }
+
+        status, body = _post(host, "/api/sequences", payload)
+
+        assert status == 409
+        assert "does not document paid" in body["error"]
+        assert bot.sequence_repo.list_sequences() == []
+
+    def test_inactive_sequence_draft_is_validated_and_saved(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = {
+            "name": "Draft ladder",
+            "trigger": "welcome",
+            "funnel_stage": "offer",
+            "is_active": False,
+            "steps": [
+                {
+                    "media_id": "fansly_media_1",
+                    "price": 10,
+                    "tease_script": "look",
+                    "offer_script": "unlock",
+                }
+            ],
+        }
+
+        status, created = _post(host, "/api/sequences", payload)
+
+        assert status == 200
+        saved = bot.sequence_repo.get_sequence(created["id"])
+        assert saved.is_active is False
+        assert saved.steps[0].media_id == "fansly_media_1"
+
+        status, listing = _get(host, "/api/sequences")
+        assert status == 200
+        assert listing["paid_messages_supported"] is False
+        assert listing["editing_available"] is True
+        assert listing["sequences"][0]["effective_active"] is False
+
+    def test_sequence_read_and_delete_validate_resource_id(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, _ = _get(host, "/api/sequences/not-a-number")
+        assert status == 400
+
+        status, body = _delete(host, "/api/sequences/999999")
+        assert status == 404
+        assert body["error"] == "not found"
+
+    def test_invalid_provider_media_id_is_not_saved(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = {
+            "name": "Invalid draft",
+            "trigger": "welcome",
+            "funnel_stage": "offer",
+            "is_active": False,
+            "steps": [
+                {
+                    "media_id": "local-file.mp4",
+                    "price": 10,
+                }
+            ],
+        }
+
+        status, body = _post(host, "/api/sequences", payload)
+
+        assert status == 400
+        assert "fansly_media_ ID" in body["error"]
+        assert bot.sequence_repo.list_sequences() == []
+
+    def test_existing_active_sequence_is_shown_as_blocked(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        sequence = Sequence(
+            name="Legacy active",
+            trigger=SequenceTrigger.WELCOME,
+            funnel_stage="offer",
+            is_active=True,
+            steps=[
+                SequenceStep(
+                    sequence_id=0,
+                    position=1,
+                    media_id="fansly_media_1",
+                    price=10,
+                )
+            ],
+        )
+        bot.sequence_repo.save_sequence_with_steps(sequence)
+
+        status, body = _get(host, "/api/sequences")
+
+        assert status == 200
+        item = body["sequences"][0]
+        assert item["is_active"] is True
+        assert item["effective_active"] is False
+        assert item["blocked_reason"]
+
+    def test_persona_save_is_validated_and_applied_to_running_bot(
+        self,
+        running_server,
+        tmp_path,
+    ):
+        host, bot, _ = running_server
+        payload = {
+            "tone": "warm",
+            "signature_phrases": ["hey"],
+            "forbidden_phrases": ["as an ai"],
+            "emoji_style": "light",
+            "sentence_style": "short",
+        }
+
+        status, body = _post(
+            host,
+            "/api/persona?creator=test_creator",
+            payload,
+        )
+
+        assert status == 200
+        assert body["saved"] is True
+        assert body["runtime_applied"] is True
+        assert (
+            tmp_path / "personas" / "test_creator.yaml"
+        ).exists()
+        bot.reload_persona.assert_called_once_with()
+
+    def test_invalid_persona_is_not_saved(
+        self,
+        running_server,
+        tmp_path,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/persona?creator=test_creator",
+            {"tone": "missing required fields"},
+        )
+
+        assert status == 400
+        assert "error" in body
+        assert not (
+            tmp_path / "personas" / "test_creator.yaml"
+        ).exists()
+        bot.reload_persona.assert_not_called()
+
+    def test_brand_bible_is_explicitly_reference_only(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/brand-bible",
+            {"reference": "voice"},
+        )
+
+        assert status == 200
+        assert body["saved"] is True
+        assert body["runtime_applied"] is False
+        assert body["purpose"] == "operator reference only"

@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv*/
 .tmp-pytest*/
+.tmp/
 
 # Local databases - never commit fan data
 data/*.db

@@ -55,6 +55,7 @@ class FanslyApiClientImpl(FanslyApiClient):
             supports_paid_messages=False,
             supports_attributed_purchases=False,
             supports_wallet_transactions=True,
+            supports_vault_albums=False,
         )
 
     @property

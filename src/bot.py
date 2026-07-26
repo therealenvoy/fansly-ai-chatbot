@@ -69,6 +69,7 @@ class FanslyBot:
         state_repo: Optional["ConversationStateRepository"] = None,
     ):
         self.client = client
+        self.persona_loader = persona_loader
         self.creator_id = creator_id
         self.account_id = client.account_id
 
@@ -148,6 +149,13 @@ class FanslyBot:
                 )
 
     # ─── MAIN LOOP ──────────────────────────────────────
+
+    def reload_persona(self) -> None:
+        """Reload and atomically replace the active creator persona."""
+        persona = self.persona_loader.load(self.creator_id)
+        validator = PersonaValidator(persona)
+        self.persona = persona
+        self.validator = validator
 
     def poll_and_process(self, filter_type: str = "all", max_chats: int = 50) -> bool:
         """Main loop: fetch chats, process chats with unread messages, send replies.

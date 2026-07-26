@@ -15,7 +15,9 @@ import os
 import time
 import logging
 import signal
+import shutil
 import threading
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -49,6 +51,22 @@ IDLE_BACKOFF_MAX = int(os.getenv("IDLE_BACKOFF_MAX", "600"))  # cap for idle bac
 MAX_BACKOFF = int(os.getenv("MAX_BACKOFF", "600"))      # max seconds between polls on error
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///data/fansly_bot.db")
 PORT = int(os.getenv("PORT", "8080"))
+PERSONA_CONFIG_DIR = os.getenv(
+    "PERSONA_DIR",
+    (
+        "/data/config/creators"
+        if os.getenv("RAILWAY_ENVIRONMENT_ID")
+        else "config/creators"
+    ),
+)
+BRAND_BIBLE_CONFIG_PATH = os.getenv(
+    "BRAND_BIBLE_PATH",
+    (
+        "/data/config/brand_bible.md"
+        if os.getenv("RAILWAY_ENVIRONMENT_ID")
+        else "config/brand_bible.md"
+    ),
+)
 
 if not API_KEY:
     logger.warning(
@@ -61,7 +79,13 @@ if not API_KEY:
 database_engine = create_database_engine(DB_URL)
 upgrade_database(DB_URL, engine=database_engine)
 client = get_fansly_client(os.environ)
-persona_loader = PersonaLoader(config_dir="config/creators")
+persona_target = Path(PERSONA_CONFIG_DIR) / f"{CREATOR_ID}.yaml"
+persona_default = Path("config/creators") / f"{CREATOR_ID}.yaml"
+if not persona_target.exists() and persona_default.exists():
+    persona_target.parent.mkdir(parents=True, exist_ok=True)
+    if persona_target.resolve() != persona_default.resolve():
+        shutil.copyfile(persona_default, persona_target)
+persona_loader = PersonaLoader(config_dir=PERSONA_CONFIG_DIR)
 note_repo = FanNoteRepository(engine=database_engine)
 note_repo.create_table()
 
@@ -86,17 +110,23 @@ state_repo.ensure_creator(CREATOR_ID)
 # ─── Startup Auth Validation ───────────────────────────
 
 api_ok = False
+api_error = None
 if API_KEY:
     try:
         client.verify_auth()
         logger.info("API authentication verified")
         api_ok = True
     except AuthError as e:
+        api_error = str(e)
         logger.warning(f"API AUTH FAILED: {e}. Dashboard will still work, bot will not poll.")
     except PaymentRequiredError as e:
+        api_error = str(e)
         logger.warning(f"API PAYMENT REQUIRED: {e}. Bot will not poll until credits added.")
     except Exception as e:
+        api_error = str(e)
         logger.warning(f"API check failed: {e}. Bot will not poll.")
+else:
+    api_error = "FANSLY_API_KEY is not configured"
 
 bot = None
 if api_ok:
@@ -115,6 +145,7 @@ if api_ok:
         bot.enabled = bot_enabled_str.lower() == "true"
         logger.info(f"Bot enabled state from DB: {bot.enabled}")
     except Exception as e:
+        api_error = str(e)
         logger.warning(f"Bot initialization failed: {e}. Dashboard will still work.", exc_info=True)
         api_ok = False
         bot = None
@@ -162,7 +193,17 @@ signal.signal(signal.SIGTERM, shutdown)
 
 # ─── Dashboard Server ──────────────────────────────────
 
-dashboard = DashboardServer(bot, port=PORT)
+dashboard = DashboardServer(
+    bot,
+    port=PORT,
+    engine=database_engine,
+    client=client,
+    creator_id=CREATOR_ID,
+    provider_connected=api_ok,
+    provider_error=api_error,
+    persona_dir=PERSONA_CONFIG_DIR,
+    brand_bible_path=BRAND_BIBLE_CONFIG_PATH,
+)
 
 
 def run_server():

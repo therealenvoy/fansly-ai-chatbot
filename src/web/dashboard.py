@@ -7,9 +7,11 @@ import binascii
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import secrets
+from datetime import datetime, timezone
 
 import yaml
 from pathlib import Path
@@ -17,6 +19,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional, TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
+from ..persistence.dashboard import DashboardReadRepository
+from ..persona.models import PersonaDocument
 from ..sequences.models import Sequence, SequenceTrigger, SequenceStep, FanSequenceProgress, StepStatus
 
 logger = logging.getLogger("fansly-bot.dashboard")
@@ -251,7 +255,7 @@ function navTo(tab){
   var selected=document.querySelector('.nav-item[data-tab="'+tab+'"]');
   if(selected){selected.classList.add('active');selected.setAttribute('aria-current','page')}
   var titles={'funnel':'Funnel','vault':'Vault','fans':'Fans','scripts':'Scripts','kpis':'KPIs','sequences':'PPV Sequences','settings':'Settings'};
-  var subtitles={'funnel':'Live conversations and buying stages','vault':'Media ready for offers','fans':'Audience memory and value','scripts':'Reusable conversation playbooks','kpis':'The numbers that drive revenue','sequences':'Automated PPV journeys','settings':'Connections, voice, and brand rules'};
+  var subtitles={'funnel':'Live conversations and buying stages','vault':'Local storage and provider readiness','fans':'Audience memory and attributed value','scripts':'Reusable conversation playbooks','kpis':'Durable attributed events only','sequences':'Drafts and provider delivery capability','settings':'Connections and runtime configuration'};
   document.getElementById('page-title').textContent=titles[tab]||tab;
   document.getElementById('page-meta').textContent=subtitles[tab]||'';
   document.getElementById('content').scrollTop=0;
@@ -351,31 +355,52 @@ function fanDetail(fanId){
 }
 function closeDrawer(){document.getElementById('drawer').classList.remove('open')}
 async function loadBotStatus(){
-  var r=await fetch('/api/bot/status');
-  var d=await r.json();
-  updateToggleUI(d.enabled);
+  try{
+    var r=await fetch('/api/bot/status',{credentials:'same-origin',cache:'no-store'});
+    var d=await r.json();
+    updateToggleUI(Boolean(d.enabled),Boolean(d.available),d.reason||'',d.consistent!==false);
+  }catch(e){
+    updateToggleUI(false,false,'Status request failed',false);
+  }
 }
-function updateToggleUI(enabled){
+function updateToggleUI(enabled,available,reason,consistent){
   var dot=document.getElementById('dot');
   var label=document.getElementById('toggle-label');
   var button=document.getElementById('bot-toggle');
   if(!dot||!label)return;
-  dot.className='dot'+(enabled?'':' off');
-  label.textContent=enabled?'Bot on':'Bot off';
+  dot.className='dot'+(enabled&&available?'':' off');
+  label.textContent=!available?'Bot unavailable':enabled?'Bot on':'Bot off';
   label.style.color=enabled?'var(--green)':'var(--red)';
-  if(button){button.setAttribute('aria-pressed',enabled?'true':'false');button.setAttribute('aria-label',enabled?'Turn bot off':'Turn bot on')}
+  if(button){
+    button.disabled=!available;
+    button.title=reason||(!consistent?'Runtime and persisted state disagree':'');
+    button.setAttribute('aria-pressed',enabled?'true':'false');
+    button.setAttribute('aria-label',!available?'Bot unavailable':enabled?'Turn bot off':'Turn bot on');
+  }
 }
 async function toggleBot(){
-  var r=await M('/api/bot/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
-  var d=await r.json();
-  updateToggleUI(d.enabled);
+  var button=document.getElementById('bot-toggle');
+  if(!button||button.disabled)return;
+  var target=button.getAttribute('aria-pressed')!=='true';
+  button.disabled=true;
+  try{
+    var r=await M('/api/bot/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:target})});
+    var d=await r.json();
+    if(!r.ok)throw new Error(d.error||'Toggle failed');
+    updateToggleUI(Boolean(d.enabled),Boolean(d.available),d.reason||'',d.consistent!==false);
+  }catch(e){
+    button.title=e.message||'Toggle failed';
+    await loadBotStatus();
+  }
 }
 
 function loadVault(){
   var c=document.getElementById('content');
   F('/api/vault').then(function(d){
-    if(!d||!d.files||!d.files.length){c.innerHTML=emptyState('&#9633;','Your vault is empty','Upload media to /data/videos. Files added there become available for offers and sequences.');return}
-    var h='<div class="media-grid">';d.files.forEach(function(f){var i=f.type==='video'?'&#127916;':f.type==='image'?'&#128444;':'&#128196;';h+='<div class="media-card"><div class="ico">'+i+'</div><div class="name">'+esc(f.name)+'</div><div class="size">'+esc(f.size)+'</div></div>'});h+='</div>';c.innerHTML=h;
+    if(!d){c.innerHTML=emptyState('&#9633;','Vault unavailable','The local media directory could not be read.');return}
+    var h='<div class="block"><h3>Local files only</h3><p style="font-size:12px;color:var(--amber)">'+esc(d.reason||'These files are not provider media IDs.')+'</p></div>';
+    if(!d.files||!d.files.length){h+=emptyState('&#9633;','No local media files','Files in '+esc(d.dir||'/data/videos')+' are storage only until they are uploaded through OnlyFansAPI.');c.innerHTML=h;return}
+    h+='<div class="media-grid">';d.files.forEach(function(f){var i=f.type==='video'?'&#127916;':f.type==='image'?'&#128444;':'&#128196;';h+='<div class="media-card"><div class="ico">'+i+'</div><div class="name">'+esc(f.name)+'</div><div class="size">'+esc(f.size)+'</div><div style="font-size:10px;color:var(--amber);margin-top:5px">Not provider-ready</div></div>'});h+='</div>';c.innerHTML=h;
   });
 }
 
@@ -405,22 +430,36 @@ function loadKPIs(){
   var c=document.getElementById('content');
   F('/api/kpis').then(function(d){
     if(!d){c.innerHTML=emptyState('&#8599;','No KPI data yet','Performance metrics will populate as conversations and purchases are recorded.');return}
-    var cards=[{l:'Chatting Ratio',v:(d.chatting_ratio||0).toFixed(1)+':1',c:d.chatting_ratio>=6?'up':d.chatting_ratio>=4?'warn':'bad'},{l:'PPV Unlock Rate',v:(d.ppv_unlock_rate||0).toFixed(1)+'%',c:d.ppv_unlock_rate>=8?'up':d.ppv_unlock_rate>=5?'warn':'bad'},{l:'Avg Order Value',v:'$'+(d.aov||0).toFixed(0),c:d.aov>=30?'up':'warn'},{l:'Script Completion',v:(d.script_completion_rate||0).toFixed(1)+'%',c:d.script_completion_rate>=18?'up':'warn'},{l:'Health',v:(d.health_label||'N/A').toUpperCase(),c:d.health_label==='elite'||d.health_label==='healthy'?'up':'warn'},{l:'Active Fans',v:d.active_fans||0,c:'up'}];
-    c.innerHTML='<div class="cards">'+cards.map(function(card){return'<div class="card"><h3>'+esc(card.l)+'</h3><div class="v '+attr(card.c)+'\">'+esc(card.v)+'</div></div>'}).join('')+'</div>';
+    var pct=d.ppv_unlock_rate==null?'N/A':Number(d.ppv_unlock_rate).toFixed(1)+'%';
+    var aov=d.aov==null?'N/A':'$'+Number(d.aov).toFixed(2);
+    var response=d.response_time_avg==null?'N/A':Number(d.response_time_avg).toFixed(1)+'s';
+    var balance=d.wallet_latest_balance==null?'N/A':'$'+Number(d.wallet_latest_balance).toFixed(2);
+    var cards=[
+      {l:'Attributed Revenue',v:'$'+Number(d.attributed_revenue||0).toFixed(2),c:'up'},
+      {l:'Attributed Purchases',v:Number(d.attributed_purchases||0),c:'up'},
+      {l:'PPV Unlock Rate',v:pct,c:d.ppv_unlock_rate==null?'warn':'up'},
+      {l:'Average Order Value',v:aov,c:d.aov==null?'warn':'up'},
+      {l:'Average Response',v:response,c:d.response_time_avg==null?'warn':'up'},
+      {l:'Sent Messages',v:Number(d.sent_outbounds||0),c:'up'},
+      {l:'Known Fans',v:Number(d.known_fans||0),c:'up'},
+      {l:'Blocked PPV Intents',v:Number(d.blocked_ppv_intents||0),c:d.blocked_ppv_intents?'warn':'up'},
+      {l:'Wallet Balance',v:balance,c:'avg'}
+    ];
+    c.innerHTML='<div class="block"><p style="font-size:12px;color:var(--tx3)">Revenue and purchases below use only exact attributed purchase events. Wallet balance is aggregate and is not assigned to any fan.</p></div><div class="cards">'+cards.map(function(card){return'<div class="card"><h3>'+esc(card.l)+'</h3><div class="v '+attr(card.c)+'\">'+esc(card.v)+'</div></div>'}).join('')+'</div>';
   });
 }
 
 function loadSettings(){
   var c=document.getElementById('content');
   var h='<div class="block"><h3>API connection</h3><div class="g3" id="api-status">Loading...</div><div style="margin-top:14px"><button class="btn-ghost" data-action="test-connection">Test connection</button> <span id="conn-result"></span></div></div>';
-  h+='<div class="block"><h3>Persona</h3><div class="row"><select id="psel"><option value="sunny_charm">sunny_charm</option></select><button class="btn-ghost" data-action="load-persona">Load</button><span class="done" id="psaved">Saved</span></div><label>config/creators/{model}.yaml</label><textarea id="ped" placeholder="tone: flirty&#10;signature_phrases:&#10;  - hey babe"></textarea><div style="margin-top:10px"><button class="btn" data-action="save-persona">Save Persona</button></div></div>';
-  h+='<div class="block"><h3>Brand Bible</h3><label>config/brand_bible.md</label><textarea id="bed" placeholder="# Brand Bible&#10;&#10;## Voice..."></textarea><div style="margin-top:10px"><button class="btn" data-action="save-brand-bible">Save Brand Bible</button> <span class="done" id="bsaved">Saved</span></div></div>';
+  h+='<div class="block"><h3>Persona</h3><div class="row"><input id="psel" value="" readonly aria-label="Creator ID"/><button class="btn-ghost" data-action="load-persona">Reload</button><span class="done" id="psaved">Applied</span></div><label>Validated creator persona used by the live bot</label><textarea id="ped" placeholder="tone: flirty&#10;signature_phrases:&#10;  - hey babe"></textarea><div style="margin-top:10px"><button class="btn" data-action="save-persona">Validate, save, and apply</button> <span id="perror" style="font-size:11px;color:var(--red)"></span></div></div>';
+  h+='<div class="block"><h3>Brand Bible</h3><p style="font-size:12px;color:var(--amber);margin-bottom:10px">Reference document only. The bot does not currently read this file at runtime.</p><textarea id="bed" placeholder="# Brand Bible&#10;&#10;## Voice..."></textarea><div style="margin-top:10px"><button class="btn" data-action="save-brand-bible">Save reference</button> <span class="done" id="bsaved">Saved as reference</span></div></div>';
   c.innerHTML=h;loadConn();loadPersona();loadBrandBible();
 }
-function loadConn(){F('/api/connection').then(function(d){var el=document.getElementById('api-status');if(!d){el.innerHTML='<div class="card"><h3>Error</h3><div style="font-size:12px;color:#f87171">Failed</div></div>';return}el.innerHTML='<div class="card"><h3>Account</h3><div style="font-size:12px">'+esc(d.account_id)+'</div></div><div class="card"><h3>API</h3><div class="v '+(d.connected?'up':'bad')+'" style="font-size:16px">'+(d.connected?'Connected':'Offline')+'</div></div><div class="card"><h3>Endpoint</h3><div style="font-size:11px;color:var(--tx3)">app.onlyfansapi.com</div></div>'})}
-function testConn(){var el=document.getElementById('conn-result');el.textContent='Testing\u2026';el.style.color='var(--tx3)';M('/api/connection/test',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json()}).then(function(d){var ok=d&&d.connected;el.textContent=ok?'Connected':'Failed: '+(d.error||'unknown');el.style.color=ok?'var(--green)':'#f87171';loadConn()})}
-function loadPersona(){var m=document.getElementById('psel').value;F('/api/persona?creator='+encodeURIComponent(m)).then(function(d){document.getElementById('ped').value=d&&d.yaml||''})}
-function savePersona(){var m=document.getElementById('psel').value,y=document.getElementById('ped').value;M('/api/persona?creator='+encodeURIComponent(m),{method:'POST',headers:{'Content-Type':'text/yaml; charset=utf-8'},body:y}).then(function(r){var el=document.getElementById('psaved');if(r.ok){el.style.display='flex';setTimeout(function(){el.style.display='none'},2000)}})}
+function loadConn(){F('/api/connection').then(function(d){var el=document.getElementById('api-status');if(!d){el.innerHTML='<div class="card"><h3>Error</h3><div style="font-size:12px;color:#f87171">Failed</div></div>';return}el.innerHTML='<div class="card"><h3>Account</h3><div style="font-size:12px">'+esc(d.account_id||'Unavailable')+'</div></div><div class="card"><h3>API</h3><div class="v '+(d.connected?'up':'bad')+'" style="font-size:16px">'+esc(d.status||'offline')+'</div><div style="font-size:10px;color:var(--tx3)">'+esc(d.error||'')+'</div></div><div class="card"><h3>Provider</h3><div style="font-size:11px;color:var(--tx3)">'+esc(d.provider||'OnlyFansAPI Fansly')+'</div></div>'})}
+function testConn(){var el=document.getElementById('conn-result');el.textContent='Testing\u2026';el.style.color='var(--tx3)';M('/api/connection/test',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json()}).then(function(d){var ok=d&&d.connected;el.textContent=ok?'Live verification passed':'Failed: '+(d.error||'unknown');el.style.color=ok?'var(--green)':'#f87171';loadConn()}).catch(function(){el.textContent='Connection test failed';el.style.color='var(--red)'})}
+function loadPersona(){var m=document.getElementById('psel').value;var url='/api/persona'+(m?'?creator='+encodeURIComponent(m):'');F(url).then(function(d){if(!d)return;document.getElementById('psel').value=d.creator_id||m;document.getElementById('ped').value=d.yaml||''})}
+function savePersona(){var m=document.getElementById('psel').value,y=document.getElementById('ped').value;var error=document.getElementById('perror');error.textContent='';M('/api/persona?creator='+encodeURIComponent(m),{method:'POST',headers:{'Content-Type':'text/yaml; charset=utf-8'},body:y}).then(async function(r){var d=await r.json();var el=document.getElementById('psaved');if(!r.ok){error.textContent=d.error||'Save failed';return}el.textContent=d.runtime_applied?'Applied now':'Saved for next bot start';el.style.display='flex';setTimeout(function(){el.style.display='none'},2500)})}
 function loadBrandBible(){F('/api/brand-bible').then(function(d){document.getElementById('bed').value=d&&d.content||''})}
 function saveBible(){var c=document.getElementById('bed').value;M('/api/brand-bible',{method:'POST',headers:{'Content-Type':'text/markdown; charset=utf-8'},body:c}).then(function(r){var el=document.getElementById('bsaved');if(r.ok){el.style.display='flex';setTimeout(function(){el.style.display='none'},2000)}})}
 
@@ -429,17 +468,28 @@ function loadSequences(){
   var c=document.getElementById('content');
   F('/api/sequences').then(function(d){
     var seqs=d&&d.sequences||[];
-    var h=sectionIntro('PPV ladders','Build a clear progression from first offer to highest-value content.','<button class="btn" data-action="new-sequence">New sequence</button>');
+    dashboardSequenceEditingAvailable=Boolean(d&&d.editing_available);
+    dashboardPaidMessagesSupported=Boolean(d&&d.paid_messages_supported);
+    dashboardPpvReason=d&&d.blocked_reason||'Paid Fansly messaging is unavailable.';
+    var action='<button class="btn" data-action="new-sequence"'+(dashboardSequenceEditingAvailable?'':' disabled')+'>New draft</button>';
+    var description=!dashboardSequenceEditingAvailable?'Sequence storage is unavailable because the bot did not initialize.':dashboardPaidMessagesSupported?'Paid delivery is supported by the configured provider.':'Sequences can be edited as inactive drafts, but cannot be activated or delivered.';
+    var h=sectionIntro('PPV sequence drafts',description,action);
+    if(!dashboardPaidMessagesSupported)h+='<div class="block"><p style="font-size:12px;color:var(--amber)">'+esc(dashboardPpvReason)+'</p></div>';
     if(!seqs.length){h+=emptyState('&#8644;','No sequences yet','Create a PPV ladder to automate a consistent offer journey for each fan segment.');c.innerHTML=h;return}
-    h+='<div class="panel"><table><thead><tr><th>Name</th><th>Trigger</th><th>Steps</th><th>Total</th><th>Active</th><th></th></tr></thead><tbody>';
-    seqs.forEach(function(s){var sid=Number(s.id);h+='<tr class="clickable" data-action="edit-sequence" data-sequence-id="'+sid+'"><td style="color:var(--tx)">'+esc(s.name)+'</td><td><span class="badge '+(s.trigger=='whale'?'whale':s.trigger=='re_engage'?'bad':'avg')+'\">'+esc(s.trigger)+'</span></td><td>'+Number(s.step_count||0)+'</td><td>$'+Number(s.total_price||0).toFixed(0)+'</td><td>'+(s.is_active?'<span style="color:var(--green)">&#9679;</span>':'<span style="color:var(--tx3)">&#9679;</span>')+'</td><td><button class="btn-ghost" data-action="delete-sequence" data-sequence-id="'+sid+'">&#128465;</button></td></tr>'});
+    h+='<div class="panel"><table><thead><tr><th>Name</th><th>Trigger</th><th>Steps</th><th>Total</th><th>Delivery state</th><th></th></tr></thead><tbody>';
+    seqs.forEach(function(s){var sid=Number(s.id);var state=s.effective_active?'<span style="color:var(--green)">Active</span>':s.is_active?'<span style="color:var(--amber)">Blocked</span>':'<span style="color:var(--tx3)">Inactive draft</span>';h+='<tr class="clickable" data-action="edit-sequence" data-sequence-id="'+sid+'"><td style="color:var(--tx)">'+esc(s.name)+'</td><td><span class="badge '+(s.trigger=='whale'?'whale':s.trigger=='re_engage'?'bad':'avg')+'\">'+esc(s.trigger)+'</span></td><td>'+Number(s.step_count||0)+'</td><td>$'+Number(s.total_price||0).toFixed(0)+'</td><td>'+state+'</td><td><button class="btn-ghost" data-action="delete-sequence" data-sequence-id="'+sid+'">&#128465;</button></td></tr>'});
     h+='</tbody></table></div>';c.innerHTML=h;
   });
 }
 var editSeqId=null;
 var dashboardAlbums=[];
 var dashboardSteps=[];
-function newSequence(){editSeqId=null;openSeqEditor({name:'',trigger:'welcome',funnel_stage:'rapport',is_active:true,steps:[]})}
+var dashboardSequenceEditingAvailable=false;
+var dashboardPaidMessagesSupported=false;
+var dashboardPpvReason='';
+var dashboardVaultAlbumsSupported=false;
+var dashboardVaultReason='';
+function newSequence(){if(!dashboardSequenceEditingAvailable)return;editSeqId=null;openSeqEditor({name:'',trigger:'welcome',funnel_stage:'rapport',is_active:false,steps:[],paid_messages_supported:dashboardPaidMessagesSupported})}
 function editSeq(id){
   F('/api/sequences/'+id).then(function(d){
     if(!d)return;editSeqId=d.id;openSeqEditor(d);
@@ -447,19 +497,24 @@ function editSeq(id){
 }
 function openSeqEditor(s){
   var c=document.getElementById('content');
+  dashboardPaidMessagesSupported=Boolean(s.paid_messages_supported||dashboardPaidMessagesSupported);
+  dashboardPpvReason=s.blocked_reason||dashboardPpvReason;
   var triggers=['new_sub','welcome','rapport','whale','re_engage','manual'];
   var h='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px"><h3 style="font-size:14px;font-weight:600">'+(editSeqId?'Edit':'New')+' Sequence</h3><div><button class="btn-ghost" data-action="load-sequences" style="margin-right:8px">&#8592; Back</button><button class="btn" data-action="save-sequence">&#128190; Save</button></div></div>';
   h+='<div class="panel" style="padding:18px;margin-bottom:14px"><div class="g3" style="margin-bottom:12px">';
   h+='<div><label>Name</label><input id="sname" value="'+attr(s.name||'')+'" placeholder="e.g. Welcome Ladder"/></div>';
   h+='<div><label>Trigger</label><select id="strigger">'+triggers.map(function(t){return'<option value="'+t+'"'+(s.trigger==t?' selected':'')+'>'+t.replace('_',' ')+'</option>'}).join('')+'</select></div>';
   h+='<div><label>Funnel Stage</label><select id="sfunnel"><option value="rapport"'+(s.funnel_stage=='rapport'?' selected':'')+'>Rapport</option><option value="tease"'+(s.funnel_stage=='tease'?' selected':'')+'>Tease</option><option value="offer"'+(s.funnel_stage=='offer'?' selected':'')+'>Offer</option><option value="close"'+(s.funnel_stage=='close'?' selected':'')+'>Close</option></select></div>';
-  h+='<div><label>Active</label><select id="sactive"><option value="1"'+(s.is_active?' selected':'')+'>Yes</option><option value="0"'+(s.is_active?'':' selected')+'>No</option></select></div>';
+  h+='<div><label>Delivery state</label><select id="sactive"'+(dashboardPaidMessagesSupported?'':' disabled')+'><option value="1"'+(s.is_active&&dashboardPaidMessagesSupported?' selected':'')+'>Active</option><option value="0"'+(!s.is_active||!dashboardPaidMessagesSupported?' selected':'')+'>Inactive draft</option></select></div>';
   h+='</div></div>';
+  if(!dashboardPaidMessagesSupported)h+='<div class="block"><p style="font-size:12px;color:var(--amber)">'+esc(dashboardPpvReason)+'</p></div>';
   h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h4 style="font-size:12px;font-weight:500;color:var(--tx2)">Steps ('+((s.steps||[]).length)+')</h4><button class="btn-ghost" data-action="add-step">+ Add Step</button></div>';
   h+='<div id="steps-container"></div>';
   c.innerHTML=h;
   F('/api/vault-albums').then(function(d){
     dashboardAlbums=d&&d.albums||[];
+    dashboardVaultAlbumsSupported=Boolean(d&&d.supported);
+    dashboardVaultReason=d&&d.reason||d&&d.error||'Provider vault browsing is unavailable.';
     if(typeof renderSteps=='function')renderSteps(s.steps||[]);
     else setTimeout(function(){renderSteps(s.steps||[])},100);
   });
@@ -467,7 +522,7 @@ function openSeqEditor(s){
 function renderSteps(steps){
   var el=document.getElementById('steps-container');if(!el)return;
   dashboardSteps=steps.map(function(s,i){
-    return {position:i+1,media_id:s.media_id||'$',preview_id:s.preview_id||'',price:s.price||0,tease_script:s.tease_script||'',offer_script:s.offer_script||'',id:s.id||null};
+    return {position:i+1,media_id:s.media_id||'',preview_id:'',price:s.price||0,tease_script:s.tease_script||'',offer_script:s.offer_script||'',id:s.id||null};
   });
   if(!dashboardSteps.length){el.innerHTML='<div class="empty"><div class="ico">&#128196;</div><p>Add your first PPV step</p></div>';return}
   var h='';
@@ -475,19 +530,19 @@ function renderSteps(steps){
     h+='<div class="panel" style="padding:14px;margin-bottom:8px;border-left:3px solid var(--accent)">';
     h+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-size:11px;font-weight:500;color:var(--accent)">PPV '+(i+1)+'</span><button class="btn-ghost" data-action="remove-step" data-step-index="'+i+'" style="padding:2px 8px;font-size:10px">&#128465; Remove</button></div>';
     h+='<div class="g3" style="margin-bottom:8px">';
-    h+='<div><label>Media ID</label><div class="row" style="margin-bottom:0"><input id="smedia_'+i+'" value="'+attr(step.media_id||'$')+'" style="flex:1;margin-bottom:0"/><button class="btn-ghost" data-action="pick-media" data-step-index="'+i+'">Browse</button></div></div>';
-    h+='<div><label>Preview ID</label><input id="sprev_'+i+'" value="'+attr(step.preview_id||'')+'\"/></div>';
+    h+='<div><label>OnlyFansAPI media ID</label><div class="row" style="margin-bottom:0"><input id="smedia_'+i+'" value="'+attr(step.media_id||'')+'" placeholder="fansly_media_..." style="flex:1;margin-bottom:0"/><button class="btn-ghost" data-action="pick-media" data-step-index="'+i+'"'+(dashboardVaultAlbumsSupported?'':' disabled title="'+attr(dashboardVaultReason)+'"')+'>Browse</button></div></div>';
     h+='<div><label>Price ($)</label><input id="sprice_'+i+'" value="'+step.price.toFixed(2)+'"/></div></div>';
     h+='<div class="g3"><div><label>Tease Script</label><textarea id="stease_'+i+'" rows="2">'+esc(step.tease_script||'')+'</textarea></div>';
     h+='<div><label>Offer Script</label><textarea id="soffer_'+i+'" rows="2">'+esc(step.offer_script||'')+'</textarea></div></div></div>';
   });
   el.innerHTML=h;
 }
-function addStep(){var s=dashboardSteps;s.push({media_id:'$',preview_id:'',price:0,tease_script:'',offer_script:''});renderSteps(s)}
+function addStep(){var s=dashboardSteps;s.push({media_id:'',preview_id:'',price:0,tease_script:'',offer_script:''});renderSteps(s)}
 function removeStep(idx){var s=dashboardSteps;s.splice(idx,1);renderSteps(s)}
 function pickMedia(idx){
   var albums=dashboardAlbums;
-  if(!albums.length){alert('No vault albums');return}
+  if(!dashboardVaultAlbumsSupported){alert(dashboardVaultReason);return}
+  if(!albums.length){alert('No provider vault albums');return}
   var opts=albums.map(function(a){return'<option value="'+attr(a.id)+'">'+esc(a.name||'Album '+a.id)+'</option>'}).join('');
   var h='<div class="panel" style="padding:18px;max-height:300px;overflow-y:auto"><h4 style="font-size:12px;font-weight:500;margin-bottom:10px">Select from Vault</h4>';
   h+='<label>Album</label><select id="album-picker" data-step-index="'+idx+'">'+opts+'</select>';
@@ -523,12 +578,13 @@ function saveSeq(){
   var active=document.getElementById('sactive').value==='1';
   var steps=dashboardSteps;
   var stepData=steps.map(function(s,i){
-    return {position:i+1,media_id:(document.getElementById('smedia_'+i)||{}).value||'',preview_id:(document.getElementById('sprev_'+i)||{}).value||'',price:parseFloat((document.getElementById('sprice_'+i)||{}).value)||0,tease_script:(document.getElementById('stease_'+i)||{}).value||'',offer_script:(document.getElementById('soffer_'+i)||{}).value||''};
+    return {position:i+1,media_id:(document.getElementById('smedia_'+i)||{}).value||'',preview_id:'',price:parseFloat((document.getElementById('sprice_'+i)||{}).value)||0,tease_script:(document.getElementById('stease_'+i)||{}).value||'',offer_script:(document.getElementById('soffer_'+i)||{}).value||''};
   });
   var body={name:name,trigger:trigger,funnel_stage:funnel,is_active:active,steps:stepData};
   var url='/api/sequences'+(editSeqId?'/'+editSeqId:'');
-  M(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){
-    if(!r.ok){alert('Save failed');return}
+  M(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(async function(r){
+    var d=await r.json();
+    if(!r.ok){alert(d.error||'Save failed');return}
     loadSequences();
   });
 }
@@ -594,9 +650,28 @@ def _list_vault(vault_dir):
             files.append({"name":f.name,"type":ft,"size":s})
     return files
 
-def _note(n):
+def _spend_tier(total_spent: float) -> str:
+    if total_spent >= 500:
+        return "whale"
+    if total_spent >= 50:
+        return "average"
+    return "time_waster"
+
+
+def _note(n, purchase=None):
     if n is None: return None
-    return {"fan_id":n.fan_id,"display_name":n.display_name,"preferences":n.preferences,"occupation":n.occupation,"total_spent":n.total_spent,"purchase_count":n.purchase_count,"last_purchase_at":n.last_purchase_at.isoformat() if n.last_purchase_at else None,"emotional_triggers":n.emotional_triggers,"hard_limits":n.hard_limits,"facts":n.facts,"notes":n.notes,"relationship_stage":n.relationship_stage,"spend_tier":n.spend_tier}
+    total_spent = (
+        purchase.total_spent_millis / 1000
+        if purchase is not None
+        else 0.0
+    )
+    purchase_count = (
+        purchase.purchase_count if purchase is not None else 0
+    )
+    last_purchase_at = (
+        purchase.last_purchase_at if purchase is not None else None
+    )
+    return {"fan_id":n.fan_id,"display_name":n.display_name,"preferences":n.preferences,"occupation":n.occupation,"total_spent":total_spent,"purchase_count":purchase_count,"last_purchase_at":last_purchase_at.isoformat() if last_purchase_at else None,"emotional_triggers":n.emotional_triggers,"hard_limits":n.hard_limits,"facts":n.facts,"notes":n.notes,"relationship_stage":n.relationship_stage,"spend_tier":_spend_tier(total_spent),"purchase_source":"attributed_provider_events"}
 
 def _script(s):
     return {"name":s.name,"category":s.category.value if hasattr(s.category,"value") else str(s.category),"description":s.description,"messages":s.messages,"message_count":len(s.messages)}
@@ -624,6 +699,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
     @property
     def vault_dir(self):
         return self.server.vault_dir
+
+    @property
+    def engine(self):
+        return self.server.engine
+
+    @property
+    def client(self):
+        return self.server.client
+
+    @property
+    def creator_id(self):
+        return self.server.creator_id
+
+    @property
+    def dashboard_repo(self) -> DashboardReadRepository | None:
+        if self.engine is None:
+            return None
+        return DashboardReadRepository(self.engine)
 
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
@@ -765,7 +858,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/conversations": return self._conv()
         if p.startswith("/api/conversations/"): return self._conv_detail(p.rsplit("/",1)[-1])
         if p=="/api/fans": return self._fans()
-        if p=="/api/vault": return self.j({"files":_list_vault(self.vault_dir),"dir":self.vault_dir})
+        if p=="/api/vault": return self._vault()
         if p=="/api/kpis": return self._kpi()
         if p=="/api/scripts": return self._scrs()
         if p=="/api/connection": return self._conn(False)
@@ -776,7 +869,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/vault-albums": return self._vault_albums()
         if p.startswith("/api/vault-albums/") and p.endswith("/media"): return self._vault_album_media(p.split("/")[-2])
         if p.startswith("/api/fan-progress/"): return self._fan_progress(p.rsplit("/",1)[-1])
-        if p=="/api/bot/status": return self.j({"enabled":self.bot.enabled if self.bot else False})
+        if p=="/api/bot/status": return self._bot_status()
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -811,38 +904,113 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _list_notes(self):
         from ..notes.repository import FAN_NOTES_TABLE, _row_to_note
         rows = []
+        if self.engine is None:
+            return rows
         try:
-            with self.bot.note_repo.engine.connect() as c:
-                r = c.execute(FAN_NOTES_TABLE.select().where(FAN_NOTES_TABLE.c.creator_id==self.bot.creator_id))
+            with self.engine.connect() as c:
+                r = c.execute(FAN_NOTES_TABLE.select().where(FAN_NOTES_TABLE.c.creator_id==self.creator_id))
                 for row in r:
                     try: rows.append(_row_to_note(row))
                     except: pass
         except: pass
         return rows
 
+    def _purchase_totals(self):
+        repository = self.dashboard_repo
+        if repository is None:
+            return {}
+        return repository.fan_purchase_totals(self.creator_id)
+
     def _conv(self):
-        if not self.bot: return self.j({"fans":[]})
+        repository=self.dashboard_repo
+        if repository is None:
+            return self.j({"fans":[]})
+        purchases = self._purchase_totals()
+        notes={note.fan_id:note for note in self._list_notes()}
         fans = []
-        for fid,sess in self.bot.sessions.items():
-            n = self.bot.note_repo.get(fid,self.bot.creator_id)
-            fans.append({"fan_id":fid,"display_name":n.display_name if n else None,"spend_tier":n.spend_tier if n else "time_waster","funnel_stage":sess.funnel.current_stage.value,"spiral_level":sess.funnel.level.number,"cooldown":sess.funnel.cooldown,"message_count":sess.message_count,"last_activity":sess.last_activity.isoformat() if sess.last_activity else None,"fact_count":len(n.facts) if n else 0})
+        seen=set()
+        for durable in repository.conversations(self.creator_id):
+            fid=durable.fan_id
+            seen.add(fid)
+            n=notes.get(fid)
+            purchase = purchases.get(fid)
+            total_spent = (
+                purchase.total_spent_millis / 1000
+                if purchase is not None
+                else 0.0
+            )
+            sess=(
+                self.bot.sessions.get(fid)
+                if self.bot is not None
+                else None
+            )
+            fans.append({"fan_id":fid,"display_name":n.display_name if n and n.display_name else durable.display_name,"spend_tier":_spend_tier(total_spent),"funnel_stage":sess.funnel.current_stage.value if sess else durable.phase,"spiral_level":sess.funnel.level.number if sess else durable.escalation_level,"cooldown":sess.funnel.cooldown if sess else durable.cooldown,"message_count":sess.message_count if sess else durable.message_count,"last_activity":(sess.last_activity if sess else durable.last_activity_at).isoformat() if (sess.last_activity if sess else durable.last_activity_at) else None,"fact_count":len(n.facts) if n else 0})
+        if self.bot is not None:
+            for fid,sess in self.bot.sessions.items():
+                if fid in seen:
+                    continue
+                n=notes.get(fid)
+                purchase=purchases.get(fid)
+                total_spent=(
+                    purchase.total_spent_millis/1000
+                    if purchase is not None
+                    else 0.0
+                )
+                fans.append({"fan_id":fid,"display_name":n.display_name if n else None,"spend_tier":_spend_tier(total_spent),"funnel_stage":sess.funnel.current_stage.value,"spiral_level":sess.funnel.level.number,"cooldown":sess.funnel.cooldown,"message_count":sess.message_count,"last_activity":sess.last_activity.isoformat() if sess.last_activity else None,"fact_count":len(n.facts) if n else 0})
         fans.sort(key=lambda f:f.get("last_activity")or"",reverse=True)
-        return self.j({"fans":fans})
+        return self.j({
+            "fans":fans,
+            "source":"durable_state_with_live_overlay",
+        })
 
     def _conv_detail(self, fan_id):
         """Full memory view for one fan: profile, remembered facts, message history."""
-        if not self.bot: return self.j({"error": "bot not initialized"}, 503)
-        note = self.bot.note_repo.get(fan_id, self.bot.creator_id)
-        history = []
-        if self.bot.message_store:
-            history = self.bot.message_store.get_history(fan_id, self.bot.creator_id, limit=100)
-        sess = self.bot.sessions.get(fan_id)
-        style = self.bot._style_profiles.get(fan_id)
+        if self.engine is None:
+            return self.j({"error":"durable state unavailable"},503)
+        from ..memory.store import MessageStore
+        from ..notes.repository import FanNoteRepository
+        from ..persistence.state import ConversationStateRepository
+        note_repo=(
+            self.bot.note_repo
+            if self.bot is not None
+            else FanNoteRepository(engine=self.engine)
+        )
+        note = note_repo.get(fan_id, self.creator_id)
+        purchase = self._purchase_totals().get(fan_id)
+        message_store=(
+            self.bot.message_store
+            if self.bot is not None and self.bot.message_store
+            else MessageStore(engine=self.engine)
+        )
+        history=message_store.get_history(
+            fan_id,
+            self.creator_id,
+            limit=100,
+        )
+        sess=(
+            self.bot.sessions.get(fan_id)
+            if self.bot is not None
+            else None
+        )
+        durable_state=(
+            self.bot.state_repo.load_state(self.creator_id,fan_id)
+            if self.bot is not None and self.bot.state_repo
+            else ConversationStateRepository(self.engine).load_state(
+                self.creator_id,
+                fan_id,
+            )
+        )
+        style=(
+            self.bot._style_profiles.get(fan_id)
+            if self.bot is not None
+            else None
+        )
 
         # Get PPV sequence progress
         seq_progress = []
         try:
-            seq_progress = self.bot.sequence_repo.get_fan_progress(fan_id, self.bot.creator_id)
+            if self.bot is not None:
+                seq_progress = self.bot.sequence_repo.get_fan_progress(fan_id, self.creator_id)
         except Exception:
             pass
         sequences_data = []
@@ -864,16 +1032,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         return self.j({
             "fan_id": fan_id,
-            "profile": _note(note),
+            "profile": _note(note, purchase),
             "facts": note.facts if note else [],
             "preferences": note.preferences if note else [],
             "hard_limits": note.hard_limits if note else [],
-            "funnel_stage": sess.funnel.current_stage.value if sess else None,
+            "funnel_stage": (
+                sess.funnel.current_stage.value
+                if sess
+                else durable_state.phase
+                if durable_state
+                else None
+            ),
             "sequences": sequences_data,
-            "spiral_level": sess.funnel.level.number if sess else 0,
-            "spiral_ppvs_bought": sess.funnel.level.ppvs_bought if sess else 0,
-            "cooldown": sess.funnel.cooldown if sess else False,
-            "warmup": sess.funnel.is_warmup if sess else False,
+            "spiral_level": (
+                sess.funnel.level.number
+                if sess
+                else durable_state.escalation_level
+                if durable_state
+                else 0
+            ),
+            "spiral_ppvs_bought": (
+                sess.funnel.level.ppvs_bought
+                if sess
+                else durable_state.ppvs_bought
+                if durable_state
+                else 0
+            ),
+            "cooldown": (
+                sess.funnel.cooldown
+                if sess
+                else durable_state.cooldown
+                if durable_state
+                else False
+            ),
+            "warmup": (
+                sess.funnel.is_warmup
+                if sess
+                else durable_state.warmup
+                if durable_state
+                else False
+            ),
             "style": {
                 "formality": style.formality if style else "unknown",
                 "avg_length": round(style.avg_length, 1) if style else 0,
@@ -886,61 +1084,387 @@ class DashboardHandler(BaseHTTPRequestHandler):
         })
 
     def _fans(self):
-        if not self.bot: return self.j({"fans":[]})
-        return self.j({"fans":[_note(n) for n in self._list_notes()]})
+        purchases = self._purchase_totals()
+        return self.j({"fans":[
+            _note(n, purchases.get(n.fan_id))
+            for n in self._list_notes()
+        ],"purchase_source":"attributed_provider_events"})
 
     def _kpi(self):
-        if not self.bot: return self.j({"error":"bot not initialized"},503)
-        ns = self._list_notes(); a = len(self.bot.sessions); ts = sum(n.total_spent for n in ns); pc = sum(n.purchase_count for n in ns)
-        k = self.bot.kpi.summary({"subscription_revenue":ts,"dm_revenue":ts,"unlocks":pc,"sends":max(pc*3,1),"total_dm_revenue":ts,"purchase_count":pc,"response_times":[],"completed_scripts":0,"started_scripts":0,"aftercare_count":0,"return_purchase_count":0})
-        k["active_fans"]=a; return self.j(k)
+        repository = self.dashboard_repo
+        if repository is None:
+            return self.j(
+                {"error":"durable metrics store unavailable"},
+                503,
+            )
+        metrics = repository.metrics(self.creator_id)
+        return self.j({
+            "source":"durable_attributed_events",
+            "known_fans":metrics.known_fans,
+            "completed_inbounds":metrics.completed_inbounds,
+            "sent_outbounds":metrics.sent_outbounds,
+            "text_sends":metrics.text_sends,
+            "media_sends":metrics.media_sends,
+            "ppv_sends":metrics.ppv_sends,
+            "blocked_ppv_intents":metrics.blocked_ppv_intents,
+            "delivery_unknown":metrics.delivery_unknown,
+            "attributed_purchases":metrics.attributed_purchases,
+            "attributed_revenue":metrics.attributed_revenue_millis/1000,
+            "aov":(
+                metrics.average_order_value_millis/1000
+                if metrics.average_order_value_millis is not None
+                else None
+            ),
+            "ppv_unlock_rate":metrics.ppv_unlock_rate,
+            "response_time_avg":metrics.average_response_seconds,
+            "wallet_transaction_count":metrics.wallet_transactions,
+            "wallet_latest_balance":(
+                metrics.wallet_latest_balance_millis/1000
+                if metrics.wallet_latest_balance_millis is not None
+                else None
+            ),
+            "chatting_ratio":None,
+            "script_completion_rate":None,
+            "health_label":None,
+            "unavailable_metrics":{
+                "chatting_ratio":"subscription revenue is not attributed by the current Fansly contract",
+                "script_completion_rate":"script execution is not durably tracked",
+                "health_label":"the previous label depended on unavailable subscription revenue",
+            },
+        })
 
     def _scrs(self):
         if not self.bot: return self.j({"scripts":[]})
         return self.j({"scripts":[_script(s) for s in getattr(self.bot.script_library,"templates",[])]})
 
     def _conn(self,test):
-        if not self.bot: return self.j({"connected":False,"account_id":""})
-        ok=False;err=None
+        if not self.client:
+            return self.j({
+                "connected":False,
+                "account_id":"",
+                "status":"unavailable",
+                "live_checked":False,
+                "error":self.server.provider_error
+                or "provider client is not initialized",
+            })
+        ok=bool(self.server.provider_connected)
+        err=self.server.provider_error
         if test:
-            try: self.bot.client.list_chats(filter_type="all",sort="newest");ok=True
-            except Exception as e: err=str(e)[:200]
-        else: ok=True
-        return self.j({"connected":ok,"account_id":(self.bot.account_id[:8]+"..." if self.bot.account_id else ""),"error":err})
+            try:
+                self.client.verify_auth()
+                ok=True
+                err=None
+            except Exception as e:
+                ok=False
+                err=str(e)[:200]
+            self.server.provider_connected=ok
+            self.server.provider_error=err
+            self.server.provider_last_checked_at=datetime.now(
+                timezone.utc
+            )
+        account_id=""
+        if ok:
+            try:
+                resolved=self.client.account_id
+                account_id=(
+                    resolved[:12]+"..."
+                    if resolved and len(resolved)>12
+                    else resolved or ""
+                )
+            except Exception as e:
+                ok=False
+                err=str(e)[:200]
+                self.server.provider_connected=False
+                self.server.provider_error=err
+        return self.j({
+            "connected":ok,
+            "account_id":account_id,
+            "status":(
+                "live_verified"
+                if ok
+                and self.server.provider_last_checked_at is not None
+                else "startup_verified"
+                if ok
+                else "offline"
+            ),
+            "live_checked":bool(
+                self.server.provider_last_checked_at is not None
+            ),
+            "last_checked_at":(
+                self.server.provider_last_checked_at.isoformat()
+                if self.server.provider_last_checked_at
+                else None
+            ),
+            "provider":"OnlyFansAPI Fansly",
+            "error":err,
+        })
+
+    def _bot_status(self):
+        if not self.bot:
+            return self.j({
+                "available":False,
+                "enabled":False,
+                "persisted_enabled":False,
+                "consistent":True,
+                "reason":self.server.provider_error
+                or "bot is not initialized",
+            })
+        enabled=bool(self.bot.enabled)
+        persisted=None
+        if self.engine is not None:
+            try:
+                from ..settings.store import SettingsStore
+                raw=SettingsStore(
+                    engine=self.engine,
+                    creator_id=self.creator_id,
+                ).get("bot_enabled")
+                if raw is not None:
+                    persisted=raw.lower()=="true"
+            except Exception:
+                logger.exception("Failed to read persisted bot state")
+        return self.j({
+            "available":True,
+            "enabled":enabled,
+            "persisted_enabled":persisted,
+            "consistent":(
+                persisted is None or persisted==enabled
+            ),
+            "reason":None,
+        })
 
     def _pers_get(self,q):
-        cid = (q.get("creator",[None])or[None])[0] or (self.bot.creator_id if self.bot else "sunny_charm")
+        cid = (q.get("creator",[None])or[None])[0] or self.creator_id
         if not CREATOR_ID_PATTERN.fullmatch(cid):
             return self.j({"error": "invalid creator id"}, 400)
-        p = Path(PERSONA_DIR)/f"{cid}.yaml"
-        return self.j({"creator_id":cid,"yaml":p.read_text(encoding="utf-8") if p.exists() else ""})
+        p = Path(self.server.persona_dir)/f"{cid}.yaml"
+        return self.j({
+            "creator_id":cid,
+            "yaml":p.read_text(encoding="utf-8") if p.exists() else "",
+            "runtime_applied":bool(
+                self.bot is not None
+                and cid==self.bot.creator_id
+            ),
+        })
 
     def _pers_post(self,q,b):
-        cid = (q.get("creator",[None])or[None])[0] or (self.bot.creator_id if self.bot else "sunny_charm")
+        cid = (q.get("creator",[None])or[None])[0] or self.creator_id
         if not CREATOR_ID_PATTERN.fullmatch(cid):
             return self.j({"error": "invalid creator id"}, 400)
-        try: yaml.safe_load(b)
-        except yaml.YAMLError as e: return self.j({"error":str(e)},400)
-        p = Path(PERSONA_DIR); p.mkdir(parents=True,exist_ok=True); (p/f"{cid}.yaml").write_text(b, encoding="utf-8")
-        return self.j({"status":"ok"})
+        try:
+            data=yaml.safe_load(b)
+            if not isinstance(data,dict):
+                raise ValueError("persona YAML must contain an object")
+            PersonaDocument(**{**data,"creator_id":cid})
+        except Exception as e:
+            return self.j({"error":str(e)},400)
+        directory=Path(self.server.persona_dir)
+        directory.mkdir(parents=True,exist_ok=True)
+        target=directory/f"{cid}.yaml"
+        temporary=directory/f".{cid}.yaml.tmp"
+        try:
+            temporary.write_text(b,encoding="utf-8")
+            os.replace(temporary,target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        applied=False
+        if self.bot is not None and cid==self.bot.creator_id:
+            try:
+                self.bot.reload_persona()
+                applied=True
+            except Exception as e:
+                logger.exception("Failed to apply saved persona")
+                return self.j({
+                    "error":f"saved but runtime reload failed: {e}",
+                    "saved":True,
+                    "runtime_applied":False,
+                },500)
+        return self.j({
+            "status":"ok",
+            "saved":True,
+            "runtime_applied":applied,
+        })
 
     def _bible_get(self):
-        p = Path(BRAND_BIBLE_PATH)
-        return self.j({"content":p.read_text(encoding="utf-8") if p.exists() else "","path":str(p)})
+        p = Path(self.server.brand_bible_path)
+        return self.j({
+            "content":p.read_text(encoding="utf-8") if p.exists() else "",
+            "path":str(p),
+            "runtime_applied":False,
+            "purpose":"operator reference only",
+        })
 
     def _bible_post(self,b):
-        p = Path(BRAND_BIBLE_PATH); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(b, encoding="utf-8")
-        return self.j({"status":"ok"})
+        p = Path(self.server.brand_bible_path)
+        p.parent.mkdir(parents=True,exist_ok=True)
+        temporary=p.with_name(f".{p.name}.tmp")
+        try:
+            temporary.write_text(b,encoding="utf-8")
+            os.replace(temporary,p)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return self.j({
+            "status":"ok",
+            "saved":True,
+            "runtime_applied":False,
+            "purpose":"operator reference only",
+        })
 
     # ─── PPV SEQUENCES ──────────────────────────────────
 
+    def _paid_messages_supported(self) -> bool:
+        if self.client is None:
+            return False
+        return (
+            self.client.capabilities.supports_paid_messages
+            is True
+        )
+
+    @staticmethod
+    def _paid_messages_reason() -> str:
+        return (
+            "OnlyFansAPI's current Fansly send-message contract does "
+            "not document paid/paywalled messages"
+        )
+
+    def _sequence_from_body(self, body, existing=None):
+        data=json.loads(body)
+        if not isinstance(data,dict):
+            raise ValueError("request body must be an object")
+        name=data.get("name",existing.name if existing else "")
+        if not isinstance(name,str) or not name.strip():
+            raise ValueError("sequence name is required")
+        if len(name.strip())>100:
+            raise ValueError("sequence name is too long")
+        trigger=SequenceTrigger(
+            data.get(
+                "trigger",
+                existing.trigger.value if existing else "welcome",
+            )
+        )
+        funnel_stage=data.get(
+            "funnel_stage",
+            existing.funnel_stage if existing else "rapport",
+        )
+        if funnel_stage not in {
+            "rapport",
+            "tease",
+            "offer",
+            "handle",
+            "close",
+        }:
+            raise ValueError("invalid funnel stage")
+        is_active=data.get(
+            "is_active",
+            existing.is_active if existing else False,
+        )
+        if not isinstance(is_active,bool):
+            raise ValueError("is_active must be a boolean")
+        if is_active and not self._paid_messages_supported():
+            raise PermissionError(self._paid_messages_reason())
+        raw_steps=data.get(
+            "steps",
+            existing.steps if existing else [],
+        )
+        if not isinstance(raw_steps,list):
+            raise ValueError("steps must be an array")
+        steps=[]
+        for position,raw in enumerate(raw_steps,start=1):
+            if isinstance(raw,SequenceStep):
+                media_id=raw.media_id
+                preview_id=raw.preview_id
+                price=raw.price
+                tease=raw.tease_script
+                offer=raw.offer_script
+            else:
+                if not isinstance(raw,dict):
+                    raise ValueError(
+                        f"step {position} must be an object"
+                    )
+                media_id=raw.get("media_id","")
+                preview_id=raw.get("preview_id")
+                price=raw.get("price")
+                tease=raw.get("tease_script","")
+                offer=raw.get("offer_script","")
+            if (
+                not isinstance(media_id,str)
+                or not media_id.startswith("fansly_media_")
+            ):
+                raise ValueError(
+                    f"step {position} requires a fansly_media_ ID"
+                )
+            if preview_id not in {None,""}:
+                raise ValueError(
+                    "preview IDs are not present in the current "
+                    "Fansly send-message contract"
+                )
+            if (
+                isinstance(price,bool)
+                or not isinstance(price,(int,float))
+                or not math.isfinite(float(price))
+                or float(price)<=0
+            ):
+                raise ValueError(
+                    f"step {position} requires a positive price"
+                )
+            if not isinstance(tease,str) or not isinstance(offer,str):
+                raise ValueError("sequence scripts must be text")
+            step=SequenceStep(
+                sequence_id=existing.id if existing else 0,
+                position=position,
+                media_id=media_id,
+                preview_id=None,
+                price=float(price),
+                tease_script=tease,
+                offer_script=offer,
+            )
+            steps.append(step)
+        return Sequence(
+            id=existing.id if existing else None,
+            name=name.strip(),
+            trigger=trigger,
+            funnel_stage=funnel_stage,
+            is_active=is_active,
+            created_at=(
+                existing.created_at
+                if existing
+                else datetime.now(timezone.utc)
+            ),
+            steps=steps,
+        )
+
     def _seq_list(self):
-        if not self.bot: return self.j({"sequences":[]})
+        if not self.bot:
+            return self.j({
+                "editing_available":False,
+                "paid_messages_supported":False,
+                "blocked_reason":(
+                    self.server.provider_error
+                    or "bot is not initialized"
+                ),
+                "sequences":[],
+            })
         try:
             seqs = self.bot.sequence_repo.list_sequences()
-            return self.j({"sequences":[
+            supported=self._paid_messages_supported()
+            return self.j({
+                "editing_available":True,
+                "paid_messages_supported":supported,
+                "blocked_reason":(
+                    None
+                    if supported
+                    else self._paid_messages_reason()
+                ),
+                "sequences":[
                 {"id":s.id,"name":s.name,"trigger":s.trigger.value,"funnel_stage":s.funnel_stage,
                  "is_active":s.is_active,"step_count":s.step_count(),"total_price":round(s.total_price(),2),
+                 "effective_active":bool(s.is_active and supported),
+                 "blocked_reason":(
+                     self._paid_messages_reason()
+                     if s.is_active and not supported
+                     else None
+                 ),
                  "created_at":str(s.created_at)}
                 for s in seqs
             ]})
@@ -952,107 +1476,147 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             s = self.bot.sequence_repo.get_sequence(int(seq_id_str))
             if not s: return self.j({"error":"not found"},404)
+            supported=self._paid_messages_supported()
             return self.j({
                 "id":s.id,"name":s.name,"trigger":s.trigger.value,"funnel_stage":s.funnel_stage,
                 "is_active":s.is_active,"step_count":s.step_count(),"total_price":round(s.total_price(),2),
+                "paid_messages_supported":supported,
+                "effective_active":bool(s.is_active and supported),
+                "blocked_reason":(
+                    self._paid_messages_reason()
+                    if not supported
+                    else None
+                ),
                 "created_at":str(s.created_at),
                 "steps":[{"id":st.id,"position":st.position,"media_id":st.media_id,"preview_id":st.preview_id,
                           "price":st.price,"tease_script":st.tease_script,"offer_script":st.offer_script}
                          for st in s.steps]
             })
+        except ValueError as e:
+            return self.j({"error":str(e)},400)
         except Exception as e:
             return self.j({"error":str(e)},500)
 
     def _seq_create(self, body):
         if not self.bot: return self.j({"error":"no bot"},503)
         try:
-            data = json.loads(body)
-            s = Sequence(
-                name=data["name"],
-                trigger=SequenceTrigger(data.get("trigger","welcome")),
-                funnel_stage=data.get("funnel_stage","rapport"),
-                is_active=data.get("is_active",True),
-            )
-            saved = self.bot.sequence_repo.save_sequence(s)
-            if "steps" in data:
-                for step_data in data["steps"]:
-                    step = SequenceStep(
-                        sequence_id=saved.id,
-                        position=step_data.get("position",1),
-                        media_id=step_data.get("media_id",""),
-                        preview_id=step_data.get("preview_id"),
-                        price=float(step_data.get("price",0)),
-                        tease_script=step_data.get("tease_script",""),
-                        offer_script=step_data.get("offer_script",""),
-                    )
-                    self.bot.sequence_repo.save_step(step)
+            s=self._sequence_from_body(body)
+            saved=self.bot.sequence_repo.save_sequence_with_steps(s)
             return self.j({"status":"ok","id":saved.id})
+        except PermissionError as e:
+            return self.j({"error":str(e)},409)
+        except (ValueError,KeyError,json.JSONDecodeError) as e:
+            return self.j({"error":str(e)},400)
         except Exception as e:
+            logger.exception("Failed to create sequence")
             return self.j({"error":str(e)},500)
 
     def _seq_update(self, seq_id_str, body):
         if not self.bot: return self.j({"error":"no bot"},503)
         try:
-            data = json.loads(body)
             s = self.bot.sequence_repo.get_sequence(int(seq_id_str))
             if not s: return self.j({"error":"not found"},404)
-            s.name = data.get("name",s.name)
-            s.trigger = SequenceTrigger(data.get("trigger",s.trigger.value))
-            s.funnel_stage = data.get("funnel_stage",s.funnel_stage)
-            s.is_active = data.get("is_active",s.is_active)
-            self.bot.sequence_repo.save_sequence(s)
-            for st in self.bot.sequence_repo.get_steps(s.id):
-                self.bot.sequence_repo.delete_step(st.id)
-            for step_data in data.get("steps",[]):
-                step = SequenceStep(
-                    sequence_id=s.id,
-                    position=step_data.get("position",1),
-                    media_id=step_data.get("media_id",""),
-                    preview_id=step_data.get("preview_id"),
-                    price=float(step_data.get("price",0)),
-                    tease_script=step_data.get("tease_script",""),
-                    offer_script=step_data.get("offer_script",""),
-                )
-                self.bot.sequence_repo.save_step(step)
+            updated=self._sequence_from_body(body,s)
+            self.bot.sequence_repo.save_sequence_with_steps(updated)
             return self.j({"status":"ok"})
+        except PermissionError as e:
+            return self.j({"error":str(e)},409)
+        except (ValueError,KeyError,json.JSONDecodeError) as e:
+            return self.j({"error":str(e)},400)
         except Exception as e:
+            logger.exception("Failed to update sequence")
             return self.j({"error":str(e)},500)
 
     def _seq_delete(self, seq_id_str):
         if not self.bot: return self.j({"error":"no bot"},503)
         try:
-            self.bot.sequence_repo.delete_sequence(int(seq_id_str))
+            deleted=self.bot.sequence_repo.delete_sequence(
+                int(seq_id_str)
+            )
+            if not deleted:
+                return self.j({"error":"not found"},404)
             return self.j({"status":"ok"})
+        except ValueError as e:
+            return self.j({"error":str(e)},400)
         except Exception as e:
             return self.j({"error":str(e)},500)
 
     # ─── VAULT ALBUMS (Fansly API) ─────────────────────
 
+    def _vault(self):
+        return self.j({
+            "files":_list_vault(self.vault_dir),
+            "dir":self.vault_dir,
+            "provider_ready":False,
+            "reason":(
+                "Local files are not uploaded to OnlyFansAPI. "
+                "Only fansly_media_ IDs returned by the provider upload "
+                "endpoint can be sent."
+            ),
+        })
+
     def _vault_albums(self):
-        if not self.bot: return self.j({"albums":[]})
+        if not self.client:
+            return self.j({
+                "supported":False,
+                "albums":[],
+                "reason":"provider client is unavailable",
+            })
+        if (
+            self.client.capabilities.supports_vault_albums
+            is not True
+        ):
+            return self.j({
+                "supported":False,
+                "albums":[],
+                "reason":(
+                    "Vault album listing is not present in the current "
+                    "OnlyFansAPI Fansly contract"
+                ),
+            })
         try:
-            albums = self.bot.client.list_albums()
-            return self.j({"albums":[
+            albums = self.client.list_albums()
+            return self.j({"supported":True,"albums":[
                 {"id":a.get("id") or a.get("albumId"),"name":a.get("name") or a.get("label","Album")}
                 for a in albums
             ]})
         except Exception as e:
-            return self.j({"error":str(e),"albums":[]})
+            return self.j({
+                "supported":False,
+                "error":str(e),
+                "albums":[],
+            })
 
     def _vault_album_media(self, album_id):
-        if not self.bot: return self.j({"media":[]})
+        if (
+            not self.client
+            or self.client.capabilities.supports_vault_albums
+            is not True
+        ):
+            return self.j({
+                "supported":False,
+                "media":[],
+                "reason":(
+                    "Vault album media listing is not present in the "
+                    "current OnlyFansAPI Fansly contract"
+                ),
+            })
         try:
-            media, _ = self.bot.client.get_album_media(album_id)
+            media, _ = self.client.get_album_media(album_id)
             if isinstance(media,list):
-                return self.j({"media":[
+                return self.j({"supported":True,"media":[
                     {"id":m.get("id") or m.get("mediaId"),"mediaId":m.get("mediaId"),
                      "type":m.get("type","unknown"),"label":m.get("label") or m.get("description",""),
                      "previewId":m.get("previewId")}
                     for m in media
                 ]})
-            return self.j({"media":[]})
+            return self.j({"supported":True,"media":[]})
         except Exception as e:
-            return self.j({"error":str(e),"media":[]})
+            return self.j({
+                "supported":False,
+                "error":str(e),
+                "media":[],
+            })
 
     # ─── FAN PROGRESS ──────────────────────────────────
 
@@ -1083,20 +1647,57 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """Toggle bot on/off and persist to DB."""
         if not self.bot:
             return self.j({"error": "bot not initialized"}, 503)
+        old_state=bool(self.bot.enabled)
+        persisted=False
         try:
             data = json.loads(body) if body else {}
-            force = data.get("enabled") if "enabled" in data else None
-            new_state = self.bot.toggle(force=force)
-            # Persist to DB
+            if not isinstance(data,dict):
+                return self.j({"error":"request body must be an object"},400)
+            if "enabled" in data and not isinstance(
+                data["enabled"],
+                bool,
+            ):
+                return self.j({"error":"enabled must be a boolean"},400)
+            target = (
+                data["enabled"]
+                if "enabled" in data
+                else not old_state
+            )
             from ..settings.store import SettingsStore
             store = SettingsStore(
-                engine=self.bot.note_repo.engine,
-                creator_id=self.bot.creator_id,
+                engine=self.engine,
+                creator_id=self.creator_id,
             )
             store.create_table()
-            store.set("bot_enabled", str(new_state).lower())
-            return self.j({"enabled": new_state})
+            store.set("bot_enabled", str(target).lower())
+            persisted=True
+            new_state = self.bot.toggle(force=target)
+            if bool(new_state) != target:
+                raise RuntimeError("bot rejected the requested state")
+            return self.j({
+                "available":True,
+                "enabled":bool(new_state),
+                "persisted_enabled":target,
+                "consistent":True,
+            })
         except Exception as e:
+            if persisted:
+                try:
+                    store.set(
+                        "bot_enabled",
+                        str(old_state).lower(),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to roll back persisted bot state"
+                    )
+            if bool(self.bot.enabled) != old_state:
+                try:
+                    self.bot.toggle(force=old_state)
+                except Exception:
+                    logger.exception(
+                        "Failed to roll back in-memory bot state"
+                    )
             return self.j({"error": str(e)}, 500)
 
     def log_message(self,*a): pass
@@ -1107,6 +1708,13 @@ class DashboardServer:
         bot,
         port=8080,
         vault_dir="/data/videos",
+        engine=None,
+        client=None,
+        creator_id: Optional[str] = None,
+        provider_connected: Optional[bool] = None,
+        provider_error: Optional[str] = None,
+        persona_dir: Optional[str] = None,
+        brand_bible_path: Optional[str] = None,
         dashboard_user: Optional[str] = None,
         dashboard_password: Optional[str] = None,
         allowed_hosts: Optional[set[str]] = None,
@@ -1131,6 +1739,30 @@ class DashboardServer:
         self.server.daemon_threads = True
         self.server.bot = bot
         self.server.vault_dir = vault_dir
+        self.server.engine = engine or (
+            bot.note_repo.engine if bot is not None else None
+        )
+        self.server.client = client or (
+            bot.client if bot is not None else None
+        )
+        self.server.creator_id = creator_id or (
+            bot.creator_id if bot is not None else "sunny_charm"
+        )
+        self.server.provider_connected = (
+            bool(bot is not None)
+            if provider_connected is None
+            else bool(provider_connected)
+        )
+        self.server.provider_error = provider_error
+        self.server.provider_last_checked_at = None
+        self.server.persona_dir = persona_dir or (
+            bot.persona_loader.config_dir
+            if bot is not None and hasattr(bot, "persona_loader")
+            else PERSONA_DIR
+        )
+        self.server.brand_bible_path = (
+            brand_bible_path or BRAND_BIBLE_PATH
+        )
         self.server.dashboard_user = (
             os.getenv("DASHBOARD_USER", "")
             if dashboard_user is None

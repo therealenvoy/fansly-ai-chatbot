@@ -158,6 +158,69 @@ class SequenceRepository:
 
         return seq
 
+    def save_sequence_with_steps(self, seq: Sequence) -> Sequence:
+        """Atomically save a sequence and replace its ordered steps."""
+        sequence_values = {
+            "name": seq.name,
+            "trigger": seq.trigger.value,
+            "funnel_stage": seq.funnel_stage,
+            "is_active": seq.is_active,
+        }
+        original_id = seq.id
+        try:
+            with self.engine.begin() as conn:
+                if seq.id is None:
+                    result = conn.execute(
+                        SEQUENCES_TABLE.insert().values(
+                            **sequence_values
+                        )
+                    )
+                    seq.id = result.inserted_primary_key[0]
+                else:
+                    result = conn.execute(
+                        SEQUENCES_TABLE.update()
+                        .where(SEQUENCES_TABLE.c.id == seq.id)
+                        .values(**sequence_values)
+                    )
+                    if result.rowcount != 1:
+                        raise ValueError(
+                            f"Sequence {seq.id} does not exist"
+                        )
+                    conn.execute(
+                        STEPS_TABLE.delete().where(
+                            STEPS_TABLE.c.sequence_id == seq.id
+                        )
+                    )
+
+                saved_steps = []
+                for position, step in enumerate(
+                    sorted(
+                        seq.steps,
+                        key=lambda item: item.position,
+                    ),
+                    start=1,
+                ):
+                    result = conn.execute(
+                        STEPS_TABLE.insert().values(
+                            sequence_id=seq.id,
+                            position=position,
+                            media_id=step.media_id,
+                            preview_id=step.preview_id,
+                            price=step.price,
+                            tease_script=step.tease_script,
+                            offer_script=step.offer_script,
+                        )
+                    )
+                    step.id = result.inserted_primary_key[0]
+                    step.sequence_id = seq.id
+                    step.position = position
+                    saved_steps.append(step)
+                seq.steps = saved_steps
+        except Exception:
+            seq.id = original_id
+            raise
+        return seq
+
     def get_sequence(self, sequence_id: int) -> Optional[Sequence]:
         with self.engine.connect() as conn:
             row = conn.execute(
@@ -182,13 +245,20 @@ class SequenceRepository:
             sq.steps = self.get_steps(sq.id)
         return sequences
 
-    def delete_sequence(self, sequence_id: int):
-        """Delete a sequence and all its steps + progress records."""
-        with self.engine.connect() as conn:
+    def delete_sequence(self, sequence_id: int) -> bool:
+        """Delete a sequence and its dependent rows, returning whether it existed."""
+        with self.engine.begin() as conn:
+            exists = conn.execute(
+                SEQUENCES_TABLE.select()
+                .where(SEQUENCES_TABLE.c.id == sequence_id)
+                .with_only_columns(SEQUENCES_TABLE.c.id)
+            ).first()
+            if exists is None:
+                return False
             conn.execute(STEPS_TABLE.delete().where(STEPS_TABLE.c.sequence_id == sequence_id))
             conn.execute(PROGRESS_TABLE.delete().where(PROGRESS_TABLE.c.sequence_id == sequence_id))
             conn.execute(SEQUENCES_TABLE.delete().where(SEQUENCES_TABLE.c.id == sequence_id))
-            conn.commit()
+        return True
 
     # ─── STEPS ─────────────────────────────────────────
 
