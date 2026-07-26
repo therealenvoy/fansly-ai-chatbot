@@ -19,7 +19,10 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional, TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
+from sqlalchemy import text
+
 from ..persistence.dashboard import DashboardReadRepository
+from ..persistence.pipeline import MessageProcessingRepository
 from ..persona.models import PersonaDocument
 from ..sequences.models import Sequence, SequenceTrigger, SequenceStep, FanSequenceProgress, StepStatus
 
@@ -780,8 +783,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return False
         normalized = hostname.lower()
         if normalized == "healthcheck.railway.app":
-            return self.path.split("?", 1)[0] == "/health"
+            return self.path.split("?", 1)[0] in {"/health", "/ready"}
         return normalized in self.server.allowed_hosts
+
+    def _database_ready(self) -> bool:
+        if self.engine is None:
+            return False
+        try:
+            with self.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            return True
+        except Exception:
+            logger.exception("Database readiness check failed")
+            return False
 
     def _is_authenticated(self):
         expected_user = self.server.dashboard_user
@@ -857,6 +871,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._host_is_allowed():
             return self.j({"error": "invalid host"}, 400)
         if p=="/health": return self.j({"status":"ok","service":"fansly-bot"})
+        if p=="/ready":
+            ready = self._database_ready()
+            return self.j(
+                {"status":"ready" if ready else "not_ready","service":"fansly-bot"},
+                200 if ready else 503,
+            )
         if not self._authorize():
             return
         if p in ("/","/dashboard"): return self.h(DASHBOARD_HTML)
@@ -875,6 +895,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/vault-albums/") and p.endswith("/media"): return self._vault_album_media(p.split("/")[-2])
         if p.startswith("/api/fan-progress/"): return self._fan_progress(p.rsplit("/",1)[-1])
         if p=="/api/bot/status": return self._bot_status()
+        if p=="/api/operations": return self._operations()
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1213,6 +1234,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "consistent":True,
                 "reason":self.server.provider_error
                 or "bot is not initialized",
+                "controlled_launch":False,
+                "launch_ready":False,
+                "allowed_fan_count":0,
             })
         enabled=bool(self.bot.enabled)
         persisted=None
@@ -1235,6 +1259,63 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 persisted is None or persisted==enabled
             ),
             "reason":None,
+            "controlled_launch":bool(
+                getattr(self.bot, "require_fan_allowlist", False)
+            ),
+            "launch_ready":bool(
+                getattr(self.bot, "launch_ready", True)
+            ),
+            "allowed_fan_count":len(
+                getattr(self.bot, "allowed_fan_ids", ())
+            ),
+            "launch_block_reason":getattr(
+                self.bot,
+                "launch_block_reason",
+                None,
+            ),
+        })
+
+    def _operations(self):
+        pipeline_counts = {}
+        if self.engine is not None:
+            try:
+                pipeline_counts = MessageProcessingRepository(
+                    self.engine
+                ).counts(self.creator_id)
+            except Exception:
+                logger.exception("Failed to load pipeline counts")
+        runtime = (
+            self.server.runtime_monitor.snapshot()
+            if self.server.runtime_monitor is not None
+            else {}
+        )
+        return self.j({
+            "runtime":runtime,
+            "database_ready":self._database_ready(),
+            "provider":{
+                "connected":bool(self.server.provider_connected),
+                "blocked":bool(self.server.provider_error),
+            },
+            "bot":{
+                "available":self.bot is not None,
+                "enabled":bool(self.bot and self.bot.enabled),
+                "controlled_launch":bool(
+                    self.bot
+                    and getattr(
+                        self.bot,
+                        "require_fan_allowlist",
+                        False,
+                    )
+                ),
+                "launch_ready":bool(
+                    self.bot
+                    and getattr(self.bot, "launch_ready", True)
+                ),
+                "allowed_fan_count":len(
+                    getattr(self.bot, "allowed_fan_ids", ())
+                ) if self.bot else 0,
+            },
+            "pipeline":pipeline_counts,
         })
 
     def _pers_get(self,q):
@@ -1703,7 +1784,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     logger.exception(
                         "Failed to roll back in-memory bot state"
                     )
-            return self.j({"error": str(e)}, 500)
+            from ..bot import LaunchGuardError
+            status = 409 if isinstance(e, LaunchGuardError) else 500
+            return self.j({"error": str(e)}, status)
 
     def log_message(self,*a): pass
 
@@ -1724,6 +1807,7 @@ class DashboardServer:
         dashboard_password: Optional[str] = None,
         allowed_hosts: Optional[set[str]] = None,
         csrf_token: Optional[str] = None,
+        runtime_monitor=None,
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
         if allowed_hosts is None:
@@ -1760,6 +1844,7 @@ class DashboardServer:
         )
         self.server.provider_error = provider_error
         self.server.provider_last_checked_at = None
+        self.server.runtime_monitor = runtime_monitor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
             if bot is not None and hasattr(bot, "persona_loader")

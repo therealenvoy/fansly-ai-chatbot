@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.fansly_client import ProviderCapabilities
+from src.bot import LaunchGuardError
 from src.notes.repository import FAN_NOTES_TABLE
 from src.settings.store import SettingsStore
 from src.persistence.database import create_database_engine
@@ -179,6 +180,62 @@ class TestBotStatusEndpoints:
         assert status == 200
         assert body == {"status": "ok", "service": "fansly-bot"}
 
+    def test_ready_is_public_and_checks_database(self, running_server):
+        host, _, _ = running_server
+
+        status, body = _get(host, "/ready", authenticated=False)
+
+        assert status == 200
+        assert body == {"status": "ready", "service": "fansly-bot"}
+
+    def test_ready_fails_when_database_is_unavailable(self):
+        server = DashboardServer(
+            None,
+            port=0,
+            dashboard_user=TEST_USER,
+            dashboard_password=TEST_PASSWORD,
+        )
+        port = server.server.server_address[1]
+        thread = threading.Thread(
+            target=server.server.serve_forever,
+            daemon=True,
+        )
+        thread.start()
+        try:
+            status, body = _get(
+                f"127.0.0.1:{port}",
+                "/ready",
+                authenticated=False,
+            )
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+        assert status == 503
+        assert body == {
+            "status": "not_ready",
+            "service": "fansly-bot",
+        }
+
+    def test_operations_requires_auth_and_reports_pipeline(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, _ = _get(
+            host,
+            "/api/operations",
+            authenticated=False,
+        )
+        assert status == 401
+
+        status, body = _get(host, "/api/operations")
+        assert status == 200
+        assert body["database_ready"] is True
+        assert body["bot"]["available"] is True
+        assert isinstance(body["pipeline"], dict)
+
     def test_bot_status_reflects_enabled_state(self, running_server):
         host, bot, _ = running_server
         bot.enabled = False
@@ -188,6 +245,28 @@ class TestBotStatusEndpoints:
         assert body["enabled"] is False
         assert body["persisted_enabled"] is None
         assert body["consistent"] is True
+
+    def test_empty_controlled_launch_rejects_enable(self, running_server):
+        host, bot, db_url = running_server
+        bot.enabled = False
+        bot.require_fan_allowlist = True
+        bot.allowed_fan_ids = frozenset()
+        bot.launch_ready = False
+        bot.launch_block_reason = (
+            "controlled launch requires at least one FAN_ALLOWLIST entry"
+        )
+        bot.toggle.side_effect = LaunchGuardError(
+            bot.launch_block_reason
+        )
+
+        status, body = _post(host, "/api/bot/toggle", {"enabled": True})
+
+        assert status == 409
+        assert "FAN_ALLOWLIST" in body["error"]
+        assert SettingsStore(
+            db_url=db_url,
+            creator_id=bot.creator_id,
+        ).get("bot_enabled") == "false"
 
     def test_connection_check_is_post_only(self, running_server):
         host, bot, _ = running_server
@@ -326,7 +405,7 @@ class TestDashboardSecurity:
         assert status == 400
         assert body == {"error": "invalid host"}
 
-    def test_railway_healthcheck_host_can_only_reach_health(
+    def test_railway_healthcheck_host_can_only_reach_probes(
         self,
         running_server,
     ):
@@ -340,6 +419,15 @@ class TestDashboardSecurity:
         )
         assert status == 200
         assert body == {"status": "ok", "service": "fansly-bot"}
+
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/ready",
+            headers={"Host": "healthcheck.railway.app"},
+        )
+        assert status == 200
+        assert body == {"status": "ready", "service": "fansly-bot"}
 
         status, body, _ = _request(
             host,

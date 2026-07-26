@@ -15,12 +15,13 @@ python -m src.main
 The process listens on Railway's injected `PORT`. `railway.json` configures:
 
 - Dockerfile builds;
-- deployment health checks on `/health`;
+- deployment readiness checks on `/ready`;
 - a 120-second startup window;
 - restart on failure with at most 10 retries.
 
 Railway sends deployment health checks with the host
-`healthcheck.railway.app`. That host is accepted only for `/health`; it cannot
+`healthcheck.railway.app`. That host is accepted only for `/health` and
+`/ready`; it cannot
 reach the authenticated dashboard.
 
 ## Runtime data
@@ -59,4 +60,4 @@ python -m src.main
 ```
 
 Before a production rollout, verify the image boots with production
-dependencies only and that `/health` returns HTTP 200.
+dependencies only and that `/health` and `/ready` return HTTP 200.

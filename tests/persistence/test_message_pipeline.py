@@ -129,6 +129,42 @@ def test_pipeline_sorts_oldest_first_and_sends_every_message_once():
     assert bot.client.send_message.call_count == 3
 
 
+def test_controlled_launch_ingests_only_allowlisted_fans():
+    engine, bot = _bot()
+    bot.require_fan_allowlist = True
+    bot.allowed_fan_ids = frozenset({"pilot"})
+    allowed = _chat(
+        unread_count=1,
+        last_message_id="message-1",
+        chat_id="allowed-chat",
+        fan_id="pilot",
+    )
+    blocked = _chat(
+        unread_count=1,
+        last_message_id="message-2",
+        chat_id="blocked-chat",
+        fan_id="not-pilot",
+    )
+    bot.client.list_chats_page.return_value = ([blocked, allowed], None)
+    bot.client.list_messages.return_value = ([_message(1)], None)
+    bot._prepare_message = MagicMock(return_value=None)
+
+    assert bot.poll_and_process() is True
+
+    bot.client.list_messages.assert_called_once_with(
+        "allowed-chat",
+        limit=100,
+        cursor=None,
+    )
+    rows = _rows(engine, INBOUND_MESSAGES)
+    assert [row["fan_id"] for row in rows] == ["pilot"]
+    assert bot._chat_cursor_scope().startswith("changed-chats:pilot:")
+    assert bot.state_repo.get_poll_cursor(
+        "creator-a",
+        bot._chat_cursor_scope(),
+    ) == bot._chat_checkpoint(allowed)
+
+
 def test_first_scan_processes_only_the_provider_unread_window():
     engine, bot = _bot()
     chat = _chat(unread_count=2, last_message_id="message-5")

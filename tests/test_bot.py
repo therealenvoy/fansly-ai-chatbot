@@ -1,7 +1,7 @@
 """Tests for FanslyBot on/off toggle."""
 import pytest
 from unittest.mock import MagicMock, patch
-from src.bot import FanslyBot
+from src.bot import FanslyBot, LaunchGuardError
 from src.notes.repository import FanNoteRepository
 from src.persona.loader import PersonaLoader
 from src.fansly_client import FanslyApiClient, FanslyConfig
@@ -96,6 +96,45 @@ def test_toggle_force_false(bot):
     bot.enabled = True
     bot.toggle(force=False)
     assert bot.enabled == False
+
+
+def test_controlled_launch_rejects_enable_without_allowlist(bot):
+    bot.require_fan_allowlist = True
+    bot.allowed_fan_ids = frozenset()
+    bot.enabled = False
+
+    with pytest.raises(LaunchGuardError, match="FAN_ALLOWLIST"):
+        bot.toggle(force=True)
+
+    assert bot.enabled is False
+
+
+def test_controlled_launch_filters_compatibility_chats(bot):
+    from src.fansly_client import ChatInfo
+
+    bot.require_fan_allowlist = True
+    bot.allowed_fan_ids = frozenset({"pilot"})
+    bot.client.get_all_chats.return_value = [
+        ChatInfo(
+            chat_id="allowed",
+            partner_account_id="pilot",
+            partner_username="pilot",
+            partner_display_name="Pilot",
+            unread_count=1,
+        ),
+        ChatInfo(
+            chat_id="blocked",
+            partner_account_id="not-pilot",
+            partner_username="other",
+            partner_display_name="Other",
+            unread_count=1,
+        ),
+    ]
+    bot.client.list_messages.return_value = ([], None)
+
+    bot.poll_and_process()
+
+    bot.client.list_messages.assert_called_once_with("allowed", limit=10)
 
 
 def test_poll_skips_list_messages_for_chats_with_no_unread(bot):

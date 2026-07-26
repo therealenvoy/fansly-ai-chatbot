@@ -37,7 +37,7 @@ def _make_controlled_bot(poll_side_effects=None, module_ref=None):
 
     iter_idx = [0]
 
-    def _poll():
+    def _poll(*_args, **_kwargs):
         idx = iter_idx[0]
         iter_idx[0] += 1
         if idx >= len(poll_side_effects):
@@ -95,6 +95,8 @@ def cleanup_env():
         "FANSLY_API_KEY", "FANSLY_ACCOUNT_ID", "POLL_INTERVAL",
         "MAX_BACKOFF", "IDLE_BACKOFF_MAX", "FANSLY_PROVIDER",
         "DATABASE_URL", "PORT", "DEEPSEEK_API_KEY", "CREATOR_ID",
+        "CONTROLLED_LAUNCH", "BOT_ENABLED_DEFAULT", "FAN_ALLOWLIST",
+        "MAX_MESSAGES_PER_POLL",
     )}
     yield
     for k, v in saved.items():
@@ -114,6 +116,10 @@ def standard_env():
     os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
     os.environ.setdefault("PORT", "19999")
     os.environ.setdefault("CREATOR_ID", "test_creator")
+    os.environ["CONTROLLED_LAUNCH"] = "true"
+    os.environ["BOT_ENABLED_DEFAULT"] = "false"
+    os.environ["FAN_ALLOWLIST"] = "pilot-fan"
+    os.environ["MAX_MESSAGES_PER_POLL"] = "5"
 
 
 @pytest.fixture
@@ -215,6 +221,34 @@ class TestStartupAuthValidation:
             "API authentication verified" in r.message
             for r in caplog.records
         ), "Expected info log 'API authentication verified'"
+
+    def test_controlled_launch_arguments_and_fail_closed_default(
+        self,
+        module,
+        mock_deps,
+    ):
+        importlib.reload(module)
+
+        kwargs = mock_deps["bot_cls"].call_args.kwargs
+        assert kwargs["allowed_fan_ids"] == {"pilot-fan"}
+        assert kwargs["require_fan_allowlist"] is True
+        assert module.bot.enabled is False
+
+    def test_empty_pilot_allowlist_blocks_enabled_default(
+        self,
+        module,
+        mock_deps,
+    ):
+        os.environ["BOT_ENABLED_DEFAULT"] = "true"
+        os.environ["FAN_ALLOWLIST"] = ""
+        mock_deps["bot"].launch_ready = False
+        mock_deps["bot"].launch_block_reason = (
+            "controlled launch requires at least one FAN_ALLOWLIST entry"
+        )
+
+        importlib.reload(module)
+
+        assert module.bot.enabled is False
 
     def test_auth_check_warns_and_disables_bot_on_401(self, module, caplog, mock_deps):
         """AuthError logs a warning and disables the bot — no sys.exit."""
@@ -376,7 +410,7 @@ class TestIdleAdaptiveBackoff:
         bot.sequence_repo = MagicMock()
         iter_idx = [0]
 
-        def _poll():
+        def _poll(*_args, **_kwargs):
             idx = iter_idx[0]
             iter_idx[0] += 1
             if idx >= len(poll_return_values):

@@ -5,6 +5,7 @@ __pycache__/
 .tmp-pytest*/
 .tmp/
 .runtime-deps/
+.testdeps/
 
 # Local databases - never commit fan data
 data/*.db

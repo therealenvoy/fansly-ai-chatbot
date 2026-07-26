@@ -65,7 +65,7 @@ def test_dockerfile_copies_only_runtime_inputs_and_has_healthcheck():
     assert "COPY migrations ./migrations" in dockerfile
     assert "COPY . ." not in dockerfile
     assert "HEALTHCHECK" in dockerfile
-    assert "/health" in dockerfile
+    assert "/ready" in dockerfile
     assert 'CMD ["python", "-m", "src.main"]' in dockerfile
 
 
@@ -76,7 +76,7 @@ def test_railway_config_enforces_healthcheck_and_restart_policy():
 
     assert config["build"]["builder"] == "DOCKERFILE"
     assert config["deploy"] == {
-        "healthcheckPath": "/health",
+        "healthcheckPath": "/ready",
         "healthcheckTimeout": 120,
         "restartPolicyType": "ON_FAILURE",
         "restartPolicyMaxRetries": 10,

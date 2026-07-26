@@ -33,6 +33,7 @@ from .settings.store import SettingsStore
 from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
+from .operations import RuntimeMonitor
 
 load_dotenv()
 
@@ -41,6 +42,13 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("fansly-bot")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 # ─── Config ────────────────────────────────────────────
 
@@ -51,6 +59,17 @@ IDLE_BACKOFF_MAX = int(os.getenv("IDLE_BACKOFF_MAX", "600"))  # cap for idle bac
 MAX_BACKOFF = int(os.getenv("MAX_BACKOFF", "600"))      # max seconds between polls on error
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///data/fansly_bot.db")
 PORT = int(os.getenv("PORT", "8080"))
+CONTROLLED_LAUNCH = _env_bool("CONTROLLED_LAUNCH", True)
+BOT_ENABLED_DEFAULT = _env_bool("BOT_ENABLED_DEFAULT", False)
+MAX_MESSAGES_PER_POLL = max(
+    1,
+    int(os.getenv("MAX_MESSAGES_PER_POLL", "5")),
+)
+FAN_ALLOWLIST = {
+    fan_id.strip()
+    for fan_id in os.getenv("FAN_ALLOWLIST", "").split(",")
+    if fan_id.strip()
+}
 PERSONA_CONFIG_DIR = os.getenv(
     "PERSONA_DIR",
     (
@@ -106,6 +125,7 @@ settings_store = SettingsStore(
 settings_store.create_table()
 state_repo = ConversationStateRepository(database_engine)
 state_repo.ensure_creator(CREATOR_ID)
+runtime_monitor = RuntimeMonitor()
 
 # ─── Startup Auth Validation ───────────────────────────
 
@@ -139,10 +159,23 @@ if api_ok:
             message_store=message_store,
             fact_extractor=fact_extractor,
             state_repo=state_repo,
+            allowed_fan_ids=FAN_ALLOWLIST,
+            require_fan_allowlist=CONTROLLED_LAUNCH,
         )
         bot.sequence_repo.create_tables()
-        bot_enabled_str = settings_store.get("bot_enabled", "true")
-        bot.enabled = bot_enabled_str.lower() == "true"
+        bot_enabled_str = settings_store.get(
+            "bot_enabled",
+            str(BOT_ENABLED_DEFAULT).lower(),
+        )
+        requested_enabled = str(bot_enabled_str).lower() == "true"
+        if requested_enabled and not bool(bot.launch_ready):
+            requested_enabled = False
+            settings_store.set("bot_enabled", "false")
+            logger.warning(
+                "Persisted bot enable was blocked: %s",
+                bot.launch_block_reason,
+            )
+        bot.enabled = requested_enabled
         logger.info(f"Bot enabled state from DB: {bot.enabled}")
     except Exception as e:
         api_error = str(e)
@@ -203,6 +236,7 @@ dashboard = DashboardServer(
     provider_error=api_error,
     persona_dir=PERSONA_CONFIG_DIR,
     brand_bible_path=BRAND_BIBLE_CONFIG_PATH,
+    runtime_monitor=runtime_monitor,
 )
 
 
@@ -229,19 +263,27 @@ consecutive_idle_cycles = 0
 
 while running:
     had_activity = False
+    runtime_monitor.poll_started()
     try:
-        had_activity = bot.poll_and_process() if bot is not None else False
+        had_activity = (
+            bot.poll_and_process(max_chats=MAX_MESSAGES_PER_POLL)
+            if bot is not None
+            else False
+        )
         consecutive_failures = 0  # reset on success
+        runtime_monitor.poll_succeeded(had_activity=bool(had_activity))
     except (AuthError, PaymentRequiredError) as e:
         bot.enabled = False
         settings_store.set("bot_enabled", "false")
         consecutive_failures = 0
+        runtime_monitor.provider_blocked(e)
         logger.warning(
             f"API access unavailable: {e}. "
             "Bot disabled; dashboard remains available."
         )
     except Exception as e:
         consecutive_failures += 1
+        runtime_monitor.poll_failed(e)
         logger.error(f"Error in main loop ({consecutive_failures} consecutive): {e}", exc_info=True)
 
     # Failure backoff takes priority over idle backoff for this cycle.

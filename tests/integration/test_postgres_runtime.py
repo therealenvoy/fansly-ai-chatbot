@@ -143,3 +143,49 @@ def test_postgres_pipeline_is_idempotent_ordered_and_durable(
         older.platform_message_id,
     )
     assert pipeline.claim_next_inbound(creator_id).id == newer.id
+
+
+def test_postgres_pilot_claim_does_not_wait_on_disallowed_fan(
+    postgres_engine,
+):
+    suffix = uuid4().hex[:12]
+    creator_id = f"ci-pilot-{suffix}"
+    allowed_fan = f"allowed-{suffix}"
+    blocked_fan = f"blocked-{suffix}"
+    state = ConversationStateRepository(postgres_engine)
+    pipeline = MessageProcessingRepository(postgres_engine)
+    state.ensure_creator(creator_id)
+    state.ensure_conversation(
+        creator_id,
+        blocked_fan,
+        f"blocked-chat-{suffix}",
+    )
+    state.ensure_conversation(
+        creator_id,
+        allowed_fan,
+        f"allowed-chat-{suffix}",
+    )
+    now = datetime.now(timezone.utc)
+    pipeline.insert_inbound(
+        creator_id=creator_id,
+        platform_message_id=f"blocked-message-{suffix}",
+        fan_id=blocked_fan,
+        chat_id=f"blocked-chat-{suffix}",
+        content="older but outside pilot",
+        provider_created_at=now,
+    )
+    allowed, _ = pipeline.insert_inbound(
+        creator_id=creator_id,
+        platform_message_id=f"allowed-message-{suffix}",
+        fan_id=allowed_fan,
+        chat_id=f"allowed-chat-{suffix}",
+        content="pilot",
+        provider_created_at=now + timedelta(seconds=1),
+    )
+
+    claimed = pipeline.claim_next_inbound(
+        creator_id,
+        allowed_fan_ids={allowed_fan},
+    )
+
+    assert claimed.id == allowed.id

@@ -7,6 +7,7 @@ aftercare, and tier systems before a response is generated.
 """
 
 import json
+import hashlib
 import logging
 from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
@@ -55,6 +56,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class LaunchGuardError(RuntimeError):
+    """Raised when an operator tries to enable an unsafe pilot launch."""
+
+
 class FanslyBot:
     """Main orchestrator for the Fansly AI chatbot."""
 
@@ -67,6 +72,8 @@ class FanslyBot:
         message_store: Optional[MessageStore] = None,
         fact_extractor: Optional[LLMFactExtractor] = None,
         state_repo: Optional["ConversationStateRepository"] = None,
+        allowed_fan_ids: Optional[set[str]] = None,
+        require_fan_allowlist: bool = False,
     ):
         self.client = client
         self.persona_loader = persona_loader
@@ -88,6 +95,12 @@ class FanslyBot:
         self.message_store = message_store
         self.fact_extractor = fact_extractor
         self.state_repo = state_repo
+        self.allowed_fan_ids = frozenset(
+            str(fan_id).strip()
+            for fan_id in (allowed_fan_ids or set())
+            if str(fan_id).strip()
+        )
+        self.require_fan_allowlist = bool(require_fan_allowlist)
         self.processing_repo = (
             MessageProcessingRepository(state_repo.engine)
             if state_repo is not None
@@ -172,7 +185,11 @@ class FanslyBot:
                 max_messages=max_chats,
             )
 
-        chats = self.client.get_all_chats(filter_type=filter_type)
+        chats = [
+            chat
+            for chat in self.client.get_all_chats(filter_type=filter_type)
+            if self._fan_allowed(chat.partner_account_id)
+        ]
         unread_chats = [c for c in chats if c.unread_count > 0]
         logger.info(f"{len(chats)} chats total, {len(unread_chats)} with unread messages")
 
@@ -189,9 +206,10 @@ class FanslyBot:
     def _poll_and_process_durable(self, *, max_messages: int) -> bool:
         """Ingest changed chats, then drain the durable inbox oldest-first."""
         ledger_updates = self._sync_wallet_transactions()
+        cursor_scope = self._chat_cursor_scope()
         checkpoint = self.state_repo.get_poll_cursor(
             self.creator_id,
-            "changed-chats",
+            cursor_scope,
         )
         chats, next_checkpoint = self._fetch_incremental_chats(checkpoint)
         ingested = 0
@@ -208,14 +226,19 @@ class FanslyBot:
         if scan_complete and next_checkpoint is not None:
             self.state_repo.set_poll_cursor(
                 self.creator_id,
-                "changed-chats",
+                cursor_scope,
                 next_checkpoint,
             )
 
         processed = 0
         for _ in range(max(0, max_messages)):
             inbound = self.processing_repo.claim_next_inbound(
-                self.creator_id
+                self.creator_id,
+                allowed_fan_ids=(
+                    set(self.allowed_fan_ids)
+                    if self.require_fan_allowlist
+                    else None
+                ),
             )
             if inbound is None:
                 break
@@ -224,6 +247,29 @@ class FanslyBot:
             if not terminal:
                 break
         return bool(ledger_updates or ingested or processed)
+
+    def _chat_cursor_scope(self) -> str:
+        if not self.require_fan_allowlist:
+            return "changed-chats"
+        fingerprint = hashlib.sha256(
+            "\0".join(sorted(self.allowed_fan_ids)).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"changed-chats:pilot:{fingerprint}"
+
+    def _fan_allowed(self, fan_id: str) -> bool:
+        if not self.require_fan_allowlist:
+            return True
+        return str(fan_id) in self.allowed_fan_ids
+
+    @property
+    def launch_ready(self) -> bool:
+        return not self.require_fan_allowlist or bool(self.allowed_fan_ids)
+
+    @property
+    def launch_block_reason(self) -> str | None:
+        if self.launch_ready:
+            return None
+        return "controlled launch requires at least one FAN_ALLOWLIST entry"
 
     def _sync_wallet_transactions(self) -> int:
         """Persist provider revenue without assigning it to a fan."""
@@ -286,9 +332,11 @@ class FanslyBot:
                 offset=offset,
                 order="newest",
             )
-            if next_checkpoint is None and page:
-                next_checkpoint = self._chat_checkpoint(page[0])
             for chat in page:
+                if not self._fan_allowed(chat.partner_account_id):
+                    continue
+                if next_checkpoint is None:
+                    next_checkpoint = self._chat_checkpoint(chat)
                 current = self._chat_checkpoint(chat)
                 if checkpoint is not None and current == checkpoint:
                     reached_checkpoint = True
@@ -637,10 +685,10 @@ class FanslyBot:
 
         If force is True/False, set to that state; otherwise flip.
         """
-        if force is not None:
-            self.enabled = bool(force)
-        else:
-            self.enabled = not self.enabled
+        target = bool(force) if force is not None else not self.enabled
+        if target and not self.launch_ready:
+            raise LaunchGuardError(self.launch_block_reason)
+        self.enabled = target
         logger.info(f"Bot {'enabled' if self.enabled else 'disabled'}")
         return self.enabled
 

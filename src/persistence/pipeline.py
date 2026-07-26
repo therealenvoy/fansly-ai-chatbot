@@ -119,6 +119,8 @@ class MessageProcessingRepository:
     def claim_next_inbound(
         self,
         creator_id: str,
+        *,
+        allowed_fan_ids: set[str] | None = None,
     ) -> InboundMessageRecord | None:
         """Atomically claim the oldest pending inbound message.
 
@@ -129,6 +131,7 @@ class MessageProcessingRepository:
             stmt = self.inbound_claim_statement(
                 creator_id,
                 skip_locked=self.engine.dialect.name == "postgresql",
+                allowed_fan_ids=allowed_fan_ids,
             )
             row = conn.execute(stmt).mappings().first()
             if row is None:
@@ -593,16 +596,33 @@ class MessageProcessingRepository:
         creator_id: str,
         *,
         skip_locked: bool,
+        allowed_fan_ids: set[str] | None = None,
     ):
+        allowed = (
+            tuple(sorted(str(fan_id) for fan_id in allowed_fan_ids))
+            if allowed_fan_ids is not None
+            else None
+        )
         earlier = INBOUND_MESSAGES.alias("earlier_inbound")
+        earlier_filters = [
+            earlier.c.creator_id == INBOUND_MESSAGES.c.creator_id,
+            earlier.c.status.in_(
+                [INBOUND_PENDING, INBOUND_PROCESSING]
+            ),
+        ]
+        candidate_filters = [
+            INBOUND_MESSAGES.c.creator_id == creator_id,
+            INBOUND_MESSAGES.c.status == INBOUND_PENDING,
+        ]
+        if allowed is not None:
+            earlier_filters.append(earlier.c.fan_id.in_(allowed))
+            candidate_filters.append(
+                INBOUND_MESSAGES.c.fan_id.in_(allowed)
+            )
         earlier_nonterminal = exists(
             select(1).where(
                 and_(
-                    earlier.c.creator_id
-                    == INBOUND_MESSAGES.c.creator_id,
-                    earlier.c.status.in_(
-                        [INBOUND_PENDING, INBOUND_PROCESSING]
-                    ),
+                    *earlier_filters,
                     or_(
                         earlier.c.provider_created_at
                         < INBOUND_MESSAGES.c.provider_created_at,
@@ -619,8 +639,7 @@ class MessageProcessingRepository:
             select(INBOUND_MESSAGES)
             .where(
                 and_(
-                    INBOUND_MESSAGES.c.creator_id == creator_id,
-                    INBOUND_MESSAGES.c.status == INBOUND_PENDING,
+                    *candidate_filters,
                     ~earlier_nonterminal,
                 )
             )

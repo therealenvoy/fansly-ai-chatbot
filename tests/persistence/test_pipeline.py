@@ -41,11 +41,12 @@ def _insert(
     created_at,
     *,
     content="hello",
+    fan_id="fan-a",
 ):
     return repository.insert_inbound(
         creator_id="creator-a",
         platform_message_id=message_id,
-        fan_id="fan-a",
+        fan_id=fan_id,
         chat_id="chat-a",
         content=content,
         provider_created_at=created_at,
@@ -113,6 +114,44 @@ def test_newer_inbound_waits_while_oldest_is_processing():
         ).platform_message_id
         == "message-2"
     )
+
+
+def test_allowlist_claim_ignores_older_disallowed_fan():
+    _, repository = _repository()
+    now = datetime.now(timezone.utc)
+    _insert(
+        repository,
+        "blocked-oldest",
+        now,
+        fan_id="not-pilot",
+    )
+    _insert(
+        repository,
+        "allowed-newer",
+        now + timedelta(seconds=1),
+        fan_id="pilot",
+    )
+
+    claimed = repository.claim_next_inbound(
+        "creator-a",
+        allowed_fan_ids={"pilot"},
+    )
+
+    assert claimed.platform_message_id == "allowed-newer"
+
+
+def test_empty_allowlist_claims_nothing():
+    _, repository = _repository()
+    _insert(
+        repository,
+        "message-1",
+        datetime.now(timezone.utc),
+    )
+
+    assert repository.claim_next_inbound(
+        "creator-a",
+        allowed_fan_ids=set(),
+    ) is None
 
 
 def test_delivery_lifecycle_records_provider_id_and_processed_marker():
