@@ -90,6 +90,13 @@ CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE = min(
     ),
     10,
 )
+CRM_SYNC_BACKFILL_INTERVAL = max(
+    1,
+    min(
+        int(os.getenv("CRM_SYNC_BACKFILL_INTERVAL", "30")),
+        POLL_INTERVAL,
+    ),
+)
 FAN_ALLOWLIST = {
     fan_id.strip()
     for fan_id in os.getenv("FAN_ALLOWLIST", "").split(",")
@@ -188,9 +195,10 @@ if api_ok:
             )
             logger.info(
                 "CRM provider-history sync enabled: %s message pages and "
-                "%s discovery pages per cycle",
+                "%s discovery pages per cycle; %ss backfill interval",
                 CRM_SYNC_MESSAGE_PAGES_PER_CYCLE,
                 CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE,
+                CRM_SYNC_BACKFILL_INTERVAL,
             )
         except Exception as e:
             logger.warning(
@@ -331,11 +339,16 @@ while running:
         continue
 
     had_activity = False
+    crm_backfill_pending = False
     runtime_monitor.poll_started()
     try:
         if crm_sync is not None:
             crm_result = crm_sync.sync_cycle()
             had_activity = bool(crm_result.had_activity)
+            crm_backfill_pending = bool(
+                crm_result.remaining_chats > 0
+                or not crm_result.discovery_complete
+            )
         if bot is not None:
             had_activity = bool(
                 bot.poll_and_process(
@@ -364,6 +377,13 @@ while running:
         consecutive_idle_cycles = 0
         backoff = min(POLL_INTERVAL * (2 ** (consecutive_failures - 1)), MAX_BACKOFF)
         logger.warning(f"Backoff: sleeping {backoff}s (failure #{consecutive_failures})")
+    elif crm_backfill_pending:
+        consecutive_idle_cycles = 0
+        backoff = CRM_SYNC_BACKFILL_INTERVAL
+        logger.info(
+            "CRM history backfill pending; continuing in %ss",
+            backoff,
+        )
     elif had_activity:
         consecutive_idle_cycles = 0
         backoff = POLL_INTERVAL

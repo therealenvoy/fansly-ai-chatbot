@@ -58,9 +58,11 @@ inbox/outbox above. Pausing automated replies does not pause CRM visibility.
    syncing.
 
 `CRM_SYNC_MESSAGE_PAGES_PER_CYCLE` and
-`CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE` bound provider usage. OnlyFansAPI charges
-per request, so the initial full-history import is deliberately resumable
-instead of one unbounded burst.
+`CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE` bound provider usage.
+`CRM_SYNC_BACKFILL_INTERVAL` controls how soon the next bounded cycle begins
+while discovery or history remains. OnlyFansAPI charges per request, so the
+initial full-history import stays finite and resumable instead of becoming one
+unbounded burst.
 
 ## Failure behavior
 

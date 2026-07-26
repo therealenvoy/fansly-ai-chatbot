@@ -71,12 +71,15 @@ POLL_INTERVAL=300
 CRM_SYNC_ENABLED=true
 CRM_SYNC_MESSAGE_PAGES_PER_CYCLE=25
 CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE=2
+CRM_SYNC_BACKFILL_INTERVAL=30
 ```
 
 `POLL_INTERVAL=300` is the minimum controlled-launch interval. CRM history
 synchronization keeps listing chats while automated replies are disabled.
 During the finite initial backfill it also reads bounded message pages. The
-dashboard exposes remaining and failed histories; watch those values and
+next bounded cycle starts after `CRM_SYNC_BACKFILL_INTERVAL`, then steady-state
+polling returns to `POLL_INTERVAL` when discovery and history are complete.
+The dashboard exposes remaining and failed histories; watch those values and
 provider credits until `pending_chats` reaches zero.
 
 The APIFansly account must be connected in its console before launch. Startup

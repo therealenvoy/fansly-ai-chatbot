@@ -100,6 +100,7 @@ def cleanup_env():
         "MAX_MESSAGES_PER_POLL", "CRM_SYNC_ENABLED",
         "CRM_SYNC_MESSAGE_PAGES_PER_CYCLE",
         "CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE",
+        "CRM_SYNC_BACKFILL_INTERVAL",
     )}
     yield
     for k, v in saved.items():
@@ -128,6 +129,7 @@ def standard_env():
     os.environ["CRM_SYNC_ENABLED"] = "true"
     os.environ["CRM_SYNC_MESSAGE_PAGES_PER_CYCLE"] = "2"
     os.environ["CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE"] = "1"
+    os.environ["CRM_SYNC_BACKFILL_INTERVAL"] = "1"
 
 
 @pytest.fixture
@@ -174,6 +176,8 @@ def mock_deps(standard_env):
     mock_crm_cls = crm_patcher.start()
     mock_crm = mock_crm_cls.return_value
     mock_crm.sync_cycle.return_value.had_activity = False
+    mock_crm.sync_cycle.return_value.remaining_chats = 0
+    mock_crm.sync_cycle.return_value.discovery_complete = True
 
     # client factory — replaces direct client construction in main.py
     factory_patcher = patch("src.client_factory.get_fansly_client")
@@ -473,6 +477,27 @@ class TestIdleAdaptiveBackoff:
             module, mock_deps, [False, False, True, False], poll_interval="2", idle_backoff_max="60"
         )
         assert iterations >= 4
+
+
+def test_crm_backfill_uses_dedicated_short_interval(
+    module,
+    mock_deps,
+    caplog,
+):
+    os.environ["POLL_INTERVAL"] = "300"
+    os.environ["CRM_SYNC_BACKFILL_INTERVAL"] = "30"
+    result = mock_deps["crm_sync"].sync_cycle.return_value
+    result.had_activity = True
+    result.remaining_chats = 3
+    result.discovery_complete = False
+
+    importlib.reload(module)
+
+    assert module.CRM_SYNC_BACKFILL_INTERVAL == 30
+    assert any(
+        "CRM history backfill pending; continuing in 30s" in record.message
+        for record in caplog.records
+    )
 
 
 # ═══════════════════════════════════════════════════════════════
