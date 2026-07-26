@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Engine, and_, case, select, update
+from sqlalchemy import Engine, and_, case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -82,39 +82,79 @@ class ConversationStateRepository:
         username: str | None = None,
         avatar_url: str | None = None,
     ) -> None:
+        self.ensure_conversations(
+            creator_id,
+            [
+                {
+                    "fan_id": fan_id,
+                    "chat_id": chat_id,
+                    "display_name": display_name,
+                    "username": username,
+                    "avatar_url": avatar_url,
+                }
+            ],
+        )
+
+    def ensure_conversations(
+        self,
+        creator_id: str,
+        conversations: list[dict],
+    ) -> None:
+        """Create or refresh a provider page of conversations in one transaction."""
+        if not conversations:
+            return
         self.ensure_creator(creator_id)
         now = utcnow()
-        fan_stmt = self._insert(FANS).values(
-            creator_id=creator_id,
-            fan_id=fan_id,
-            display_name=display_name,
-            username=username,
-            avatar_url=avatar_url,
-            created_at=now,
-            updated_at=now,
-        )
-        fan_updates = {"updated_at": now}
-        if display_name:
-            fan_updates["display_name"] = display_name
-        if username:
-            fan_updates["username"] = username
-        if avatar_url:
-            fan_updates["avatar_url"] = avatar_url
+        unique_fans: dict[str, dict] = {}
+        unique_chats: dict[str, dict] = {}
+        for conversation in conversations:
+            fan_id = str(conversation["fan_id"])
+            chat_id = str(conversation["chat_id"])
+            unique_fans[fan_id] = {
+                "creator_id": creator_id,
+                "fan_id": fan_id,
+                "display_name": conversation.get("display_name") or None,
+                "username": conversation.get("username") or None,
+                "avatar_url": conversation.get("avatar_url") or None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            unique_chats[chat_id] = {
+                "creator_id": creator_id,
+                "chat_id": chat_id,
+                "fan_id": fan_id,
+                "created_at": now,
+                "updated_at": now,
+            }
+
+        fan_stmt = self._insert(FANS).values(list(unique_fans.values()))
+        fan_excluded = fan_stmt.excluded
         fan_stmt = fan_stmt.on_conflict_do_update(
             index_elements=["creator_id", "fan_id"],
-            set_=fan_updates,
+            set_={
+                "display_name": func.coalesce(
+                    fan_excluded.display_name,
+                    FANS.c.display_name,
+                ),
+                "username": func.coalesce(
+                    fan_excluded.username,
+                    FANS.c.username,
+                ),
+                "avatar_url": func.coalesce(
+                    fan_excluded.avatar_url,
+                    FANS.c.avatar_url,
+                ),
+                "updated_at": now,
+            },
         )
         conversation_stmt = self._insert(CONVERSATIONS).values(
-            creator_id=creator_id,
-            chat_id=chat_id,
-            fan_id=fan_id,
-            created_at=now,
-            updated_at=now,
+            list(unique_chats.values())
         )
+        conversation_excluded = conversation_stmt.excluded
         conversation_stmt = conversation_stmt.on_conflict_do_update(
             index_elements=["creator_id", "chat_id"],
             set_={
-                "fan_id": fan_id,
+                "fan_id": conversation_excluded.fan_id,
                 "updated_at": now,
             },
         )

@@ -55,31 +55,89 @@ class MessageStore:
         created_at: datetime | None = None,
     ) -> bool:
         """Persist a message once, preserving provider time and media metadata."""
-        with self.engine.begin() as conn:
+        return bool(
+            self.save_messages(
+                [
+                    {
+                        "fan_id": fan_id,
+                        "creator_id": creator_id,
+                        "sender": sender,
+                        "content": content,
+                        "message_id": message_id,
+                        "chat_id": chat_id,
+                        "attachments": attachments,
+                        "created_at": created_at,
+                    }
+                ]
+            )
+        )
+
+    def save_messages(self, messages: list[dict]) -> int:
+        """Persist a provider page with one dedupe read and one bulk insert."""
+        if not messages:
+            return 0
+        now = datetime.now(timezone.utc)
+        grouped_ids: dict[str, set[str]] = {}
+        for message in messages:
+            message_id = message.get("message_id")
             if message_id:
-                existing = conn.execute(
-                    select(MESSAGES_TABLE.c.id).where(
-                        and_(
-                            MESSAGES_TABLE.c.creator_id == creator_id,
-                            MESSAGES_TABLE.c.message_id == message_id,
+                grouped_ids.setdefault(
+                    str(message["creator_id"]),
+                    set(),
+                ).add(str(message_id))
+
+        with self.engine.begin() as conn:
+            existing_ids: set[tuple[str, str]] = set()
+            for creator_id, message_ids in grouped_ids.items():
+                existing_ids.update(
+                    (
+                        str(row.creator_id),
+                        str(row.message_id),
+                    )
+                    for row in conn.execute(
+                        select(
+                            MESSAGES_TABLE.c.creator_id,
+                            MESSAGES_TABLE.c.message_id,
+                        ).where(
+                            and_(
+                                MESSAGES_TABLE.c.creator_id == creator_id,
+                                MESSAGES_TABLE.c.message_id.in_(message_ids),
+                            )
                         )
                     )
-                ).first()
-                if existing is not None:
-                    return False
-            conn.execute(
-                MESSAGES_TABLE.insert().values(
-                    fan_id=fan_id,
-                    creator_id=creator_id,
-                    chat_id=chat_id,
-                    sender=sender,
-                    content=content,
-                    message_id=message_id,
-                    attachments=list(attachments or []),
-                    created_at=created_at or datetime.now(timezone.utc),
                 )
-            )
-        return True
+
+            insert_rows: list[dict] = []
+            seen_ids = set(existing_ids)
+            for message in messages:
+                creator_id = str(message["creator_id"])
+                message_id = message.get("message_id")
+                dedupe_key = (
+                    (creator_id, str(message_id))
+                    if message_id
+                    else None
+                )
+                if dedupe_key is not None and dedupe_key in seen_ids:
+                    continue
+                if dedupe_key is not None:
+                    seen_ids.add(dedupe_key)
+                insert_rows.append(
+                    {
+                        "fan_id": str(message["fan_id"]),
+                        "creator_id": creator_id,
+                        "chat_id": message.get("chat_id"),
+                        "sender": str(message["sender"]),
+                        "content": message.get("content") or "",
+                        "message_id": message_id,
+                        "attachments": list(
+                            message.get("attachments") or []
+                        ),
+                        "created_at": message.get("created_at") or now,
+                    }
+                )
+            if insert_rows:
+                conn.execute(MESSAGES_TABLE.insert(), insert_rows)
+        return len(insert_rows)
 
     def get_history(self, fan_id: str, creator_id: str, limit: int = 50) -> list[dict]:
         """Get recent messages for a fan, oldest first."""

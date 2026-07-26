@@ -106,6 +106,42 @@ def test_provider_message_is_idempotent_and_preserves_provider_metadata(store):
     assert history[0]["created_at"].startswith("2026-07-01T12:30:00")
 
 
+def test_provider_page_is_bulk_saved_and_deduplicated(store):
+    page = [
+        {
+            "fan_id": "fan1",
+            "creator_id": "creator1",
+            "sender": "fan",
+            "content": "one",
+            "message_id": "provider-1",
+            "chat_id": "chat1",
+        },
+        {
+            "fan_id": "fan1",
+            "creator_id": "creator1",
+            "sender": "creator",
+            "content": "two",
+            "message_id": "provider-2",
+            "chat_id": "chat1",
+        },
+        {
+            "fan_id": "fan1",
+            "creator_id": "creator1",
+            "sender": "creator",
+            "content": "duplicate in page",
+            "message_id": "provider-2",
+            "chat_id": "chat1",
+        },
+    ]
+
+    assert store.save_messages(page) == 2
+    assert store.save_messages(page) == 0
+    assert [
+        message["content"]
+        for message in store.get_history("fan1", "creator1")
+    ] == ["one", "two"]
+
+
 def test_history_pages_cover_all_messages_in_chronological_order(store):
     for index in range(7):
         store.save_message(

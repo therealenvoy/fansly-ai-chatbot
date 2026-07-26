@@ -44,22 +44,49 @@ class CrmSyncRepository:
         fan_id: str,
         provider_head_message_id: str | None,
     ) -> None:
+        self.discover_chats(
+            creator_id=creator_id,
+            chats=[
+                {
+                    "chat_id": chat_id,
+                    "fan_id": fan_id,
+                    "provider_head_message_id": provider_head_message_id,
+                }
+            ],
+        )
+
+    def discover_chats(
+        self,
+        *,
+        creator_id: str,
+        chats: list[dict],
+    ) -> None:
+        """Upsert one provider chat page in a single transaction."""
+        if not chats:
+            return
         now = utcnow()
-        values = {
-            "creator_id": creator_id,
-            "chat_id": chat_id,
-            "fan_id": fan_id,
-            "provider_head_message_id": provider_head_message_id,
-            "stored_head_message_id": None,
-            "incremental_cursor": None,
-            "backfill_cursor": None,
-            "history_complete": False,
-            "last_synced_at": None,
-            "last_error": None,
-            "created_at": now,
-            "updated_at": now,
-        }
-        stmt = self._insert(CRM_CHAT_SYNC).values(**values)
+        unique_chats: dict[str, dict] = {}
+        for chat in chats:
+            chat_id = str(chat["chat_id"])
+            unique_chats[chat_id] = {
+                "creator_id": creator_id,
+                "chat_id": chat_id,
+                "fan_id": str(chat["fan_id"]),
+                "provider_head_message_id": chat.get(
+                    "provider_head_message_id"
+                ),
+                "stored_head_message_id": None,
+                "incremental_cursor": None,
+                "backfill_cursor": None,
+                "history_complete": False,
+                "last_synced_at": None,
+                "last_error": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+        stmt = self._insert(CRM_CHAT_SYNC).values(
+            list(unique_chats.values())
+        )
         excluded = stmt.excluded
         head_changed = self._different(
             CRM_CHAT_SYNC.c.provider_head_message_id,

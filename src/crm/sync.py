@@ -152,22 +152,34 @@ class CrmSyncService:
         chats: list[ChatInfo],
         discovered_ids: set[str],
     ) -> None:
+        conversation_rows = []
+        sync_rows = []
         for chat in chats:
             discovered_ids.add(chat.chat_id)
-            self.state_repo.ensure_conversation(
-                self.creator_id,
-                chat.partner_account_id,
-                chat.chat_id,
-                display_name=chat.partner_display_name,
-                username=chat.partner_username,
-                avatar_url=chat.avatar_url,
+            conversation_rows.append(
+                {
+                    "fan_id": chat.partner_account_id,
+                    "chat_id": chat.chat_id,
+                    "display_name": chat.partner_display_name,
+                    "username": chat.partner_username,
+                    "avatar_url": chat.avatar_url,
+                }
             )
-            self.sync_repo.discover_chat(
-                creator_id=self.creator_id,
-                chat_id=chat.chat_id,
-                fan_id=chat.partner_account_id,
-                provider_head_message_id=chat.last_message_id,
+            sync_rows.append(
+                {
+                    "chat_id": chat.chat_id,
+                    "fan_id": chat.partner_account_id,
+                    "provider_head_message_id": chat.last_message_id,
+                }
             )
+        self.state_repo.ensure_conversations(
+            self.creator_id,
+            conversation_rows,
+        )
+        self.sync_repo.discover_chats(
+            creator_id=self.creator_id,
+            chats=sync_rows,
+        )
 
     def _sync_message_page(
         self,
@@ -254,27 +266,30 @@ class CrmSyncService:
         state: CrmChatSyncState,
         messages: list[MessageInfo],
     ) -> int:
-        inserted = 0
         newest_at: datetime | None = None
+        rows: list[dict] = []
         for message in sorted(
             messages,
             key=lambda row: (row.created_at, row.message_id),
         ):
             created_at = self._provider_datetime(message.created_at)
-            inserted += int(
-                self.message_store.save_message(
-                    state.fan_id,
-                    self.creator_id,
-                    "fan" if message.is_from_fan else "creator",
-                    message.content,
-                    message_id=message.message_id,
-                    chat_id=state.chat_id,
-                    attachments=message.attachments,
-                    created_at=created_at,
-                )
+            rows.append(
+                {
+                    "fan_id": state.fan_id,
+                    "creator_id": self.creator_id,
+                    "sender": (
+                        "fan" if message.is_from_fan else "creator"
+                    ),
+                    "content": message.content,
+                    "message_id": message.message_id,
+                    "chat_id": state.chat_id,
+                    "attachments": message.attachments,
+                    "created_at": created_at,
+                }
             )
             if newest_at is None or created_at > newest_at:
                 newest_at = created_at
+        inserted = self.message_store.save_messages(rows)
         if newest_at is not None:
             self.state_repo.record_crm_activity(
                 self.creator_id,
