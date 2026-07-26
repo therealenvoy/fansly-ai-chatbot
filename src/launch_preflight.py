@@ -34,11 +34,23 @@ def check_environment(
     database_url = environment.get("DATABASE_URL", "")
     if not database_url.startswith(("postgresql://", "postgresql+psycopg2://")):
         errors.append("DATABASE_URL must use PostgreSQL")
-    if environment.get("FANSLY_PROVIDER", "").lower() != "fanslyapi":
-        errors.append("FANSLY_PROVIDER must be fanslyapi")
-    api_key = environment.get("FANSLY_API_KEY", "").strip()
-    if not api_key or api_key == "your_api_key_here":
-        errors.append("FANSLY_API_KEY is not configured")
+    provider = environment.get(
+        "FANSLY_PROVIDER",
+        "apifansly",
+    ).strip().lower()
+    if provider != "apifansly":
+        errors.append(
+            "FANSLY_PROVIDER must be apifansly for automated paid PPV"
+        )
+    api_key = environment.get("APIFANSLY_API_KEY", "").strip()
+    if not api_key or api_key == "replace_me":
+        errors.append("APIFANSLY_API_KEY is not configured")
+    if not environment.get("FANSLY_ACCOUNT_ID", "").strip():
+        errors.append("FANSLY_ACCOUNT_ID is not configured")
+    if len(environment.get("APIFANSLY_WEBHOOK_TOKEN", "").strip()) < 32:
+        errors.append(
+            "APIFANSLY_WEBHOOK_TOKEN must be at least 32 characters"
+        )
     if not environment.get("DASHBOARD_USER", "").strip():
         errors.append("DASHBOARD_USER is not configured")
     if len(environment.get("DASHBOARD_PASSWORD", "")) < 16:
@@ -72,7 +84,8 @@ def check_environment(
             "POLL_INTERVAL must be at least 300 seconds for controlled launch"
         )
     if (
-        poll_interval is not None
+        provider == "fanslyapi"
+        and poll_interval is not None
         and estimate_minimum_monthly_requests(poll_interval)
         > BASIC_MONTHLY_CREDITS
     ):

@@ -160,6 +160,7 @@ def test_postgresql_offline_upgrade_compiles_without_sqlite_types():
     assert "CREATE TABLE ppv_fan_progress" in sql
     assert "CREATE TABLE script_templates" in sql
     assert "CREATE TABLE media_assets" in sql
+    assert "provider_purchase_ref" in sql
     assert "JSON NOT NULL" in sql
 
 

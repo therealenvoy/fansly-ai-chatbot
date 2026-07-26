@@ -1,98 +1,97 @@
-# OnlyFansAPI Fansly contract
+# Fansly provider contracts
 
-This project sends all Fansly traffic through OnlyFansAPI's Fansly product.
-Do not use the retired `v1.apifansly.com` endpoints, `x-api-key` authentication,
-or their request/response shapes.
+Fully automated paid PPV uses APIFansly. OnlyFansAPI's Fansly beta remains an
+explicit fallback for free text/media, but the launch guard refuses to enable
+it because it does not expose paid messages or vault albums.
 
-Canonical documentation:
+Canonical APIFansly documentation:
 
-- https://docs.onlyfansapi.com/api-reference/fansly
-- https://docs.onlyfansapi.com/api-reference/fansly/chats/list-chats
-- https://docs.onlyfansapi.com/api-reference/fansly/chat-messages/send-chat-message
-- https://docs.onlyfansapi.com/api-reference/fansly/media/upload-media
-- https://docs.onlyfansapi.com/api-reference/fansly/earnings/list-wallet-transactions
+- https://docs.apifansly.com/api-reference/account/get-current-account
+- https://docs.apifansly.com/api-reference/chats/list-chats
+- https://docs.apifansly.com/api-reference/chat-messages/list-chat-messages
+- https://docs.apifansly.com/api-reference/chat-messages/send-message
+- https://docs.apifansly.com/api-reference/vault/list-vault-albums
+- https://docs.apifansly.com/api-reference/vault/get-vault-album-media
+- https://docs.apifansly.com/webhooks/webhook-events
 
-The Fansly surface is currently closed beta and may change. Verify the current
-documentation before adding or changing a provider request.
+## APIFansly connection
 
-## Connection
+- Base URL: `https://v1.apifansly.com/api/fansly`
+- Authentication: `x-api-key: <APIFANSLY_API_KEY>`
+- Connected account: `FANSLY_ACCOUNT_ID` in `fansly_acc_...` form
+- Creator identity: resolved from `GET /{account_id}/me`
 
-- Base URL: `https://app.onlyfansapi.com`
-- Authentication: `Authorization: Bearer <FANSLY_API_KEY>`
-- Account IDs are resolved from `GET /api/fansly/accounts`.
-- Fansly account IDs use the `fansly_acct_` form.
-
-## Chats
-
-```text
-GET /api/fansly/{fanslyAccount}/chats
-```
-
-Supported query fields used by the bot:
-
-- `limit`: 1-100
-- `offset`: non-negative pagination offset
-- `order`: `newest`, `oldest`, or `unread`
-
-Important response fields:
-
-- `data.data[].groupId`
-- `partnerAccountId`
-- `unreadCount`
-- `lastMessageId`
-- `lastUnreadMessageId`
-- `data.hasMore`
-
-## Chat messages
+## Chats and messages
 
 ```text
-GET /api/fansly/{fanslyAccount}/chats/{chat_id}/messages
-POST /api/fansly/{fanslyAccount}/chats/{chat_id}/messages
+GET  /{account_id}/chats
+GET  /{account_id}/chats/{chat_id}/messages
+POST /{account_id}/chats/{chat_id}/messages
 ```
 
-The documented send body supports:
+Chats use cursor pagination and `sort=newest|oldest|unread`. Chat-message pages
+have a documented maximum of ten messages, so the adapter clamps larger caller
+limits and follows the returned cursor.
+
+Paid PPV send body:
 
 ```json
 {
-  "text": "Message text",
-  "mediaFiles": ["fansly_media_..."],
-  "replyToMessageId": "optional-message-id"
+  "content": "Unlock this",
+  "mediaIds": [
+    {"mediaId": "MEDIA_ID", "previewId": "OPTIONAL_PREVIEW_ID"}
+  ],
+  "access_type": ["ppv"],
+  "price": 25.0
 }
 ```
 
-`mediaFiles` must contain `fansly_media_` IDs from the Fansly upload endpoint.
+Price is in dollars and must be between `$1` and `$500`. The adapter rejects
+invalid media, price, and access combinations before a network request.
 
-The current documented Fansly send body does **not** expose price, paywall,
-`requirePurchase`, access-rule, or preview fields. The implementation therefore
-rejects paid/PPV sends before making an HTTP request. It must not borrow the
-OnlyFans product's PPV fields or the retired apifansly.com request shape.
-
-## Media upload
+## Vault
 
 ```text
-POST /api/fansly/{fanslyAccount}/media/upload
+GET /{account_id}/vault/albums
+GET /{account_id}/vault/albums/{album_id}/media
 ```
 
-Provide exactly one of `file` or `file_url`. The synchronous response returns a
-reusable `prefixed_id` beginning with `fansly_media_`. Large asynchronous
-uploads return a polling URL and require a separate completion workflow.
+The dashboard follows bounded vault-media cursors, displays provider thumbnails
+or video previews, and stores the selected `mediaId` plus optional `previewId`
+on the sequence step.
 
-## Wallet ledger
+## OnlyFansAPI fallback
+
+OnlyFansAPI uses `https://app.onlyfansapi.com`, Bearer authentication, and
+`FANSLY_API_KEY`. Its documented Fansly send body supports `text`,
+`mediaFiles`, and `replyToMessageId`, but not paywall fields. Its capability
+flags therefore keep paid PPV and vault-backed launch disabled.
+
+## Purchase attribution
+
+APIFansly's active `ppv.purchased` webhook contains:
+
+- `data.orderId`: unique purchase ID;
+- `data.accountMediaId`: the purchased account-media reference;
+- `data.accountId`: exact fan ID;
+- `data.correlationAccountId`: creator's native Fansly ID;
+- `data.orderMetadata.accountMediaPrice`: price in cents.
+
+The PPV send response's attachment `contentId` is stored as
+`outbox_messages.provider_purchase_ref`. The webhook can therefore resolve the
+exact sent outbox row and advance only its matching sequence step. Duplicate
+`orderId` events are idempotent. Fan, creator, media-reference, and amount
+mismatches fail closed.
+
+Webhook endpoint:
 
 ```text
-GET /api/fansly/{fanslyAccount}/earnings/transactions
+POST /webhooks/apifansly/{APIFANSLY_WEBHOOK_TOKEN}
 ```
 
-The endpoint accepts `limit` (1-100) and `offset`. It returns transaction IDs,
-type codes, millidollar amounts, balances, statuses, and timestamps.
-
-The documented row does not identify a fan or purchased message. Wallet rows
-are therefore stored as aggregate provider transactions and never used to:
-
-- increment a fan's purchase count;
-- advance a PPV sequence;
-- trigger aftercare;
-- claim that a particular fan unlocked a message.
-
-An attributed purchase requires a separate verified event containing the fan
-ID and exact provider message ID.
+The token must contain at least 32 high-entropy characters. This application
+route token is separate from APIFansly's signing secret. APIFansly currently
+documents that a signing secret is issued, but does not publish the signature
+header or verification algorithm; do not invent one. Rotate the route token if
+the endpoint URL is exposed, and add signature verification when the provider
+publishes its contract.

@@ -49,24 +49,19 @@ They are displayed as `N/A`, never as fabricated zeroes.
 ## Content and PPV controls
 
 Local files under the dashboard vault path are inventory only. They are not
-provider-ready media. A sendable media reference must be a provider-issued
-`fansly_media_` identifier.
+provider-ready media. A sendable media reference must be a provider-issued ID.
 
-The current OnlyFansAPI Fansly send-message contract does not document a paid
-or paywalled message field. PPV sequences can therefore be stored only as
-inactive drafts. Existing active rows are shown as blocked and are not treated
-as deliverable. Sequence and step changes are validated and committed in one
-database transaction.
+APIFansly advertises paid messages and vault albums, so PPV sequences can be
+activated with that provider. The dashboard browses the connected Fansly vault,
+shows available image/video previews, and saves the selected media and optional
+preview IDs. Sequence and step changes remain atomic.
 
-Provider vault browsing is shown as unavailable unless the client explicitly
-advertises that capability.
+Provider vault browsing and PPV activation remain blocked unless the selected
+client explicitly advertises those capabilities.
 
-The operator media registry is intentionally separate from the native Fansly
-vault. It contains provider IDs explicitly registered by the operator or
-created by future dashboard uploads. OnlyFansAPI currently supports upload and
-fetch-by-known-ID operations for Fansly, but not a complete account-media
-listing. The dashboard therefore never labels the registry as a full vault
-sync.
+The operator media registry remains separate from the native Fansly vault. It
+adds searchable labels and tags to provider IDs; it is not presented as a full
+vault sync.
 
 ## Configuration controls
 

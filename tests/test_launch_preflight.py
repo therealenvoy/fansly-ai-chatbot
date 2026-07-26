@@ -4,8 +4,10 @@ from src.launch_preflight import check_environment
 def _valid_environment():
     return {
         "DATABASE_URL": "postgresql://user:pass@db:5432/app",
-        "FANSLY_PROVIDER": "fanslyapi",
-        "FANSLY_API_KEY": "secret-token",
+        "FANSLY_PROVIDER": "apifansly",
+        "APIFANSLY_API_KEY": "secret-token",
+        "FANSLY_ACCOUNT_ID": "fansly_acc_test",
+        "APIFANSLY_WEBHOOK_TOKEN": "w" * 32,
         "DASHBOARD_USER": "operator",
         "DASHBOARD_PASSWORD": "correct-horse-battery-staple",
         "CONTROLLED_LAUNCH": "true",
@@ -55,7 +57,9 @@ def test_unsafe_launch_environment_reports_all_blockers(tmp_path):
     environment.update({
         "DATABASE_URL": "sqlite:///data/app.db",
         "FANSLY_PROVIDER": "other",
-        "FANSLY_API_KEY": "",
+        "APIFANSLY_API_KEY": "",
+        "FANSLY_ACCOUNT_ID": "",
+        "APIFANSLY_WEBHOOK_TOKEN": "short",
         "DASHBOARD_USER": "",
         "DASHBOARD_PASSWORD": "short",
         "FAN_ALLOWLIST": "",
@@ -65,7 +69,16 @@ def test_unsafe_launch_environment_reports_all_blockers(tmp_path):
     errors = check_environment(environment, project_root=tmp_path)
 
     assert "DATABASE_URL must use PostgreSQL" in errors
-    assert "FANSLY_PROVIDER must be fanslyapi" in errors
+    assert (
+        "FANSLY_PROVIDER must be apifansly for automated paid PPV"
+        in errors
+    )
+    assert "APIFANSLY_API_KEY is not configured" in errors
+    assert "FANSLY_ACCOUNT_ID is not configured" in errors
+    assert (
+        "APIFANSLY_WEBHOOK_TOKEN must be at least 32 characters"
+        in errors
+    )
     assert "FAN_ALLOWLIST must contain at least one pilot fan" in errors
     assert "BOT_ENABLED_DEFAULT must remain false for launch" in errors
     assert any("persona YAML is missing" in error for error in errors)

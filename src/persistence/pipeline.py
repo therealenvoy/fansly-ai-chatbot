@@ -64,6 +64,7 @@ class OutboxMessageRecord:
     sequence_step_id: int | None
     status: str
     provider_message_id: str | None
+    provider_purchase_ref: str | None
     attempt_count: int
     created_at: datetime
     sent_at: datetime | None
@@ -310,6 +311,7 @@ class MessageProcessingRepository:
         self,
         outbox_id: int,
         provider_message_id: str,
+        provider_purchase_ref: str | None = None,
     ) -> tuple[OutboxMessageRecord, InboundMessageRecord]:
         """Record the provider ID and complete inbound atomically."""
         if not provider_message_id:
@@ -332,6 +334,7 @@ class MessageProcessingRepository:
                 .values(
                     status=OUTBOX_SENT,
                     provider_message_id=provider_message_id,
+                    provider_purchase_ref=provider_purchase_ref,
                     sent_at=now,
                     last_error=None,
                 )
@@ -773,6 +776,7 @@ class MessageProcessingRepository:
             sequence_step_id=row["sequence_step_id"],
             status=row["status"],
             provider_message_id=row["provider_message_id"],
+            provider_purchase_ref=row["provider_purchase_ref"],
             attempt_count=row["attempt_count"],
             created_at=row["created_at"],
             sent_at=row["sent_at"],

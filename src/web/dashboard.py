@@ -39,7 +39,7 @@ BRAND_BIBLE_PATH = "/data/config/brand_bible.md"
 MAX_BODY_BYTES = 1024 * 1024
 CREATOR_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PROVIDER_MEDIA_ID_PATTERN = re.compile(
-    r"^fansly_media_[A-Za-z0-9_-]{1,96}$"
+    r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
 )
 SCRIPT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
@@ -795,7 +795,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "default-src 'self'; "
             f"script-src 'nonce-{nonce}'; "
             "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
+            "img-src 'self' data: https:; "
+            "media-src 'self' https:; "
             "connect-src 'self'; "
             "font-src 'self'; "
             "object-src 'none'; "
@@ -937,9 +938,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.j({"error":"not found"},404)
 
     def do_POST(self):
+        p = self.path.split("?")[0]
+        if p.startswith("/webhooks/apifansly/"):
+            return self._apifansly_webhook(p)
         if not self._authorize(require_csrf=True):
             return
-        p = self.path.split("?")[0]
         q = parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
         try:
             b = _body(self)
@@ -957,6 +960,128 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_update(p.rsplit("/",1)[-1], b)
         if p=="/api/bot/toggle": return self._bot_toggle(b)
         self.j({"error":"not found"},404)
+
+    def _apifansly_webhook(self, path: str):
+        """Ingest an exact APIFansly PPV purchase without dashboard auth."""
+        if not self._host_is_allowed():
+            return self.j({"error": "invalid host"}, 400)
+        expected_token = self.server.apifansly_webhook_token
+        supplied_token = path.rsplit("/", 1)[-1]
+        if (
+            path.count("/") != 3
+            or len(expected_token) < 32
+            or not hmac.compare_digest(
+                supplied_token.encode("utf-8"),
+                expected_token.encode("utf-8"),
+            )
+        ):
+            return self.j({"error": "not found"}, 404)
+        try:
+            raw = _body(self)
+            payload = json.loads(raw)
+        except PayloadTooLargeError:
+            return self.j({"error": "request body too large"}, 413)
+        except (ValueError, json.JSONDecodeError):
+            return self.j({"error": "invalid JSON payload"}, 400)
+        if not isinstance(payload, dict):
+            return self.j({"error": "invalid webhook payload"}, 400)
+        if payload.get("event") != "ppv.purchased":
+            return self.j({"accepted": False, "ignored": True}, 202)
+        if self.bot is None:
+            return self.j({"error": "bot is unavailable"}, 503)
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return self.j({"error": "missing webhook data"}, 400)
+        provider_account_id = str(payload.get("accountId", "")).strip()
+        expected_account_id = str(
+            getattr(self.client, "account_id", "")
+        ).strip()
+        if (
+            not provider_account_id
+            or provider_account_id != expected_account_id
+        ):
+            return self.j({"error": "webhook account mismatch"}, 403)
+
+        order_id = str(data.get("orderId", "")).strip()
+        purchase_ref = str(data.get("accountMediaId", "")).strip()
+        fan_id = str(data.get("accountId", "")).strip()
+        creator_fansly_id = str(
+            data.get("correlationAccountId", "")
+        ).strip()
+        known_creator_fansly_id = str(
+            getattr(self.client, "_creator_fansly_id", "") or ""
+        ).strip()
+        if (
+            known_creator_fansly_id
+            and creator_fansly_id != known_creator_fansly_id
+        ):
+            return self.j({"error": "webhook creator mismatch"}, 403)
+        if not all(
+            (order_id, purchase_ref, fan_id, creator_fansly_id)
+        ):
+            return self.j({"error": "incomplete PPV purchase event"}, 400)
+
+        metadata = data.get("orderMetadata")
+        price_cents = (
+            metadata.get("accountMediaPrice")
+            if isinstance(metadata, dict)
+            else None
+        )
+        if isinstance(price_cents, bool):
+            return self.j({"error": "invalid PPV price"}, 400)
+        try:
+            numeric_price_cents = float(price_cents)
+        except (TypeError, ValueError):
+            return self.j({"error": "invalid PPV price"}, 400)
+        if not math.isfinite(numeric_price_cents) or not (
+            numeric_price_cents.is_integer()
+        ):
+            return self.j({"error": "invalid PPV price"}, 400)
+        amount_millis = int(numeric_price_cents) * 10
+        if amount_millis <= 0:
+            return self.j({"error": "invalid PPV price"}, 400)
+
+        try:
+            provider_created_at = datetime.fromisoformat(
+                str(payload.get("timestamp", "")).replace(
+                    "Z",
+                    "+00:00",
+                )
+            )
+        except ValueError:
+            return self.j({"error": "invalid webhook timestamp"}, 400)
+        if provider_created_at.tzinfo is None:
+            provider_created_at = provider_created_at.replace(
+                tzinfo=timezone.utc
+            )
+
+        try:
+            _, created = self.bot.record_provider_ppv_purchase(
+                provider_purchase_id=order_id,
+                provider_purchase_ref=purchase_ref,
+                fan_id=fan_id,
+                amount_millis=amount_millis,
+                provider_created_at=provider_created_at,
+            )
+        except ValueError as exc:
+            logger.warning(
+                "Rejected APIFansly PPV purchase event: %s",
+                exc,
+            )
+            return self.j(
+                {"error": "purchase does not match a sent PPV"},
+                409,
+            )
+        except Exception:
+            logger.exception("APIFansly PPV webhook processing failed")
+            return self.j({"error": "webhook processing failed"}, 500)
+        return self.j(
+            {
+                "accepted": True,
+                "duplicate": not created,
+            }
+        )
 
     def do_DELETE(self):
         if not self._authorize(require_csrf=True):
@@ -1375,11 +1500,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self.j({
                 "assets":[asset.as_json() for asset in assets],
                 "editing_available":True,
-                "provider_listing_supported":False,
+                "provider_listing_supported":bool(
+                    self.client is not None
+                    and self.client.capabilities.supports_vault_albums
+                    is True
+                ),
                 "reason":(
-                    "OnlyFansAPI does not currently expose a Fansly "
-                    "account-media listing endpoint. This registry contains "
-                    "media explicitly registered by the operator."
+                    "Browse connected Fansly vault albums or use this "
+                    "registry for labeled, searchable media."
+                    if self.client is not None
+                    and self.client.capabilities.supports_vault_albums
+                    is True
+                    else
+                    "The configured provider cannot list the Fansly vault. "
+                    "This registry contains explicitly registered media."
                 ),
             })
         except Exception as e:
@@ -1415,7 +1549,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 or not PROVIDER_MEDIA_ID_PATTERN.fullmatch(provider_id)
             ):
                 raise ValueError(
-                    "provider_media_id must be a fansly_media_ ID"
+                    "provider_media_id must be a valid provider media ID"
                 )
             title=data.get("title","")
             if not isinstance(title,str) or not title.strip() or len(title)>255:
@@ -1555,7 +1689,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if self.server.provider_last_checked_at
                 else None
             ),
-            "provider":"OnlyFansAPI Fansly",
+            "provider":(
+                self.client.provider_name
+                if self.client is not None
+                and isinstance(
+                    getattr(self.client, "provider_name", None),
+                    str,
+                )
+                else "Fansly provider"
+            ),
             "error":err,
         })
 
@@ -1756,8 +1898,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _paid_messages_reason() -> str:
         return (
-            "OnlyFansAPI's current Fansly send-message contract does "
-            "not document paid/paywalled messages"
+            "The configured provider does not support paid/paywalled messages"
         )
 
     def _sequence_from_body(self, body, existing=None):
@@ -1821,16 +1962,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 offer=raw.get("offer_script","")
             if (
                 not isinstance(media_id,str)
-                or not media_id.startswith("fansly_media_")
+                or not PROVIDER_MEDIA_ID_PATTERN.fullmatch(media_id)
             ):
                 raise ValueError(
-                    f"step {position} requires a fansly_media_ ID"
+                    f"step {position} requires a valid provider media ID"
                 )
             if preview_id not in {None,""}:
-                raise ValueError(
-                    "preview IDs are not present in the current "
-                    "Fansly send-message contract"
-                )
+                if (
+                    not isinstance(preview_id,str)
+                    or not PROVIDER_MEDIA_ID_PATTERN.fullmatch(preview_id)
+                ):
+                    raise ValueError(
+                        f"step {position} has an invalid preview media ID"
+                    )
             if (
                 isinstance(price,bool)
                 or not isinstance(price,(int,float))
@@ -1846,7 +1990,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 sequence_id=existing.id if existing else 0,
                 position=position,
                 media_id=media_id,
-                preview_id=None,
+                preview_id=preview_id or None,
                 price=float(price),
                 tease_script=tease,
                 offer_script=offer,
@@ -1981,9 +2125,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "dir":self.vault_dir,
             "provider_ready":False,
             "reason":(
-                "Local files are not uploaded to OnlyFansAPI. "
-                "Only fansly_media_ IDs returned by the provider upload "
-                "endpoint can be sent."
+                "Local files are not provider media. Upload them first or "
+                "select existing Fansly vault media."
             ),
         })
 
@@ -2002,8 +2145,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "supported":False,
                 "albums":[],
                 "reason":(
-                    "Vault album listing is not present in the current "
-                    "OnlyFansAPI Fansly contract"
+                    "The configured provider cannot browse vault albums"
                 ),
             })
         try:
@@ -2029,19 +2171,60 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "supported":False,
                 "media":[],
                 "reason":(
-                    "Vault album media listing is not present in the "
-                    "current OnlyFansAPI Fansly contract"
+                    "The configured provider cannot browse vault album media"
                 ),
             })
         try:
-            media, _ = self.client.get_album_media(album_id)
+            media=[]
+            cursor=None
+            seen_cursors=set()
+            for _ in range(20):
+                page,next_cursor=self.client.get_album_media(
+                    album_id,
+                    cursor=cursor,
+                )
+                if isinstance(page,list):
+                    media.extend(page)
+                if not next_cursor:
+                    break
+                if next_cursor in seen_cursors:
+                    raise RuntimeError(
+                        "provider repeated the vault media cursor"
+                    )
+                seen_cursors.add(next_cursor)
+                cursor=next_cursor
             if isinstance(media,list):
-                return self.j({"supported":True,"media":[
-                    {"id":m.get("id") or m.get("mediaId"),"mediaId":m.get("mediaId"),
-                     "type":m.get("type","unknown"),"label":m.get("label") or m.get("description",""),
-                     "previewId":m.get("previewId")}
-                    for m in media
-                ]})
+                result=[]
+                for m in media:
+                    details=m.get("media",{}) if isinstance(m,dict) else {}
+                    media_id=m.get("mediaId") or details.get("id") or m.get("id")
+                    numeric_type=details.get("type",m.get("type"))
+                    media_type=(
+                        "image" if numeric_type==1
+                        else "video" if numeric_type==2
+                        else str(numeric_type or "unknown")
+                    )
+                    locations=details.get("locations",[])
+                    preview_url=(
+                        locations[0].get("location")
+                        if locations and isinstance(locations[0],dict)
+                        else None
+                    )
+                    result.append({
+                        "id":media_id,
+                        "accountMediaId":m.get("id"),
+                        "mediaId":media_id,
+                        "type":media_type,
+                        "label":(
+                            m.get("label")
+                            or m.get("description")
+                            or details.get("filename")
+                            or str(media_id or "")
+                        ),
+                        "previewId":m.get("previewId"),
+                        "previewUrl":preview_url,
+                    })
+                return self.j({"supported":True,"media":result})
             return self.j({"supported":True,"media":[]})
         except Exception as e:
             return self.j({
@@ -2152,6 +2335,7 @@ class DashboardServer:
         dashboard_password: Optional[str] = None,
         allowed_hosts: Optional[set[str]] = None,
         csrf_token: Optional[str] = None,
+        apifansly_webhook_token: Optional[str] = None,
         runtime_monitor=None,
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
@@ -2210,6 +2394,11 @@ class DashboardServer:
         )
         self.server.allowed_hosts = hosts
         self.server.csrf_token = csrf_token or secrets.token_urlsafe(32)
+        self.server.apifansly_webhook_token = (
+            os.getenv("APIFANSLY_WEBHOOK_TOKEN", "")
+            if apifansly_webhook_token is None
+            else apifansly_webhook_token
+        ).strip()
         self.server.script_repo = (
             ScriptTemplateRepository(
                 self.server.engine,

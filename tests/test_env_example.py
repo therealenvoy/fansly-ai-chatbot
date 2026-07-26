@@ -8,7 +8,10 @@ import pytest
 ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env.example")
 
 REQUIRED_VARS = [
+    "APIFANSLY_API_KEY",
+    "APIFANSLY_WEBHOOK_TOKEN",
     "FANSLY_API_KEY",
+    "FANSLY_ACCOUNT_ID",
     "FANSLY_PROVIDER",
     "CREATOR_ID",
     "POLL_INTERVAL",
@@ -75,6 +78,12 @@ class TestEnvExampleContent:
             if line.startswith("DATABASE_URL=")
         )
         assert database_line.startswith("DATABASE_URL=postgresql://")
+
+    def test_paid_ppv_provider_is_the_default(self):
+        with open(ENV_PATH) as f:
+            content = f.read()
+
+        assert "FANSLY_PROVIDER=apifansly" in content
 
     def test_env_file_structure(self):
         """.env.example should have standard env file structure (comments + key=value)."""

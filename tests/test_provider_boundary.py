@@ -1,4 +1,4 @@
-"""Regression gate: production Fansly traffic has exactly one provider."""
+"""Regression gates for the automated-PPV provider boundary."""
 
 from pathlib import Path
 
@@ -6,18 +6,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_production_source_contains_no_legacy_fansly_provider():
-    source = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (ROOT / "src").rglob("*.py")
-    ).lower()
+def test_apifansly_is_the_paid_ppv_provider():
+    provider_source = (
+        ROOT / "src" / "apifansly_client.py"
+    ).read_text(encoding="utf-8")
+    factory_source = (
+        ROOT / "src" / "client_factory.py"
+    ).read_text(encoding="utf-8")
 
-    assert "v1.apifansly.com" not in source
-    assert "class apifanslyclient" not in source
-    assert "apifansly_api_key" not in source
+    assert (
+        'BASE_URL = "https://v1.apifansly.com/api/fansly"'
+        in provider_source
+    )
+    assert "supports_paid_messages=True" in provider_source
+    assert "supports_vault_albums=True" in provider_source
+    assert "ApifanslyClient" in factory_source
 
 
-def test_onlyfansapi_is_the_single_fansly_http_origin():
+def test_onlyfansapi_remains_an_explicit_non_ppv_fallback():
     provider_source = (
         ROOT / "src" / "fansly_api_client.py"
     ).read_text(encoding="utf-8")
@@ -26,6 +32,7 @@ def test_onlyfansapi_is_the_single_fansly_http_origin():
     ).read_text(encoding="utf-8")
 
     assert 'BASE_URL = "https://app.onlyfansapi.com"' in provider_source
+    assert "supports_paid_messages=False" in provider_source
     assert "FanslyApiClientImpl" in factory_source
 
 

@@ -1,5 +1,5 @@
 """
-Fansly AI Bot orchestrator for the OnlyFansAPI Fansly product.
+Provider-neutral Fansly AI Bot orchestrator.
 
 This is the main chat loop: poll chats → process messages → send replies.
 Every message flows through the persona, funnel, script, NLP, reciprocity,
@@ -255,13 +255,66 @@ class FanslyBot:
 
     @property
     def launch_ready(self) -> bool:
-        return not self.require_fan_allowlist or bool(self.allowed_fan_ids)
+        if (
+            self.require_fan_allowlist
+            and not self.allowed_fan_ids
+        ):
+            return False
+        capabilities = self.client.capabilities
+        return (
+            capabilities.supports_paid_messages is True
+            and capabilities.supports_vault_albums is True
+            and capabilities.supports_attributed_purchases is True
+        )
 
     @property
     def launch_block_reason(self) -> str | None:
-        if self.launch_ready:
-            return None
-        return "controlled launch requires at least one FAN_ALLOWLIST entry"
+        if (
+            self.require_fan_allowlist
+            and not self.allowed_fan_ids
+        ):
+            return "controlled launch requires at least one FAN_ALLOWLIST entry"
+        capabilities = self.client.capabilities
+        if capabilities.supports_paid_messages is not True:
+            return (
+                "configured provider cannot send automated paid PPV messages"
+            )
+        if capabilities.supports_vault_albums is not True:
+            return (
+                "configured provider cannot browse Fansly vault albums"
+            )
+        if capabilities.supports_attributed_purchases is not True:
+            return (
+                "APIFANSLY_WEBHOOK_TOKEN must be at least 32 characters "
+                "for automatic PPV purchase handling"
+            )
+        return None
+
+    def record_provider_ppv_purchase(
+        self,
+        *,
+        provider_purchase_id: str,
+        provider_purchase_ref: str,
+        fan_id: str,
+        amount_millis: int,
+        provider_created_at: datetime,
+    ):
+        """Apply one exact provider PPV purchase without human review."""
+        event, created = self.purchase_repo.record_attributed_purchase(
+            creator_id=self.creator_id,
+            provider_purchase_id=provider_purchase_id,
+            provider_purchase_ref=provider_purchase_ref,
+            fan_id=fan_id,
+            amount_millis=amount_millis,
+            source="provider_webhook",
+            provider_created_at=provider_created_at,
+        )
+        if created:
+            self.aftercare.trigger_aftercare(
+                purchase_amount=amount_millis / 1000,
+                fan_id=fan_id,
+            )
+        return event, created
 
     def _sync_wallet_transactions(self) -> int:
         """Persist provider revenue without assigning it to a fan."""
@@ -558,6 +611,24 @@ class FanslyBot:
                     raise RuntimeError(
                         "Provider did not confirm a sent message ID"
                     )
+                raw_purchase_reference = getattr(
+                    sent,
+                    "purchase_reference_id",
+                    None,
+                )
+                purchase_reference_id = (
+                    raw_purchase_reference.strip()
+                    if isinstance(raw_purchase_reference, str)
+                    and raw_purchase_reference.strip()
+                    else None
+                )
+                if (
+                    sending.message_kind == OutboundKind.PPV.value
+                    and not purchase_reference_id
+                ):
+                    raise RuntimeError(
+                        "Provider did not return the PPV purchase reference"
+                    )
             except Exception as exc:
                 self.processing_repo.mark_delivery_unknown(
                     sending.id,
@@ -572,6 +643,7 @@ class FanslyBot:
             self.processing_repo.complete_delivery(
                 sending.id,
                 sent.message_id,
+                provider_purchase_ref=purchase_reference_id,
             )
             self._record_sent_reply(
                 sending.fan_id,
@@ -629,8 +701,7 @@ class FanslyBot:
             and capabilities.supports_paid_messages is not True
         ):
             return (
-                "OnlyFansAPI's current Fansly send-message contract does "
-                "not document paid/paywalled messages"
+                "configured provider does not support paid/paywalled messages"
             )
         return None
 
@@ -638,6 +709,8 @@ class FanslyBot:
         self,
         chat_id: str,
         message: OutboundMessage,
+        *,
+        preview_id: str | None = None,
     ):
         if message.kind == OutboundKind.TEXT:
             return self.client.send_message(chat_id, message.content)
@@ -657,9 +730,29 @@ class FanslyBot:
             content=message.content,
             media_id=message.media_ids[0],
             price=message.price_millis / 1000,
+            preview_id=preview_id,
         )
 
     def _deliver_outbox(self, outbox: OutboxMessageRecord):
+        preview_id = None
+        if (
+            outbox.message_kind == OutboundKind.PPV.value
+            and outbox.sequence_id is not None
+            and outbox.sequence_step_id is not None
+        ):
+            sequence = self.sequence_repo.get_sequence(
+                outbox.sequence_id
+            )
+            if sequence is not None:
+                step = next(
+                    (
+                        item
+                        for item in sequence.steps
+                        if item.id == outbox.sequence_step_id
+                    ),
+                    None,
+                )
+                preview_id = step.preview_id if step is not None else None
         return self._deliver_message(
             outbox.chat_id,
             OutboundMessage(
@@ -670,6 +763,7 @@ class FanslyBot:
                 sequence_id=outbox.sequence_id,
                 sequence_step_id=outbox.sequence_step_id,
             ),
+            preview_id=preview_id,
         )
 
     def toggle(self, force: Optional[bool] = None) -> bool:

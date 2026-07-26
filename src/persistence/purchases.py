@@ -124,10 +124,11 @@ class PurchaseRepository:
         creator_id: str,
         provider_purchase_id: str,
         fan_id: str,
-        provider_message_id: str,
         amount_millis: int,
         source: str,
         provider_created_at: datetime,
+        provider_message_id: str | None = None,
+        provider_purchase_ref: str | None = None,
     ) -> tuple[PurchaseEventRecord, bool]:
         """Apply one purchase to its exact sent PPV, once.
 
@@ -138,8 +139,12 @@ class PurchaseRepository:
             raise ValueError("purchase source is not attributable")
         if not provider_purchase_id.strip():
             raise ValueError("provider_purchase_id is required")
-        if not provider_message_id.strip():
-            raise ValueError("provider_message_id is required")
+        provider_message_id = (provider_message_id or "").strip()
+        provider_purchase_ref = (provider_purchase_ref or "").strip()
+        if not provider_message_id and not provider_purchase_ref:
+            raise ValueError(
+                "provider_message_id or provider_purchase_ref is required"
+            )
         if amount_millis <= 0:
             raise ValueError("amount_millis must be positive")
         if provider_created_at.tzinfo is None:
@@ -148,6 +153,33 @@ class PurchaseRepository:
             )
         now = utcnow()
         with self.engine.begin() as conn:
+            outbox_filters = [
+                OUTBOX_MESSAGES.c.creator_id == creator_id,
+                OUTBOX_MESSAGES.c.fan_id == fan_id,
+            ]
+            if provider_message_id:
+                outbox_filters.append(
+                    OUTBOX_MESSAGES.c.provider_message_id
+                    == provider_message_id
+                )
+            if provider_purchase_ref:
+                outbox_filters.append(
+                    OUTBOX_MESSAGES.c.provider_purchase_ref
+                    == provider_purchase_ref
+                )
+            outbox = conn.execute(
+                select(OUTBOX_MESSAGES)
+                .where(and_(*outbox_filters))
+                .with_for_update()
+            ).mappings().first()
+            if outbox is None:
+                raise ValueError("purchase does not match a sent outbox row")
+            provider_message_id = str(
+                outbox["provider_message_id"] or ""
+            )
+            if not provider_message_id:
+                raise ValueError("purchase outbox lacks provider message ID")
+
             existing = conn.execute(
                 select(PURCHASE_EVENTS).where(
                     and_(
@@ -169,20 +201,6 @@ class PurchaseRepository:
                     )
                 return self._event(existing), False
 
-            outbox = conn.execute(
-                select(OUTBOX_MESSAGES)
-                .where(
-                    and_(
-                        OUTBOX_MESSAGES.c.creator_id == creator_id,
-                        OUTBOX_MESSAGES.c.fan_id == fan_id,
-                        OUTBOX_MESSAGES.c.provider_message_id
-                        == provider_message_id,
-                    )
-                )
-                .with_for_update()
-            ).mappings().first()
-            if outbox is None:
-                raise ValueError("purchase does not match a sent outbox row")
             if outbox["status"] != OUTBOX_SENT:
                 raise ValueError("purchase outbox is not sent")
             if outbox["message_kind"] != "ppv":

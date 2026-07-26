@@ -1,16 +1,23 @@
-"""Tests for the OnlyFansAPI Fansly client factory."""
+"""Tests for the provider client factory."""
 
 import pytest
 
 from src.client_factory import get_fansly_client
+from src.apifansly_client import ApifanslyClient
 from src.fansly_api_client import FanslyApiClientImpl
 
 
-def test_defaults_to_onlyfansapi_fansly_when_unset():
-    client = get_fansly_client({"FANSLY_API_KEY": "sk_test"})
+def test_defaults_to_apifansly_for_paid_ppv():
+    client = get_fansly_client({
+        "APIFANSLY_API_KEY": "api_test",
+        "FANSLY_ACCOUNT_ID": "fansly_acc_test",
+        "APIFANSLY_WEBHOOK_TOKEN": "w" * 32,
+    })
 
-    assert isinstance(client, FanslyApiClientImpl)
-    assert client.api_key == "sk_test"
+    assert isinstance(client, ApifanslyClient)
+    assert client.config.api_key == "api_test"
+    assert client.account_id == "fansly_acc_test"
+    assert client.config.webhook_token == "w" * 32
 
 
 def test_returns_onlyfansapi_fansly_when_explicitly_set():
@@ -22,15 +29,20 @@ def test_returns_onlyfansapi_fansly_when_explicitly_set():
     assert client.api_key == "sk_test"
 
 
-def test_legacy_apifansly_provider_is_rejected():
+def test_returns_apifansly_when_explicitly_set():
     env = {
         "FANSLY_PROVIDER": "apifansly",
-        "APIFANSLY_API_KEY": "legacy-key",
-        "FANSLY_ACCOUNT_ID": "legacy-account",
+        "APIFANSLY_API_KEY": "api-key",
+        "FANSLY_ACCOUNT_ID": "connected-account",
+        "APIFANSLY_WEBHOOK_TOKEN": "x" * 32,
     }
 
-    with pytest.raises(ValueError, match="only supports OnlyFansAPI"):
-        get_fansly_client(env)
+    client = get_fansly_client(env)
+
+    assert isinstance(client, ApifanslyClient)
+    assert client.config.api_key == "api-key"
+    assert client.account_id == "connected-account"
+    assert client.config.webhook_token == "x" * 32
 
 
 def test_raises_on_unknown_provider():

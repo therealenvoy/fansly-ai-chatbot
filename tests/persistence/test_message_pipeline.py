@@ -16,6 +16,11 @@ from src.persistence.schema import (
     metadata,
 )
 from src.persistence.state import ConversationStateRepository
+from src.sequences.models import (
+    Sequence,
+    SequenceStep,
+    SequenceTrigger,
+)
 
 
 def _bot():
@@ -356,6 +361,49 @@ def test_documented_free_media_delivery_uses_the_same_outbox():
     assert outbox["status"] == "sent"
     assert outbox["message_kind"] == "media"
     assert outbox["provider_message_id"] == "provider-media-1"
+
+
+def test_ppv_delivery_forwards_the_sequence_preview_id():
+    _, bot = _bot()
+    sequence = Sequence(
+        name="Preview sequence",
+        trigger=SequenceTrigger.WELCOME,
+        funnel_stage="offer",
+        steps=[
+            SequenceStep(
+                sequence_id=0,
+                position=1,
+                media_id="media-1",
+                preview_id="preview-1",
+                price=25,
+            )
+        ],
+    )
+    bot.sequence_repo.save_sequence_with_steps(sequence)
+    step = sequence.steps[0]
+    outbox = SimpleNamespace(
+        chat_id="chat-a",
+        message_kind="ppv",
+        content="unlock",
+        media_ids=["media-1"],
+        price_millis=25_000,
+        sequence_id=sequence.id,
+        sequence_step_id=step.id,
+    )
+    bot.client.send_ppv.return_value = SimpleNamespace(
+        success=True,
+        message_id="provider-ppv-1",
+    )
+
+    bot._deliver_outbox(outbox)
+
+    bot.client.send_ppv.assert_called_once_with(
+        chat_id="chat-a",
+        content="unlock",
+        media_id="media-1",
+        price=25.0,
+        preview_id="preview-1",
+    )
 
 
 def test_wallet_sync_is_idempotent_and_does_not_invent_a_buyer():

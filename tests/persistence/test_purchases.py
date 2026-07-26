@@ -85,7 +85,11 @@ def _fixture(*, two_steps: bool = False):
         ),
     )
     sending = inbox.claim_outbox(outbox.id)
-    inbox.complete_delivery(sending.id, "provider-message-1")
+    inbox.complete_delivery(
+        sending.id,
+        "provider-message-1",
+        provider_purchase_ref="account-media-1",
+    )
     return (
         engine,
         notes,
@@ -168,6 +172,26 @@ def test_attributed_purchase_advances_only_matching_ppv_once():
     assert duplicate.id == event.id
     assert notes.get("fan-a", "creator-a").purchase_count == 1
     assert state.load_state("creator-a", "fan-a").ppvs_bought == 1
+
+
+def test_webhook_purchase_reference_resolves_exact_sent_ppv():
+    _, notes, _, sequences, purchases = _fixture()
+
+    event, created = purchases.record_attributed_purchase(
+        creator_id="creator-a",
+        provider_purchase_id="order-1",
+        provider_purchase_ref="account-media-1",
+        fan_id="fan-a",
+        amount_millis=10_000,
+        source="provider_webhook",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    assert created is True
+    assert event.provider_message_id == "provider-message-1"
+    assert notes.get("fan-a", "creator-a").purchase_count == 1
+    progress = sequences.get_fan_progress("fan-a", "creator-a")[0]
+    assert progress.status == StepStatus.BOUGHT
 
 
 def test_attributed_purchase_advances_one_step_at_a_time():

@@ -57,8 +57,10 @@ Never test a restore by overwriting production.
 Required production variables:
 
 ```text
-FANSLY_PROVIDER=fanslyapi
-FANSLY_API_KEY=<OnlyFansAPI key with approved Fansly beta access>
+FANSLY_PROVIDER=apifansly
+APIFANSLY_API_KEY=<APIFansly API key>
+FANSLY_ACCOUNT_ID=<connected fansly_acc_... account>
+APIFANSLY_WEBHOOK_TOKEN=<at least 32 random characters>
 CONTROLLED_LAUNCH=true
 BOT_ENABLED_DEFAULT=false
 FAN_ALLOWLIST=<one or more exact Fansly account IDs>
@@ -67,14 +69,24 @@ POLL_INTERVAL=300
 ```
 
 `POLL_INTERVAL=300` is the minimum controlled-launch interval. The enabled
-poll loop makes at least two API calls per poll (wallet sync plus chat listing),
-so a five-minute interval uses an estimated 17,280 requests per 30 days before
-message reads, pagination, or sends. A 60-second interval would use at least
-86,400 and cannot fit the Basic 20,000-credit monthly allowance.
+loop always lists chats and may make additional message, vault, and send calls.
+Keep this conservative interval until real APIFansly credit usage is measured.
 
-OnlyFansAPI currently limits its Fansly product to approved closed-beta
-participants. A general OnlyFans API key is not proof of Fansly access: startup
-must successfully resolve a connected `fansly_acct_...` account before launch.
+The APIFansly account must be connected in its console before launch. Startup
+must resolve the native Fansly creator ID from the configured
+`fansly_acc_...` account.
+
+Create an APIFansly webhook for the active `ppv.purchased` event:
+
+```text
+https://<RAILWAY_PUBLIC_DOMAIN>/webhooks/apifansly/<APIFANSLY_WEBHOOK_TOKEN>
+```
+
+Treat the entire URL as a credential. The application does not log HTTP
+requests, but the token should still be rotated if it is exposed. APIFansly
+also issues a signing secret; its public documentation does not currently
+specify the signature header or algorithm, so the application uses the
+high-entropy route token and will fail launch without it.
 
 Run this inside the configured deployment environment:
 
@@ -89,8 +101,11 @@ The check is read-only and does not print secrets. Then:
 3. Keep the bot disabled and add one internal/pilot fan account ID.
 4. Enable it from the dashboard. The server rejects enabling when the controlled
    launch allowlist is empty.
-5. Verify one inbound message, one outbox send, and the returned provider message
-   ID. Check for `delivery_unknown` before expanding.
+5. With the internal fan, verify one inbound reply and one low-price locked PPV
+   using vault-selected media. Buy it from the controlled fan. Confirm the
+   outbox has both provider IDs, the `ppv.purchased` event creates one purchase
+   row, the sequence advances once, and the duplicate event is idempotent.
+   Check for `delivery_unknown` before expanding.
 6. Expand the allowlist gradually. Each allowlist has its own poll cursor so a
    newly added pilot is scanned without reprocessing another pilot's history.
 

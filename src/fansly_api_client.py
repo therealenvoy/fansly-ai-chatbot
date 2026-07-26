@@ -50,6 +50,10 @@ class FanslyApiClientImpl(FanslyApiClient):
         )
 
     @property
+    def provider_name(self) -> str:
+        return "OnlyFansAPI Fansly"
+
+    @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
             supports_free_media_messages=True,

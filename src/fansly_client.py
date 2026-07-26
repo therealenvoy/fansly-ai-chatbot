@@ -1,8 +1,6 @@
-"""Provider contract and typed records for OnlyFansAPI's Fansly product.
+"""Provider-neutral contract and typed records for Fansly integrations.
 
-The sole HTTP implementation lives in :mod:`src.fansly_api_client`. Keeping
-this module network-free makes it impossible to bypass ``client_factory`` by
-instantiating a retired provider client.
+Concrete HTTP implementations are selected only through ``client_factory``.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ class FanslyClientError(Exception):
 
 
 class PaymentRequiredError(FanslyClientError):
-    """The OnlyFansAPI account needs billing attention."""
+    """The configured provider account needs billing attention."""
 
 
 class NotFoundError(FanslyClientError):
@@ -24,11 +22,11 @@ class NotFoundError(FanslyClientError):
 
 
 class AuthError(FanslyClientError):
-    """OnlyFansAPI authentication or authorization failed."""
+    """Provider authentication or authorization failed."""
 
 
 class UnsupportedProviderFeature(FanslyClientError):
-    """OnlyFansAPI does not document the requested Fansly capability."""
+    """The selected provider does not document the requested capability."""
 
 
 @dataclass(frozen=True)
@@ -83,10 +81,15 @@ class SentMessage:
     content: str
     created_at: float
     success: bool
+    purchase_reference_id: str | None = None
 
 
 class FanslyApiClient(ABC):
-    """OnlyFansAPI Fansly contract consumed by the bot."""
+    """Provider contract consumed by the bot."""
+
+    @property
+    def provider_name(self) -> str:
+        return self.__class__.__name__
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -104,9 +107,9 @@ class FanslyApiClient(ABC):
         self,
         *,
         limit: int = 100,
-        offset: int = 0,
+        offset: int | str = 0,
         order: str = "newest",
-    ) -> tuple[list[ChatInfo], int | None]: ...
+    ) -> tuple[list[ChatInfo], int | str | None]: ...
 
     @abstractmethod
     def get_all_chats(
@@ -149,7 +152,7 @@ class FanslyApiClient(ABC):
         offset: int = 0,
     ) -> tuple[list[WalletTransaction], int | None]:
         raise UnsupportedProviderFeature(
-            "OnlyFansAPI wallet transactions are unavailable"
+            "Wallet transactions are unavailable for this provider"
         )
 
     @abstractmethod

@@ -6,7 +6,7 @@ Phase 6 separates intent, delivery, revenue, and purchase attribution.
 
 ```text
 typed PPV intent
-  -> blocked_unsupported (current Fansly provider contract)
+  -> blocked_unsupported (provider lacks paid-message capability)
 
 typed PPV intent
   -> sending
@@ -15,9 +15,8 @@ typed PPV intent
   -> exact sequence step BOUGHT/PENDING-next + fan totals advanced once
 ```
 
-The second path is implemented for a future provider capability but cannot be
-entered by the current OnlyFansAPI Fansly client because paid-message fields
-are not documented.
+APIFansly enters the second path and sends the documented `access_type=["ppv"]`
+payload with provider media, optional preview media, and a dollar price.
 
 ## Rules
 
@@ -32,25 +31,25 @@ are not documented.
 - The recorded amount must equal the PPV price.
 - Aftercare and fan spend must never use an aggregate wallet row.
 
-## Current provider limitations
+## Automatic purchase attribution
 
-OnlyFansAPI documents free text/media sending for Fansly but currently does not
-document a price or paywall field. Its Fansly wallet ledger exposes transaction
-amounts and timestamps but not fan or message attribution.
+APIFansly's `ppv.purchased` webhook binds a unique order ID to the purchased
+account-media ID, fan ID, creator ID, and price. The adapter stores the
+`contentId` returned by the PPV send as the outbox purchase reference. Webhook
+ingestion then resolves the exact sent PPV and calls the same idempotent
+purchase transition used by the durable sequence engine.
 
-The safe behavior is therefore:
+There is no human handoff or amount/time-window guessing in this path. Unknown
+media references, wrong fans, wrong creators, wrong amounts, duplicate order
+conflicts, and purchases that do not match a sent PPV fail closed.
 
-- preserve a generated PPV decision for operators as
-  `blocked_unsupported`;
-- never send undocumented `requirePurchase`, `price`, `previews`, or access
-  fields;
-- ingest wallet rows idempotently for aggregate reporting;
-- leave per-fan purchase counts unchanged until an attributable event exists.
+OnlyFansAPI remains a free-message fallback and produces
+`blocked_unsupported` for PPV intents.
 
 ## Verification
 
 ```powershell
-python -m pytest -q tests/test_fansly_api_client.py
+python -m pytest -q tests/test_apifansly_client.py
 python -m pytest -q tests/messaging/test_models.py
 python -m pytest -q tests/persistence/test_purchases.py
 python -m pytest -q tests/persistence/test_message_pipeline.py

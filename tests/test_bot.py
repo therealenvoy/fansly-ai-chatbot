@@ -4,7 +4,11 @@ from unittest.mock import MagicMock
 from src.bot import FanslyBot, LaunchGuardError
 from src.notes.repository import FanNoteRepository
 from src.persona.loader import PersonaLoader
-from src.fansly_client import FanslyApiClient, MessageInfo
+from src.fansly_client import (
+    FanslyApiClient,
+    MessageInfo,
+    ProviderCapabilities,
+)
 from src.persistence.database import create_database_engine
 from src.persistence.schema import metadata
 from src.persistence.state import ConversationStateRepository
@@ -16,6 +20,12 @@ def bot():
     client = MagicMock(spec=FanslyApiClient)
     client.account_id = "test"
     client.list_chats_page.return_value = ([], None)
+    client.capabilities = ProviderCapabilities(
+        supports_free_media_messages=True,
+        supports_paid_messages=True,
+        supports_attributed_purchases=True,
+        supports_vault_albums=True,
+    )
 
     pl = MagicMock(spec=PersonaLoader)
     pl.load.return_value = MagicMock()

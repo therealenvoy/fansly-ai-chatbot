@@ -92,7 +92,8 @@ def _capture_info_logs(caplog):
 def cleanup_env():
     """Restore env after each test — prevents cross-test contamination."""
     saved = {k: os.environ.get(k) for k in (
-        "FANSLY_API_KEY", "FANSLY_ACCOUNT_ID", "POLL_INTERVAL",
+        "APIFANSLY_API_KEY", "FANSLY_API_KEY",
+        "FANSLY_ACCOUNT_ID", "APIFANSLY_WEBHOOK_TOKEN", "POLL_INTERVAL",
         "MAX_BACKOFF", "IDLE_BACKOFF_MAX", "FANSLY_PROVIDER",
         "DATABASE_URL", "PORT", "DEEPSEEK_API_KEY", "CREATOR_ID",
         "CONTROLLED_LAUNCH", "BOT_ENABLED_DEFAULT", "FAN_ALLOWLIST",
@@ -109,8 +110,10 @@ def cleanup_env():
 @pytest.fixture(autouse=True)
 def standard_env():
     """Normal env vars that let main.py initialize successfully."""
-    os.environ.setdefault("FANSLY_API_KEY", "test_key_123")
-    os.environ.setdefault("FANSLY_ACCOUNT_ID", "test_account_456")
+    os.environ["FANSLY_PROVIDER"] = "apifansly"
+    os.environ["APIFANSLY_API_KEY"] = "test_key_123"
+    os.environ["FANSLY_ACCOUNT_ID"] = "test_account_456"
+    os.environ["APIFANSLY_WEBHOOK_TOKEN"] = "w" * 32
     os.environ.setdefault("POLL_INTERVAL", "1")
     os.environ.setdefault("MAX_BACKOFF", "8")
     os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
@@ -302,7 +305,7 @@ class TestStartupAuthValidation:
     def test_missing_api_key_starts_dashboard_without_constructing_bot(
         self, module, caplog, mock_deps
     ):
-        os.environ.pop("FANSLY_API_KEY", None)
+        os.environ.pop("APIFANSLY_API_KEY", None)
         mock_deps["client"].verify_auth.reset_mock()
         mock_deps["bot_cls"].reset_mock()
 
@@ -452,22 +455,25 @@ class TestIdleAdaptiveBackoff:
 # ═══════════════════════════════════════════════════════════════
 
 class TestCreditAwarenessLogging:
-    """Credit awareness should log a conservative monthly request baseline."""
+    """Provider-aware startup logging should not mix billing models."""
 
     def test_logs_estimated_monthly_requests(self, module, caplog):
         os.environ["POLL_INTERVAL"] = "300"
         importlib.reload(module)
 
         assert any(
-            "17,280/month" in r.message
+            "8,640/month" in r.message
+            and "APIFansly chat-list baseline" in r.message
             for r in caplog.records
-        ), "Expected conservative monthly baseline in startup logs"
+        ), "Expected the APIFansly chat-list baseline in startup logs"
 
-    def test_warns_if_exceeding_basic_plan(self, module, caplog):
+    def test_legacy_provider_warns_if_exceeding_basic_plan(self, module, caplog):
+        os.environ["FANSLY_PROVIDER"] = "fanslyapi"
+        os.environ["FANSLY_API_KEY"] = "legacy_test_key"
         os.environ["POLL_INTERVAL"] = "60"
         importlib.reload(module)
 
         assert any(
-            "exceed the Basic plan" in r.message
+            "exceed the OnlyFansAPI Basic plan" in r.message
             for r in caplog.records
         ), "Expected warning about exceeding Basic plan credits"

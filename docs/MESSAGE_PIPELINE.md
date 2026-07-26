@@ -22,10 +22,14 @@ twice.
    kind, media IDs, price, and sequence provenance. There can be only one
    outbox row per inbound row.
 10. Commit the outbox status as `sending`, then call the provider exactly once.
-11. Atomically store the returned provider message ID, mark the outbox `sent`,
-    mark the inbound `completed`, and insert the processed-message marker.
+11. Atomically store the returned provider message ID and PPV account-media
+    purchase reference, mark the outbox `sent`, mark the inbound `completed`,
+    and insert the processed-message marker.
     A supported PPV also moves only its exact sequence step to `sent` in this
     transaction.
+12. On `ppv.purchased`, authenticate the webhook route, match the event's
+    account-media ID to that stored reference, verify fan/creator/amount, and
+    advance the exact sequence step idempotently.
 
 The first scan of a conversation with no local checkpoint processes only the
 newest `unreadCount` fan messages. A first-seen chat with no unread messages
@@ -48,15 +52,15 @@ establishes a baseline and does not reply to historical content.
 
 ## Provider contract
 
-The integration uses OnlyFansAPI's Fansly endpoints:
+Production paid PPV uses APIFansly:
 
-- `GET /api/fansly/{fanslyAccount}/chats` with `limit`, `offset`, and `order`;
-- `GET /api/fansly/{fanslyAccount}/chats/{chat_id}/messages`;
-- `POST /api/fansly/{fanslyAccount}/chats/{chat_id}/messages`.
+- `GET /{account_id}/chats` with cursor pagination and sort order;
+- `GET /{account_id}/chats/{chat_id}/messages`;
+- `POST /{account_id}/chats/{chat_id}/messages`;
+- vault album and album-media reads for exact media selection.
 
-The Fansly product is currently documented as closed beta. Endpoint changes
-must be verified against the current OnlyFansAPI documentation before a
-production release.
+The durable pipeline is provider-neutral. Only the adapter owns authentication,
+pagination, response normalization, and paid-message payload fields.
 
 ## Verification
 

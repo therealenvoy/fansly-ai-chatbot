@@ -30,6 +30,7 @@ from src.web.dashboard import DASHBOARD_HTML, MAX_BODY_BYTES, DashboardServer
 TEST_USER = "test-operator"
 TEST_PASSWORD = "correct-horse-battery-staple"
 TEST_CSRF_TOKEN = "test-csrf-token-with-enough-entropy"
+TEST_WEBHOOK_TOKEN = "test-webhook-token-with-enough-entropy"
 
 
 def _authorization(user=TEST_USER, password=TEST_PASSWORD):
@@ -94,6 +95,7 @@ class TestDashboardShell:
         assert "conditions:dashboardScriptDraft.conditions||{}" in DASHBOARD_HTML
         assert "variables:dashboardScriptDraft.variables" in DASHBOARD_HTML
         assert "/api/media-assets" in DASHBOARD_HTML
+        assert "/api/vault-albums" in DASHBOARD_HTML
         assert 'id="media-provider-id"' in DASHBOARD_HTML
         assert 'id="persona-tone"' in DASHBOARD_HTML
         assert 'id="persona-boundaries"' in DASHBOARD_HTML
@@ -134,6 +136,17 @@ def _post(host, path, payload=None, *, authenticated=True, csrf=True, origin=Non
     return status, data
 
 
+def _post_webhook(host, token, payload):
+    status, data, _ = _request(
+        host,
+        "POST",
+        f"/webhooks/apifansly/{token}",
+        body=json.dumps(payload),
+        headers={"Content-Type": "application/json"},
+    )
+    return status, data
+
+
 def _delete(host, path, *, authenticated=True, csrf=True, origin=None):
     headers = {}
     if authenticated:
@@ -152,11 +165,16 @@ def _make_bot(db_url):
     bot.enabled = True
     bot.creator_id = "test_creator"
     bot.account_id = "account-123"
+    bot.client.account_id = "fansly_acc_test"
+    bot.client._creator_fansly_id = "creator-native-1"
     bot.client.list_chats.return_value = []
     bot.client.verify_auth.return_value = True
     bot.client.capabilities = ProviderCapabilities(
         supports_free_media_messages=True,
+        supports_paid_messages=True,
+        supports_attributed_purchases=True,
         supports_wallet_transactions=True,
+        supports_vault_albums=True,
     )
     engine = create_database_engine(
         db_url,
@@ -167,6 +185,10 @@ def _make_bot(db_url):
     bot.note_repo.engine = engine
     bot.sequence_repo = SequenceRepository(engine=engine)
     bot.sequence_repo.create_tables()
+    bot.record_provider_ppv_purchase.return_value = (
+        MagicMock(),
+        True,
+    )
 
     def _toggle(force=None):
         bot.enabled = bool(force) if force is not None else not bot.enabled
@@ -195,6 +217,7 @@ def running_server(db_url, tmp_path):
         dashboard_user=TEST_USER,
         dashboard_password=TEST_PASSWORD,
         csrf_token=TEST_CSRF_TOKEN,
+        apifansly_webhook_token=TEST_WEBHOOK_TOKEN,
         persona_dir=str(tmp_path / "personas"),
         brand_bible_path=str(tmp_path / "brand_bible.md"),
     )
@@ -207,6 +230,79 @@ def running_server(db_url, tmp_path):
 
     server.shutdown()
     thread.join(timeout=2)
+
+
+class TestApifanslyPurchaseWebhook:
+    def _payload(self):
+        return {
+            "accountId": "fansly_acc_test",
+            "event": "ppv.purchased",
+            "timestamp": "2026-06-23T18:11:59.242Z",
+            "data": {
+                "orderId": "order-1",
+                "accountMediaId": "account-media-1",
+                "correlationAccountId": "creator-native-1",
+                "accountId": "fan-1",
+                "type": 1,
+                "orderMetadata": {
+                    "accountMediaPrice": 1000,
+                },
+            },
+        }
+
+    def test_exact_purchase_advances_without_dashboard_auth(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post_webhook(
+            host,
+            TEST_WEBHOOK_TOKEN,
+            self._payload(),
+        )
+
+        assert status == 200
+        assert body == {"accepted": True, "duplicate": False}
+        bot.record_provider_ppv_purchase.assert_called_once()
+        kwargs = bot.record_provider_ppv_purchase.call_args.kwargs
+        assert kwargs["provider_purchase_id"] == "order-1"
+        assert kwargs["provider_purchase_ref"] == "account-media-1"
+        assert kwargs["fan_id"] == "fan-1"
+        assert kwargs["amount_millis"] == 10_000
+
+    def test_wrong_route_token_is_not_exposed(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post_webhook(
+            host,
+            "wrong-token",
+            self._payload(),
+        )
+
+        assert status == 404
+        assert body == {"error": "not found"}
+        bot.record_provider_ppv_purchase.assert_not_called()
+
+    def test_account_mismatch_is_rejected(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = self._payload()
+        payload["accountId"] = "different-account"
+
+        status, _ = _post_webhook(
+            host,
+            TEST_WEBHOOK_TOKEN,
+            payload,
+        )
+
+        assert status == 403
+        bot.record_provider_ppv_purchase.assert_not_called()
 
 
 class TestBotStatusEndpoints:
@@ -749,7 +845,7 @@ class TestTruthfulDashboardControls:
 
         status, listing = _get(host, "/api/media-assets?query=red")
         assert status == 200
-        assert listing["provider_listing_supported"] is False
+        assert listing["provider_listing_supported"] is True
         assert [asset["id"] for asset in listing["assets"]] == [
             asset_id
         ]
@@ -802,12 +898,13 @@ class TestTruthfulDashboardControls:
         running_server,
     ):
         host, bot, _ = running_server
+        bot.client.capabilities = ProviderCapabilities()
 
         status, albums = _get(host, "/api/vault-albums")
         assert status == 200
         assert albums["supported"] is False
         assert albums["albums"] == []
-        assert "not present" in albums["reason"]
+        assert "cannot browse vault albums" in albums["reason"]
         bot.client.list_albums.assert_not_called()
 
         status, media = _get(
@@ -824,6 +921,7 @@ class TestTruthfulDashboardControls:
         running_server,
     ):
         host, bot, _ = running_server
+        bot.client.capabilities = ProviderCapabilities()
         payload = {
             "name": "Draft ladder",
             "trigger": "welcome",
@@ -832,6 +930,7 @@ class TestTruthfulDashboardControls:
             "steps": [
                 {
                     "media_id": "fansly_media_1",
+                    "preview_id": "preview_media_1",
                     "price": 10,
                     "tease_script": "look",
                     "offer_script": "unlock",
@@ -842,7 +941,7 @@ class TestTruthfulDashboardControls:
         status, body = _post(host, "/api/sequences", payload)
 
         assert status == 409
-        assert "does not document paid" in body["error"]
+        assert "does not support paid" in body["error"]
         assert bot.sequence_repo.list_sequences() == []
 
     def test_inactive_sequence_draft_is_validated_and_saved(
@@ -850,6 +949,7 @@ class TestTruthfulDashboardControls:
         running_server,
     ):
         host, bot, _ = running_server
+        bot.client.capabilities = ProviderCapabilities()
         payload = {
             "name": "Draft ladder",
             "trigger": "welcome",
@@ -858,6 +958,7 @@ class TestTruthfulDashboardControls:
             "steps": [
                 {
                     "media_id": "fansly_media_1",
+                    "preview_id": "preview_media_1",
                     "price": 10,
                     "tease_script": "look",
                     "offer_script": "unlock",
@@ -871,6 +972,7 @@ class TestTruthfulDashboardControls:
         saved = bot.sequence_repo.get_sequence(created["id"])
         assert saved.is_active is False
         assert saved.steps[0].media_id == "fansly_media_1"
+        assert saved.steps[0].preview_id == "preview_media_1"
 
         status, listing = _get(host, "/api/sequences")
         assert status == 200
@@ -912,7 +1014,7 @@ class TestTruthfulDashboardControls:
         status, body = _post(host, "/api/sequences", payload)
 
         assert status == 400
-        assert "fansly_media_ ID" in body["error"]
+        assert "valid provider media ID" in body["error"]
         assert bot.sequence_repo.list_sequences() == []
 
     def test_existing_active_sequence_is_shown_as_blocked(
@@ -920,6 +1022,7 @@ class TestTruthfulDashboardControls:
         running_server,
     ):
         host, bot, _ = running_server
+        bot.client.capabilities = ProviderCapabilities()
         sequence = Sequence(
             name="Legacy active",
             trigger=SequenceTrigger.WELCOME,

@@ -246,6 +246,7 @@ OUTBOX_MESSAGES = Table(
     Column("sequence_step_id", Integer, nullable=True),
     Column("status", String(32), nullable=False, default="pending"),
     Column("provider_message_id", String(128), nullable=True),
+    Column("provider_purchase_ref", String(128), nullable=True),
     Column("attempt_count", Integer, nullable=False, default=0),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
     Column("sent_at", DateTime(timezone=True), nullable=True),
@@ -255,6 +256,11 @@ OUTBOX_MESSAGES = Table(
         "creator_id",
         "provider_message_id",
         name="uq_outbox_creator_provider_message",
+    ),
+    UniqueConstraint(
+        "creator_id",
+        "provider_purchase_ref",
+        name="uq_outbox_creator_purchase_ref",
     ),
 )
 

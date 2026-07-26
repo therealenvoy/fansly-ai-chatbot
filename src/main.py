@@ -4,7 +4,9 @@ Usage:
     python -m src.main
 
 Requires:
-    - FANSLY_API_KEY env var (OnlyFansAPI Fansly closed-beta token)
+    - FANSLY_PROVIDER=apifansly
+    - APIFANSLY_API_KEY and FANSLY_ACCOUNT_ID
+    - APIFANSLY_WEBHOOK_TOKEN for automatic PPV purchase handling
     - config/creators/{creator_id}.yaml persona file
 
 Runs a polling bot loop + lightweight health check HTTP server on port 8080.
@@ -53,7 +55,12 @@ def _env_bool(name: str, default: bool) -> bool:
 
 # ─── Config ────────────────────────────────────────────
 
-API_KEY = os.getenv("FANSLY_API_KEY", "")
+FANSLY_PROVIDER = os.getenv("FANSLY_PROVIDER", "apifansly").strip().lower()
+API_KEY = (
+    os.getenv("APIFANSLY_API_KEY", "")
+    if FANSLY_PROVIDER == "apifansly"
+    else os.getenv("FANSLY_API_KEY", "")
+)
 CREATOR_ID = os.getenv("CREATOR_ID", "sunny_charm")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))  # seconds, fast/active interval
 IDLE_BACKOFF_MAX = int(os.getenv("IDLE_BACKOFF_MAX", "600"))  # cap for idle backoff
@@ -90,7 +97,7 @@ BRAND_BIBLE_CONFIG_PATH = os.getenv(
 
 if not API_KEY:
     logger.warning(
-        "FANSLY_API_KEY is not configured for OnlyFansAPI's Fansly product. "
+        f"The API key for provider '{FANSLY_PROVIDER}' is not configured. "
         "The dashboard will start, but polling remains disabled."
     )
 
@@ -144,7 +151,7 @@ if API_KEY:
         api_error = str(e)
         logger.warning(f"API check failed: {e}. Bot will not poll.")
 else:
-    api_error = "FANSLY_API_KEY is not configured"
+    api_error = f"API key for provider '{FANSLY_PROVIDER}' is not configured"
 
 bot = None
 if api_ok:
@@ -187,17 +194,27 @@ if bot is None:
 
 # ─── Credit Awareness ──────────────────────────────────
 
-estimated_monthly = estimate_minimum_monthly_requests(POLL_INTERVAL)
-logger.info(
-    "Estimated API request baseline (30 days, no idle backoff): "
-    f"~{estimated_monthly:,}/month at {POLL_INTERVAL}s interval "
-    "(2 calls/poll, before message reads and sends)"
-)
-if estimated_monthly > BASIC_MONTHLY_CREDITS:
-    logger.warning(
-        f"At ~{estimated_monthly:,} baseline requests/month, this configuration can "
-        f"exceed the Basic plan ({BASIC_MONTHLY_CREDITS:,} credits/month) before "
-        "message reads and sends. Raise POLL_INTERVAL before enabling the bot."
+if FANSLY_PROVIDER == "fanslyapi":
+    estimated_monthly = estimate_minimum_monthly_requests(POLL_INTERVAL)
+    logger.info(
+        "Estimated OnlyFansAPI request baseline (30 days, no idle "
+        f"backoff): ~{estimated_monthly:,}/month at "
+        f"{POLL_INTERVAL}s interval"
+    )
+    if estimated_monthly > BASIC_MONTHLY_CREDITS:
+        logger.warning(
+            f"At ~{estimated_monthly:,} baseline requests/month, this "
+            f"configuration can exceed the OnlyFansAPI Basic plan "
+            f"({BASIC_MONTHLY_CREDITS:,} credits/month)."
+        )
+else:
+    estimated_chat_polls = (
+        30 * 24 * 60 * 60 // max(POLL_INTERVAL, 1)
+    )
+    logger.info(
+        "Estimated APIFansly chat-list baseline (30 days, no idle "
+        f"backoff): ~{estimated_chat_polls:,}/month before message reads, "
+        "vault reads, and sends"
     )
 
 # ─── Main Loop ─────────────────────────────────────────
@@ -254,7 +271,12 @@ if bot is None:
     logger.info("Dashboard-only mode active; Fansly polling is disabled")
 else:
     logger.info(f"Starting Fansly Bot for creator '{CREATOR_ID}'")
-    logger.info(f"Account: (resolved via OnlyFansAPI), Poll interval: {POLL_INTERVAL}s")
+    logger.info(
+        "Provider: %s, account: %s, poll interval: %ss",
+        FANSLY_PROVIDER,
+        client.account_id,
+        POLL_INTERVAL,
+    )
 logger.info(f"Max failure backoff: {MAX_BACKOFF}s, max idle backoff: {IDLE_BACKOFF_MAX}s")
 
 consecutive_failures = 0
