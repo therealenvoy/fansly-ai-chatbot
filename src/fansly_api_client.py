@@ -80,47 +80,85 @@ class FanslyApiClientImpl(FanslyApiClient):
 
     # ─── CHATS ───────────────────────────────────────────
 
-    def get_all_chats(self, filter_type: str = "all") -> list[ChatInfo]:
-        """Paginate through every chat page — a partial fetch would silently drop fans."""
-        all_chats: list[ChatInfo] = []
-        offset = 0
-        page_size = 100  # API max per page — fewer round trips than the 20 default
+    def list_chats_page(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        order: str = "newest",
+    ) -> tuple[list[ChatInfo], Optional[int]]:
+        """Fetch one documented OnlyFansAPI Fansly chat page."""
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if order not in {"newest", "oldest", "unread"}:
+            raise ValueError("order must be newest, oldest, or unread")
 
-        while True:
-            data = self._request(
-                "GET", f"/api/fansly/{self.account_id}/chats",
-                params={"limit": page_size, "offset": offset},
+        data = self._request(
+            "GET",
+            f"/api/fansly/{self.account_id}/chats",
+            params={"limit": limit, "offset": offset, "order": order},
+        )
+        inner = data.get("data", {})
+        chats_raw = inner.get("data", [])
+        accounts = {
+            account["id"]: account
+            for account in inner.get("aggregationData", {}).get(
+                "accounts", []
             )
-            inner = data.get("data", {})
-            chats_raw = inner.get("data", [])
-
-            accounts = {}
-            for acc in inner.get("aggregationData", {}).get("accounts", []):
-                accounts[acc["id"]] = acc
-
-            for chat in chats_raw:
-                partner_id = chat.get("partnerAccountId", "")
-                acc_info = accounts.get(partner_id, {})
-                avatar_url = None
-                locations = acc_info.get("avatar", {}).get("locations", [])
-                if locations:
-                    avatar_url = locations[0].get("location")
-
-                all_chats.append(ChatInfo(
+        }
+        chats: list[ChatInfo] = []
+        for chat in chats_raw:
+            partner_id = chat.get("partnerAccountId", "")
+            acc_info = accounts.get(partner_id, {})
+            locations = acc_info.get("avatar", {}).get("locations", [])
+            chats.append(
+                ChatInfo(
                     chat_id=chat["groupId"],
                     partner_account_id=partner_id,
-                    partner_username=chat.get("partnerUsername", acc_info.get("username", "")),
-                    partner_display_name=acc_info.get("displayName", chat.get("partnerUsername", "")),
+                    partner_username=chat.get(
+                        "partnerUsername",
+                        acc_info.get("username", ""),
+                    ),
+                    partner_display_name=acc_info.get(
+                        "displayName",
+                        chat.get("partnerUsername", ""),
+                    ),
                     unread_count=chat.get("unreadCount", 0),
                     last_message_id=chat.get("lastMessageId"),
+                    last_unread_message_id=chat.get(
+                        "lastUnreadMessageId"
+                    ),
                     subscription_tier_id=chat.get("subscriptionTierId"),
-                    avatar_url=avatar_url,
-                ))
+                    avatar_url=(
+                        locations[0].get("location") if locations else None
+                    ),
+                )
+            )
+        next_offset = (
+            offset + len(chats_raw)
+            if inner.get("hasMore") and chats_raw
+            else None
+        )
+        return chats, next_offset
 
-            if not inner.get("hasMore") or not chats_raw:
-                break
-            offset += len(chats_raw)
-
+    def get_all_chats(self, filter_type: str = "all") -> list[ChatInfo]:
+        """Paginate every page using OnlyFansAPI's offset contract."""
+        order = filter_type if filter_type in {
+            "newest",
+            "oldest",
+            "unread",
+        } else "newest"
+        all_chats: list[ChatInfo] = []
+        offset: Optional[int] = 0
+        while offset is not None:
+            chats, offset = self.list_chats_page(
+                limit=100,
+                offset=offset,
+                order=order,
+            )
+            all_chats.extend(chats)
         return all_chats
 
     def list_messages(

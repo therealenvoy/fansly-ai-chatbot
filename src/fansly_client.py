@@ -54,6 +54,24 @@ class FanslyApiClient(ABC):
     @abstractmethod
     def get_all_chats(self, filter_type: str = "all") -> list["ChatInfo"]: ...
 
+    def list_chats_page(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        order: str = "newest",
+    ) -> tuple[list["ChatInfo"], Optional[int]]:
+        """Return one page for incremental polling.
+
+        Providers without native offset pagination retain compatibility via
+        this bounded fallback. OnlyFansAPI's Fansly client overrides it with
+        the documented ``limit``, ``offset``, and ``order`` parameters.
+        """
+        chats = self.get_all_chats(filter_type=order)
+        page = chats[offset : offset + limit]
+        next_offset = offset + len(page)
+        return page, next_offset if next_offset < len(chats) else None
+
     @abstractmethod
     def list_messages(
         self, chat_id: str, limit: int = 10, cursor: Optional[str] = None
@@ -157,6 +175,7 @@ class ChatInfo:
     partner_display_name: str
     unread_count: int = 0
     last_message_id: Optional[str] = None
+    last_unread_message_id: Optional[str] = None
     subscription_tier_id: Optional[str] = None
     avatar_url: Optional[str] = None
 

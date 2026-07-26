@@ -67,8 +67,10 @@ def test_bot_session_and_dedup_survive_restart():
     )
 
     first = _durable_bot(engine)
-    first.client.get_all_chats.return_value = [chat]
+    first.client.list_chats_page.return_value = ([chat], None)
     first.client.list_messages.return_value = ([message], None)
+    first.client.send_message.return_value.success = True
+    first.client.send_message.return_value.message_id = "reply-a"
     first._generate_reply = MagicMock(return_value="hello back")
     first.poll_and_process()
 
@@ -77,11 +79,14 @@ def test_bot_session_and_dedup_survive_restart():
     assert stored.message_count == 2
 
     second = _durable_bot(engine)
-    second.client.get_all_chats.return_value = [chat]
+    second.client.list_chats_page.return_value = ([chat], None)
     second.client.list_messages.return_value = ([message], None)
     second._generate_reply = MagicMock(return_value="duplicate")
     second.poll_and_process()
 
     second._generate_reply.assert_not_called()
-    restored_session = second.sessions["fan-a"]
+    restored_session, _ = second.state_repo.load_session(
+        "creator-a",
+        "fan-a",
+    )
     assert restored_session.message_count == 2

@@ -114,6 +114,70 @@ class ConversationStateRepository:
             conn.execute(fan_stmt)
             conn.execute(conversation_stmt)
 
+    def get_conversation_checkpoint(
+        self,
+        creator_id: str,
+        chat_id: str,
+    ) -> tuple[str | None, str | None]:
+        """Return ``(last_platform_message_id, provider_cursor)`` for a chat."""
+        stmt = select(
+            CONVERSATIONS.c.last_platform_message_id,
+            CONVERSATIONS.c.provider_cursor,
+        ).where(
+            and_(
+                CONVERSATIONS.c.creator_id == creator_id,
+                CONVERSATIONS.c.chat_id == chat_id,
+            )
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(stmt).first()
+        if row is None:
+            return None, None
+        return row[0], row[1]
+
+    def conversation_changed(
+        self,
+        creator_id: str,
+        chat_id: str,
+        last_platform_message_id: str | None,
+    ) -> bool:
+        """Whether the provider's chat head differs from our durable head."""
+        stored, _ = self.get_conversation_checkpoint(creator_id, chat_id)
+        return stored != last_platform_message_id
+
+    def update_conversation_checkpoint(
+        self,
+        creator_id: str,
+        chat_id: str,
+        *,
+        last_platform_message_id: str | None,
+        provider_cursor: str | None = None,
+        last_activity_at: datetime | None = None,
+    ) -> None:
+        """Advance a chat checkpoint only after its messages were ingested."""
+        values = {
+            "last_platform_message_id": last_platform_message_id,
+            "provider_cursor": provider_cursor,
+            "updated_at": utcnow(),
+        }
+        if last_activity_at is not None:
+            values["last_activity_at"] = last_activity_at
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(CONVERSATIONS)
+                .where(
+                    and_(
+                        CONVERSATIONS.c.creator_id == creator_id,
+                        CONVERSATIONS.c.chat_id == chat_id,
+                    )
+                )
+                .values(**values)
+            )
+        if result.rowcount != 1:
+            raise RuntimeError(
+                f"Conversation does not exist: {creator_id}/{chat_id}"
+            )
+
     def load_state(self, creator_id: str, fan_id: str) -> DurableFanState | None:
         stmt = select(FAN_RUNTIME_STATES).where(
             and_(

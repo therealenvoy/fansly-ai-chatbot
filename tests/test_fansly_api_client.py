@@ -187,10 +187,18 @@ class TestGetAllChats:
         assert client.client.request.call_count == 2
         first_call_params = client.client.request.call_args_list[0].kwargs["params"]
         second_call_params = client.client.request.call_args_list[1].kwargs["params"]
-        assert first_call_params == {"limit": 100, "offset": 0}
+        assert first_call_params == {
+            "limit": 100,
+            "offset": 0,
+            "order": "newest",
+        }
         # page1's mock body contains exactly 1 chat, so offset advances by 1 (actual
         # count returned), not by the requested page size — a short page is valid.
-        assert second_call_params == {"limit": 100, "offset": 1}
+        assert second_call_params == {
+            "limit": 100,
+            "offset": 1,
+            "order": "newest",
+        }
 
 
 class TestListMessages:
