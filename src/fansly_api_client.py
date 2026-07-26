@@ -214,13 +214,13 @@ class FanslyApiClientImpl(FanslyApiClient):
             is_fan = str(msg.get("senderId", "")) != self.creator_fansly_id
             messages.append(MessageInfo(
                 message_id=msg["id"],
-                content=msg.get("content", ""),
+                content=msg.get("content") or "",
                 sender_id=msg["senderId"],
                 created_at=msg.get("createdAt", 0),
                 is_from_fan=is_fan,
                 has_attachments=bool(msg.get("attachments")),
                 total_tip=msg.get("totalTipAmount", 0),
-                attachments=msg.get("attachments", []),
+                attachments=list(msg.get("attachments") or []),
             ))
 
         next_cursor = messages[-1].message_id if inner.get("hasMore") and messages else None

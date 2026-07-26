@@ -221,8 +221,8 @@ tr.clickable{cursor:pointer}
 .conversation-item:hover,.conversation-item.active{background:rgba(161,124,255,.09)}
 .avatar{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:740;background:linear-gradient(145deg,#ce5de7,#7058e4);position:relative}
 .avatar::after{content:"";position:absolute;width:7px;height:7px;border-radius:50%;background:var(--green);border:2px solid #12121c;right:-1px;top:-1px}
-.conversation-copy{min-width:0}.conversation-name{font-size:10px;font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.conversation-preview{font-size:9px;color:var(--faint);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conversation-copy{min-width:0}.conversation-name{display:block;font-size:10px;font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conversation-preview{display:block;font-size:9px;color:var(--faint);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .conversation-time{font-size:8px;color:var(--faint)}
 .conversation-pane{min-width:0;display:flex;flex-direction:column;background:linear-gradient(145deg,#0d0d15,#101019)}
 .conversation-empty{margin:auto;text-align:center;max-width:340px;padding:30px}
@@ -360,6 +360,8 @@ const CSRF_TOKEN=__CSRF_TOKEN__;
 var currentTab='dashboard';
 var conversationData=[];
 var activeConversationId='';
+var activeConversationMessages=[];
+var activeConversationDetail=null;
 var editSeqId=null;
 var dashboardAlbums=[];
 var dashboardSteps=[];
@@ -429,9 +431,9 @@ function loadDashboard(){
       metricCard('Sent messages',Number(k.sent_outbounds||0).toLocaleString(),'Confirmed provider sends','<path d="m3 11 18-8-8 18-2-8zM11 13l5-5"/>',''),
       metricCard('Average response',k.response_time_avg==null?'N/A':Number(k.response_time_avg).toFixed(1)+'s',k.response_time_avg==null?'Awaiting enough events':'Across completed replies','<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',k.response_time_avg==null?'warn':'good')
     ].join('');
-    var pipeline=ops.pipeline||{};
+    var pipeline=ops.pipeline||{},crm=ops.crm_sync||{};
     var activity='<article class="activity-card surface"><div class="mini-title">Message activity <span>Durable pipeline</span></div>'+heatmap(Number(k.sent_outbounds||0)+Number(k.completed_inbounds||0))+'<div class="muted-note">Intensity is a compact operational pulse, not fabricated revenue.</div></article>';
-    var next='<article class="next-card surface"><div class="mini-title">Operations queue <span>Now</span></div><ul class="queue-list"><li><span>Completed inbound</span><strong>'+Number(k.completed_inbounds||pipeline.completed||0)+'</strong></li><li><span>Delivery unknown</span><strong style="color:'+(Number(k.delivery_unknown||0)?'var(--amber)':'var(--green)')+'">'+Number(k.delivery_unknown||0)+'</strong></li><li><span>Blocked PPV intents</span><strong>'+Number(k.blocked_ppv_intents||0)+'</strong></li><li><span>Allowed pilot fans</span><strong>'+Number(bot.allowed_fan_count||0)+'</strong></li></ul></article>';
+    var next='<article class="next-card surface"><div class="mini-title">Operations queue <span>Now</span></div><ul class="queue-list"><li><span>CRM messages stored</span><strong>'+Number(crm.stored_messages||0).toLocaleString()+'</strong></li><li><span>Histories still syncing</span><strong style="color:'+(Number(crm.pending_chats||0)?'var(--amber)':'var(--green)')+'">'+Number(crm.pending_chats||0)+'</strong></li><li><span>CRM sync failures</span><strong style="color:'+(Number(crm.failed_chats||0)?'var(--red)':'var(--green)')+'">'+Number(crm.failed_chats||0)+'</strong></li><li><span>Automated replies</span><strong>'+(bot.enabled?'Enabled':'Paused')+'</strong></li></ul></article>';
     c.innerHTML=pageHead('Creator intelligence','Welcome back, Sunny Charm','A truthful view of conversations, revenue, provider readiness, and controlled-launch state.','<button class="btn-ghost" data-action="refresh-view">Refresh data</button><button class="btn" data-action="open-messages">Open inbox</button>')+
       '<div class="dashboard-grid">'+pulse+hero+readiness+metrics+activity+next+'</div>';
   });
@@ -440,7 +442,7 @@ function loadDashboard(){
 function renderConversationList(fans){
   if(!fans.length)return'<div style="padding:12px">'+emptyState('◇','No conversations','New fan messages will appear here automatically.')+'</div>';
   return fans.map(function(f){
-    var fid=String(f.fan_id||''),name=f.display_name||fid.slice(0,12),preview=(f.funnel_stage||'new')+' · '+Number(f.message_count||0)+' messages';
+    var fid=String(f.fan_id||''),name=f.display_name||f.username||fid.slice(0,12),handle=f.username?'@'+String(f.username).replace(/^@/,''):'',preview=(f.history_complete?'':'Syncing history · ')+(handle?handle+' · ':'')+Number(f.message_count||0)+' messages';
     return'<button type="button" class="conversation-item'+(activeConversationId===fid?' active':'')+'" data-action="select-conversation" data-fan-id="'+attr(fid)+'"><span class="avatar">'+esc(initial(name))+'</span><span class="conversation-copy"><span class="conversation-name">'+esc(name)+'</span><span class="conversation-preview">'+esc(preview)+'</span></span><span class="conversation-time">'+esc(ft(f.last_activity))+'</span></button>';
   }).join('');
 }
@@ -461,17 +463,35 @@ function filterConversations(query){
 }
 function selectConversation(fanId){
   activeConversationId=fanId;
+  activeConversationMessages=[];
+  activeConversationDetail=null;
   var list=document.getElementById('conversation-list');if(list)list.innerHTML=renderConversationList(conversationData);
   var layout=document.getElementById('messages-layout'),pane=document.getElementById('conversation-pane');
   if(layout)layout.classList.add('chat-open');
   if(!pane)return;
   pane.innerHTML='<div class="conversation-empty"><p>Loading conversation…</p></div>';
-  F('/api/conversations/'+encodeURIComponent(fanId)).then(function(d){
+  loadConversationPage(fanId,0,false);
+}
+function messageMarkup(m){
+  var fan=m.sender==='fan',attachments=m.attachments||[],content=String(m.content||'').trim();
+  var media=attachments.length?'<div class="pill-row" style="margin-top:'+(content?'8':'0')+'px"><span class="pill">'+attachments.length+' media attachment'+(attachments.length===1?'':'s')+'</span></div>':'';
+  return'<div class="msg '+(fan?'fan':'creator')+'"><div class="msgwrap"><div class="bubble">'+(content?esc(content):'')+media+'</div><div class="who">'+(fan?'Fan':'You')+(m.created_at?' · '+ft(m.created_at):'')+'</div></div></div>';
+}
+function renderActiveConversation(){
+  var pane=document.getElementById('conversation-pane'),d=activeConversationDetail;if(!pane||!d)return;
+  var p=d.profile||{},name=p.display_name||p.username||String(d.fan_id||'').slice(0,12),handle=p.username?'@'+String(p.username).replace(/^@/,''):'';
+  var pills='<div class="pill-row"><span class="pill">'+esc(p.spend_tier||'unknown')+'</span><span class="pill">'+money(p.total_spent||0)+' spent</span><span class="pill">'+Number(p.purchase_count||0)+' purchases</span><span class="pill">'+esc(d.funnel_stage||'new')+'</span></div>';
+  var messages=activeConversationMessages.map(messageMarkup).join('');
+  var syncState=d.sync_error?'Sync error: '+d.sync_error:d.history_complete?'Full provider history synced':'Older provider history is still syncing';
+  var older=d.has_more_messages?'<div style="text-align:center;margin-bottom:14px"><button class="btn-ghost" data-action="load-older-messages" data-fan-id="'+attr(d.fan_id)+'">Load older messages</button></div>':'';
+  pane.innerHTML='<div class="chat-head"><div><h3>'+esc(name)+'</h3><p>'+(handle?esc(handle)+' · ':'')+Number(d.message_count_stored||0)+' stored messages · '+esc(syncState)+'</p></div><button class="btn-ghost" data-action="fan-detail" data-fan-id="'+attr(d.fan_id)+'">View profile</button></div><div class="chat-body">'+pills+'<div style="height:18px"></div>'+older+(messages||'<div class="conversation-empty"><h3>No stored messages</h3><p>The provider history sync has not imported this conversation yet.</p></div>')+'</div>';
+}
+function loadConversationPage(fanId,offset,prepend){
+  var pane=document.getElementById('conversation-pane');
+  F('/api/conversations/'+encodeURIComponent(fanId)+'?limit=100&offset='+Number(offset||0)).then(function(d){
     if(!d){pane.innerHTML='<div class="conversation-empty"><h3>Conversation unavailable</h3><p>The durable record could not be loaded.</p></div>';return}
-    var p=d.profile||{},name=p.display_name||String(d.fan_id||'').slice(0,12);
-    var pills='<div class="pill-row"><span class="pill">'+esc(p.spend_tier||'unknown')+'</span><span class="pill">'+money(p.total_spent||0)+' spent</span><span class="pill">'+Number(p.purchase_count||0)+' purchases</span><span class="pill">'+esc(d.funnel_stage||'new')+'</span></div>';
-    var messages=(d.messages||[]).map(function(m){var fan=m.sender==='fan';return'<div class="msg '+(fan?'fan':'creator')+'"><div class="msgwrap"><div class="bubble">'+esc(m.content)+'</div><div class="who">'+(fan?'Fan':'You')+(m.created_at?' · '+ft(m.created_at):'')+'</div></div></div>'}).join('');
-    pane.innerHTML='<div class="chat-head"><div><h3>'+esc(name)+'</h3><p>'+Number(d.message_count_stored||0)+' stored messages · '+Number((d.facts||[]).length)+' remembered facts</p></div><button class="btn-ghost" data-action="fan-detail" data-fan-id="'+attr(fanId)+'">View profile</button></div><div class="chat-body">'+pills+'<div style="height:18px"></div>'+(messages||'<div class="conversation-empty"><h3>No stored messages</h3><p>This conversation has durable context but no message history yet.</p></div>')+'</div>';
+    if(prepend&&activeConversationDetail){activeConversationMessages=(d.messages||[]).concat(activeConversationMessages);activeConversationDetail=Object.assign(activeConversationDetail,d);activeConversationDetail.messages=activeConversationMessages}else{activeConversationMessages=d.messages||[];activeConversationDetail=d}
+    renderActiveConversation();
   });
 }
 
@@ -696,6 +716,7 @@ document.addEventListener('click',function(event){
   else if(action==='close-drawer')closeDrawer();
   else if(action==='fan-detail')fanDetail(control.dataset.fanId||'');
   else if(action==='select-conversation')selectConversation(control.dataset.fanId||'');
+  else if(action==='load-older-messages')loadConversationPage(control.dataset.fanId||activeConversationId,activeConversationMessages.length,true);
   else if(action==='test-connection')testConn();
   else if(action==='load-persona')loadPersona();
   else if(action==='save-persona')savePersona();

@@ -97,7 +97,9 @@ def cleanup_env():
         "MAX_BACKOFF", "IDLE_BACKOFF_MAX", "FANSLY_PROVIDER",
         "DATABASE_URL", "PORT", "DEEPSEEK_API_KEY", "CREATOR_ID",
         "CONTROLLED_LAUNCH", "BOT_ENABLED_DEFAULT", "FAN_ALLOWLIST",
-        "MAX_MESSAGES_PER_POLL",
+        "MAX_MESSAGES_PER_POLL", "CRM_SYNC_ENABLED",
+        "CRM_SYNC_MESSAGE_PAGES_PER_CYCLE",
+        "CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE",
     )}
     yield
     for k, v in saved.items():
@@ -123,6 +125,9 @@ def standard_env():
     os.environ["BOT_ENABLED_DEFAULT"] = "false"
     os.environ["FAN_ALLOWLIST"] = "pilot-fan"
     os.environ["MAX_MESSAGES_PER_POLL"] = "5"
+    os.environ["CRM_SYNC_ENABLED"] = "true"
+    os.environ["CRM_SYNC_MESSAGE_PAGES_PER_CYCLE"] = "2"
+    os.environ["CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE"] = "1"
 
 
 @pytest.fixture
@@ -165,6 +170,10 @@ def mock_deps(standard_env):
     # FanslyBot itself — so reload doesn't re-import the real class
     bot_patcher = patch("src.bot.FanslyBot")
     mock_bot_cls = bot_patcher.start()
+    crm_patcher = patch("src.crm.sync.CrmSyncService")
+    mock_crm_cls = crm_patcher.start()
+    mock_crm = mock_crm_cls.return_value
+    mock_crm.sync_cycle.return_value.had_activity = False
 
     # client factory — replaces direct client construction in main.py
     factory_patcher = patch("src.client_factory.get_fansly_client")
@@ -187,13 +196,19 @@ def mock_deps(standard_env):
     )
     mock_bot_cls.return_value = bot
 
-    all_patchers = patchers + [bot_patcher, factory_patcher]
+    all_patchers = patchers + [
+        bot_patcher,
+        crm_patcher,
+        factory_patcher,
+    ]
 
     yield {
         "client": mock_client,
         "client_cls": mock_get_client,
         "bot": bot,
         "bot_cls": mock_bot_cls,
+        "crm_sync": mock_crm,
+        "crm_sync_cls": mock_crm_cls,
     }
 
     for p in all_patchers:
@@ -236,6 +251,16 @@ class TestStartupAuthValidation:
         assert kwargs["allowed_fan_ids"] == {"pilot-fan"}
         assert kwargs["require_fan_allowlist"] is True
         assert module.bot.enabled is False
+
+    def test_crm_sync_runs_even_while_automated_replies_are_disabled(
+        self,
+        module,
+        mock_deps,
+    ):
+        importlib.reload(module)
+
+        assert module.bot.enabled is False
+        mock_deps["crm_sync"].sync_cycle.assert_called()
 
     def test_empty_pilot_allowlist_blocks_enabled_default(
         self,

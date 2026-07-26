@@ -11,7 +11,9 @@ from src.notes.repository import FAN_NOTES_TABLE
 
 from .schema import (
     CONVERSATIONS,
+    CRM_CHAT_SYNC,
     FANS,
+    FAN_MESSAGES,
     FAN_RUNTIME_STATES,
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
@@ -51,11 +53,15 @@ class DashboardMetrics:
 class DurableConversationSummary:
     fan_id: str
     display_name: str | None
+    username: str | None
+    avatar_url: str | None
     phase: str
     escalation_level: int
     cooldown: bool
     message_count: int
     last_activity_at: datetime | None
+    history_complete: bool
+    sync_error: str | None
 
 
 class DashboardReadRepository:
@@ -101,6 +107,18 @@ class DashboardReadRepository:
         self,
         creator_id: str,
     ) -> list[DurableConversationSummary]:
+        message_totals = (
+            select(
+                FAN_MESSAGES.c.fan_id.label("fan_id"),
+                func.count(FAN_MESSAGES.c.id).label("stored_message_count"),
+                func.max(FAN_MESSAGES.c.created_at).label(
+                    "stored_last_activity_at"
+                ),
+            )
+            .where(FAN_MESSAGES.c.creator_id == creator_id)
+            .group_by(FAN_MESSAGES.c.fan_id)
+            .subquery("crm_message_totals")
+        )
         fan_runtime_join = FANS.outerjoin(
             FAN_RUNTIME_STATES,
             and_(
@@ -114,19 +132,37 @@ class DashboardReadRepository:
                 FANS.c.creator_id == CONVERSATIONS.c.creator_id,
                 FANS.c.fan_id == CONVERSATIONS.c.fan_id,
             ),
+        ).outerjoin(
+            CRM_CHAT_SYNC,
+            and_(
+                CONVERSATIONS.c.creator_id
+                == CRM_CHAT_SYNC.c.creator_id,
+                CONVERSATIONS.c.chat_id == CRM_CHAT_SYNC.c.chat_id,
+            ),
+        ).outerjoin(
+            message_totals,
+            FANS.c.fan_id == message_totals.c.fan_id,
         )
         statement = (
             select(
                 FANS.c.fan_id,
                 FANS.c.display_name,
+                FANS.c.username,
+                FANS.c.avatar_url,
                 FAN_RUNTIME_STATES.c.phase,
                 FAN_RUNTIME_STATES.c.escalation_level,
                 FAN_RUNTIME_STATES.c.cooldown,
-                FAN_RUNTIME_STATES.c.message_count,
                 func.coalesce(
+                    message_totals.c.stored_message_count,
+                    0,
+                ).label("message_count"),
+                func.coalesce(
+                    message_totals.c.stored_last_activity_at,
                     FAN_RUNTIME_STATES.c.last_activity_at,
                     CONVERSATIONS.c.last_activity_at,
                 ).label("last_activity_at"),
+                CRM_CHAT_SYNC.c.history_complete,
+                CRM_CHAT_SYNC.c.last_error,
             )
             .select_from(fan_runtime_join)
             .where(FANS.c.creator_id == creator_id)
@@ -137,6 +173,8 @@ class DashboardReadRepository:
             DurableConversationSummary(
                 fan_id=row["fan_id"],
                 display_name=row["display_name"],
+                username=row["username"],
+                avatar_url=row["avatar_url"],
                 phase=row["phase"] or "rapport",
                 escalation_level=int(
                     row["escalation_level"] or 0
@@ -144,6 +182,8 @@ class DashboardReadRepository:
                 cooldown=bool(row["cooldown"]),
                 message_count=int(row["message_count"] or 0),
                 last_activity_at=row["last_activity_at"],
+                history_complete=bool(row["history_complete"]),
+                sync_error=row["last_error"],
             )
             for row in rows
         ]

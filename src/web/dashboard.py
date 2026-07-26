@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 from sqlalchemy import text
 
 from ..persistence.dashboard import DashboardReadRepository
+from ..persistence.crm import CrmSyncRepository
 from ..persistence.pipeline import MessageProcessingRepository
 from ..media.repository import MediaAsset, MediaAssetRepository
 from ..persona.models import PersonaDocument
@@ -919,7 +920,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if p in ("/","/dashboard"): return self.h(DASHBOARD_HTML)
         if p=="/api/conversations": return self._conv()
-        if p.startswith("/api/conversations/"): return self._conv_detail(p.rsplit("/",1)[-1])
+        if p.startswith("/api/conversations/"): return self._conv_detail(p.rsplit("/",1)[-1], q)
         if p=="/api/fans": return self._fans()
         if p=="/api/vault": return self._vault()
         if p=="/api/media-assets": return self._media_assets(q)
@@ -1138,7 +1139,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if self.bot is not None
                 else None
             )
-            fans.append({"fan_id":fid,"display_name":n.display_name if n and n.display_name else durable.display_name,"spend_tier":_spend_tier(total_spent),"funnel_stage":sess.funnel.current_stage.value if sess else durable.phase,"spiral_level":sess.funnel.level.number if sess else durable.escalation_level,"cooldown":sess.funnel.cooldown if sess else durable.cooldown,"message_count":sess.message_count if sess else durable.message_count,"last_activity":(sess.last_activity if sess else durable.last_activity_at).isoformat() if (sess.last_activity if sess else durable.last_activity_at) else None,"fact_count":len(n.facts) if n else 0})
+            fans.append({"fan_id":fid,"display_name":n.display_name if n and n.display_name else durable.display_name,"username":durable.username,"avatar_url":durable.avatar_url,"spend_tier":_spend_tier(total_spent),"funnel_stage":sess.funnel.current_stage.value if sess else durable.phase,"spiral_level":sess.funnel.level.number if sess else durable.escalation_level,"cooldown":sess.funnel.cooldown if sess else durable.cooldown,"message_count":durable.message_count,"last_activity":durable.last_activity_at.isoformat() if durable.last_activity_at else None,"fact_count":len(n.facts) if n else 0,"history_complete":durable.history_complete,"sync_error":durable.sync_error})
         if self.bot is not None:
             for fid,sess in self.bot.sessions.items():
                 if fid in seen:
@@ -1157,7 +1158,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "source":"durable_state_with_live_overlay",
         })
 
-    def _conv_detail(self, fan_id):
+    def _conv_detail(self, fan_id, query=None):
         """Full memory view for one fan: profile, remembered facts, message history."""
         if self.engine is None:
             return self.j({"error":"durable state unavailable"},503)
@@ -1176,11 +1177,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if self.bot is not None and self.bot.message_store
             else MessageStore(engine=self.engine)
         )
-        history=message_store.get_history(
+        query=query or {}
+        try:
+            message_limit=min(max(int((query.get("limit") or ["100"])[0]),1),250)
+            message_offset=max(int((query.get("offset") or ["0"])[0]),0)
+        except (TypeError,ValueError):
+            return self.j({"error":"invalid message pagination"},400)
+        history_page=message_store.get_history_page(
             fan_id,
             self.creator_id,
-            limit=100,
+            limit=message_limit,
+            offset=message_offset,
         )
+        history=history_page.messages
+        durable_summary=None
+        if self.dashboard_repo is not None:
+            durable_summary=next(
+                (
+                    row
+                    for row in self.dashboard_repo.conversations(
+                        self.creator_id
+                    )
+                    if row.fan_id==fan_id
+                ),
+                None,
+            )
         sess=(
             self.bot.sessions.get(fan_id)
             if self.bot is not None
@@ -1224,9 +1245,34 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "bought_at": str(p.bought_at) if p.bought_at else None,
             })
 
+        profile=_note(note, purchase) or {
+            "fan_id": fan_id,
+            "display_name": None,
+            "preferences": [],
+            "total_spent": (
+                purchase.total_spent_millis / 1000
+                if purchase is not None
+                else 0.0
+            ),
+            "purchase_count": (
+                purchase.purchase_count
+                if purchase is not None
+                else 0
+            ),
+            "spend_tier": _spend_tier(
+                purchase.total_spent_millis / 1000
+                if purchase is not None
+                else 0.0
+            ),
+        }
+        if durable_summary is not None:
+            if not profile.get("display_name"):
+                profile["display_name"]=durable_summary.display_name
+            profile["username"]=durable_summary.username
+            profile["avatar_url"]=durable_summary.avatar_url
         return self.j({
             "fan_id": fan_id,
-            "profile": _note(note, purchase),
+            "profile": profile,
             "facts": note.facts if note else [],
             "preferences": note.preferences if note else [],
             "hard_limits": note.hard_limits if note else [],
@@ -1273,7 +1319,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "uses_abbreviations": style.uses_abbreviations if style else False,
                 "slang": style.slang if style else [],
             },
-            "message_count_stored": len(history),
+            "message_count_stored": history_page.total,
+            "message_offset": history_page.offset,
+            "message_limit": history_page.limit,
+            "has_more_messages": history_page.has_more,
+            "history_complete": (
+                durable_summary.history_complete
+                if durable_summary is not None
+                else False
+            ),
+            "sync_error": (
+                durable_summary.sync_error
+                if durable_summary is not None
+                else None
+            ),
             "messages": history,
         })
 
@@ -1753,6 +1812,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _operations(self):
         pipeline_counts = {}
+        crm_sync = {}
         if self.engine is not None:
             try:
                 pipeline_counts = MessageProcessingRepository(
@@ -1760,6 +1820,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ).counts(self.creator_id)
             except Exception:
                 logger.exception("Failed to load pipeline counts")
+            try:
+                crm_sync = CrmSyncRepository(
+                    self.engine
+                ).summary(self.creator_id)
+            except Exception:
+                logger.exception("Failed to load CRM sync status")
         runtime = (
             self.server.runtime_monitor.snapshot()
             if self.server.runtime_monitor is not None
@@ -1792,6 +1858,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ) if self.bot else 0,
             },
             "pipeline":pipeline_counts,
+            "crm_sync":crm_sync,
         })
 
     def _pers_get(self,q):

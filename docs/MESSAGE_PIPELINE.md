@@ -35,6 +35,33 @@ The first scan of a conversation with no local checkpoint processes only the
 newest `unreadCount` fan messages. A first-seen chat with no unread messages
 establishes a baseline and does not reply to historical content.
 
+## CRM history synchronization
+
+The CRM history mirror is intentionally separate from the automated
+inbox/outbox above. Pausing automated replies does not pause CRM visibility.
+
+1. Every cycle checks the newest provider chat page. During initial discovery,
+   it also advances a durable cursor through older chat pages.
+2. Every discovered chat creates or updates its fan identity, username, avatar,
+   provider head message ID, and independent CRM synchronization state.
+3. Recent changed chats are synchronized before deep history. Both fan and
+   creator messages are stored with provider IDs, provider timestamps, chat
+   IDs, and attachment metadata.
+4. Older message cursors are persisted after every page. A restart resumes the
+   exact backfill instead of starting over.
+5. Provider message IDs make repeated pages idempotent. CRM synchronization
+   never inserts into `inbound_messages`, so imported history cannot trigger
+   automated replies when the bot is later enabled.
+6. The dashboard reads actual `fan_messages` counts and exposes history in
+   100-message pages. “Load older messages” can traverse the entire stored
+   conversation while the list shows whether provider history is still
+   syncing.
+
+`CRM_SYNC_MESSAGE_PAGES_PER_CYCLE` and
+`CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE` bound provider usage. OnlyFansAPI charges
+per request, so the initial full-history import is deliberately resumable
+instead of one unbounded burst.
+
 ## Failure behavior
 
 - A failure before the provider call returns the inbound row to `pending`, up

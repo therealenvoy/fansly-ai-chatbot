@@ -307,7 +307,7 @@ class ApifanslyClient(FanslyApiClient):
         messages = [
             MessageInfo(
                 message_id=str(row["id"]),
-                content=str(row.get("content", "")),
+                content=str(row.get("content") or ""),
                 sender_id=str(row.get("senderId", "")),
                 created_at=float(row.get("createdAt", 0) or 0),
                 is_from_fan=(
@@ -316,7 +316,7 @@ class ApifanslyClient(FanslyApiClient):
                 ),
                 has_attachments=bool(row.get("attachments")),
                 total_tip=float(row.get("totalTipAmount", 0) or 0),
-                attachments=list(row.get("attachments", [])),
+                attachments=list(row.get("attachments") or []),
             )
             for row in rows
         ]

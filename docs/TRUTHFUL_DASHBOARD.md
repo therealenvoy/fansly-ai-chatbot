@@ -13,6 +13,9 @@ into a synthetic success, zero, or estimate.
 | Sent messages by kind | `outbox_messages` with `status = sent` |
 | Blocked PPV intents | `outbox_messages` with `status = blocked_unsupported` |
 | Delivery-unknown messages | `outbox_messages` with `status = delivery_unknown` |
+| CRM conversation count | Discovered `crm_chat_sync` rows |
+| CRM stored message count | Provider-mirrored `fan_messages` rows |
+| CRM history status | Durable `crm_chat_sync.history_complete` and `last_error` |
 | Attributed purchases and revenue | Exact, idempotent `purchase_events` |
 | Aggregate provider balance | Latest durable `provider_wallet_transactions` row |
 | Conversation state | Durable fan, runtime-state, conversation, and message rows |
@@ -21,6 +24,12 @@ Legacy purchase totals stored in fan-note JSON are not used for revenue,
 purchase counts, average order value, or fan spend. Provider wallet
 transactions are aggregate account records and are never assigned to a fan
 without an exact attributed purchase event.
+
+The Messages inbox is a provider-history mirror, not an
+automation-processed-message list. It displays both fan and creator messages
+while automated replies are paused. Conversation counts come from stored
+provider messages, and paginated detail responses expose all imported history
+plus a clear syncing, complete, or error state.
 
 ## Explicitly unavailable metrics
 

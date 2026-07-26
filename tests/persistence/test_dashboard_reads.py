@@ -8,6 +8,7 @@ from src.persistence.schema import (
     CONVERSATIONS,
     CREATORS,
     FANS,
+    FAN_MESSAGES,
     FAN_RUNTIME_STATES,
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
@@ -84,6 +85,19 @@ def _repository():
                 updated_at=started,
             )
         )
+        for index in range(8):
+            conn.execute(
+                FAN_MESSAGES.insert().values(
+                    fan_id="fan-a",
+                    creator_id="creator-a",
+                    chat_id="chat-a",
+                    sender="fan" if index % 2 == 0 else "creator",
+                    content=f"stored-{index}",
+                    message_id=f"stored-{index}",
+                    attachments=[],
+                    created_at=started + timedelta(seconds=index),
+                )
+            )
         inbound_ids = []
         for index in range(3):
             result = conn.execute(

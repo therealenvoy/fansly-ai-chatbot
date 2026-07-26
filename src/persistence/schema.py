@@ -62,9 +62,11 @@ FAN_MESSAGES = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("fan_id", String, index=True),
     Column("creator_id", String, index=True),
+    Column("chat_id", String, nullable=True),
     Column("sender", String),
     Column("content", Text),
     Column("message_id", String, nullable=True),
+    Column("attachments", JSON, nullable=True),
     Column("created_at", DateTime, default=utcnow),
 )
 
@@ -127,6 +129,8 @@ FANS = Table(
     Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
     Column("fan_id", String(128), primary_key=True),
     Column("display_name", String(255), nullable=True),
+    Column("username", String(255), nullable=True),
+    Column("avatar_url", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
@@ -147,6 +151,28 @@ CONVERSATIONS = Table(
         "fan_id",
         name="uq_conversations_creator_fan",
     ),
+)
+
+CRM_CHAT_SYNC = Table(
+    "crm_chat_sync",
+    metadata,
+    Column(
+        "creator_id",
+        String(64),
+        ForeignKey("creators.id"),
+        primary_key=True,
+    ),
+    Column("chat_id", String(128), primary_key=True),
+    Column("fan_id", String(128), nullable=False),
+    Column("provider_head_message_id", String(128), nullable=True),
+    Column("stored_head_message_id", String(128), nullable=True),
+    Column("incremental_cursor", String(512), nullable=True),
+    Column("backfill_cursor", String(512), nullable=True),
+    Column("history_complete", Boolean, nullable=False, default=False),
+    Column("last_synced_at", DateTime(timezone=True), nullable=True),
+    Column("last_error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
 
 FAN_RUNTIME_STATES = Table(
@@ -403,4 +429,22 @@ Index(
     MEDIA_ASSETS.c.creator_id,
     MEDIA_ASSETS.c.media_type,
     MEDIA_ASSETS.c.created_at,
+)
+Index(
+    "ix_fan_messages_creator_message",
+    FAN_MESSAGES.c.creator_id,
+    FAN_MESSAGES.c.message_id,
+)
+Index(
+    "ix_fan_messages_creator_fan_time",
+    FAN_MESSAGES.c.creator_id,
+    FAN_MESSAGES.c.fan_id,
+    FAN_MESSAGES.c.created_at,
+    FAN_MESSAGES.c.id,
+)
+Index(
+    "ix_crm_chat_sync_pending",
+    CRM_CHAT_SYNC.c.creator_id,
+    CRM_CHAT_SYNC.c.history_complete,
+    CRM_CHAT_SYNC.c.updated_at,
 )

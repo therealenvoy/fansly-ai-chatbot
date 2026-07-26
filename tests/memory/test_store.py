@@ -1,5 +1,7 @@
 """Tests for MessageStore — persistent fan message history."""
 
+from datetime import datetime, timezone
+
 import pytest
 from src.memory.store import MessageStore
 
@@ -70,3 +72,83 @@ def test_count_messages(store):
 def test_empty_history_returns_empty_list(store):
     assert store.get_history("nobody", "creator1") == []
     assert store.get_recent_context("nobody", "creator1") == ""
+
+
+def test_provider_message_is_idempotent_and_preserves_provider_metadata(store):
+    created_at = datetime(2026, 7, 1, 12, 30, tzinfo=timezone.utc)
+
+    assert store.save_message(
+        "fan1",
+        "creator1",
+        "fan",
+        "",
+        message_id="provider-message-1",
+        chat_id="chat-1",
+        attachments=[{"type": "video", "id": "media-1"}],
+        created_at=created_at,
+    ) is True
+    assert store.save_message(
+        "fan1",
+        "creator1",
+        "fan",
+        "",
+        message_id="provider-message-1",
+        chat_id="chat-1",
+        attachments=[{"type": "video", "id": "media-1"}],
+        created_at=created_at,
+    ) is False
+
+    history = store.get_history("fan1", "creator1")
+    assert len(history) == 1
+    assert history[0]["message_id"] == "provider-message-1"
+    assert history[0]["chat_id"] == "chat-1"
+    assert history[0]["attachments"] == [{"type": "video", "id": "media-1"}]
+    assert history[0]["created_at"].startswith("2026-07-01T12:30:00")
+
+
+def test_history_pages_cover_all_messages_in_chronological_order(store):
+    for index in range(7):
+        store.save_message(
+            "fan1",
+            "creator1",
+            "fan",
+            f"message {index}",
+            message_id=f"message-{index}",
+            created_at=datetime(
+                2026,
+                7,
+                1,
+                12,
+                index,
+                tzinfo=timezone.utc,
+            ),
+        )
+
+    newest = store.get_history_page("fan1", "creator1", limit=3)
+    older = store.get_history_page(
+        "fan1",
+        "creator1",
+        limit=3,
+        offset=3,
+    )
+    oldest = store.get_history_page(
+        "fan1",
+        "creator1",
+        limit=3,
+        offset=6,
+    )
+
+    assert [row["content"] for row in newest.messages] == [
+        "message 4",
+        "message 5",
+        "message 6",
+    ]
+    assert [row["content"] for row in older.messages] == [
+        "message 1",
+        "message 2",
+        "message 3",
+    ]
+    assert [row["content"] for row in oldest.messages] == ["message 0"]
+    assert newest.total == 7
+    assert newest.has_more is True
+    assert oldest.has_more is False

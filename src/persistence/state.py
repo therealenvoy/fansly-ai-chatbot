@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Engine, and_, select, update
+from sqlalchemy import Engine, and_, case, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -79,6 +79,8 @@ class ConversationStateRepository:
         chat_id: str,
         *,
         display_name: str | None = None,
+        username: str | None = None,
+        avatar_url: str | None = None,
     ) -> None:
         self.ensure_creator(creator_id)
         now = utcnow()
@@ -86,15 +88,21 @@ class ConversationStateRepository:
             creator_id=creator_id,
             fan_id=fan_id,
             display_name=display_name,
+            username=username,
+            avatar_url=avatar_url,
             created_at=now,
             updated_at=now,
         )
+        fan_updates = {"updated_at": now}
+        if display_name:
+            fan_updates["display_name"] = display_name
+        if username:
+            fan_updates["username"] = username
+        if avatar_url:
+            fan_updates["avatar_url"] = avatar_url
         fan_stmt = fan_stmt.on_conflict_do_update(
             index_elements=["creator_id", "fan_id"],
-            set_={
-                "display_name": display_name,
-                "updated_at": now,
-            },
+            set_=fan_updates,
         )
         conversation_stmt = self._insert(CONVERSATIONS).values(
             creator_id=creator_id,
@@ -172,6 +180,38 @@ class ConversationStateRepository:
                     )
                 )
                 .values(**values)
+            )
+        if result.rowcount != 1:
+            raise RuntimeError(
+                f"Conversation does not exist: {creator_id}/{chat_id}"
+            )
+
+    def record_crm_activity(
+        self,
+        creator_id: str,
+        chat_id: str,
+        *,
+        last_activity_at: datetime,
+    ) -> None:
+        """Advance CRM activity time without touching reply checkpoints."""
+        current = CONVERSATIONS.c.last_activity_at
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(CONVERSATIONS)
+                .where(
+                    and_(
+                        CONVERSATIONS.c.creator_id == creator_id,
+                        CONVERSATIONS.c.chat_id == chat_id,
+                    )
+                )
+                .values(
+                    last_activity_at=case(
+                        (current.is_(None), last_activity_at),
+                        (current < last_activity_at, last_activity_at),
+                        else_=current,
+                    ),
+                    updated_at=utcnow(),
+                )
             )
         if result.rowcount != 1:
             raise RuntimeError(

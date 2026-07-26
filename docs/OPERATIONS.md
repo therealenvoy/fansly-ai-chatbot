@@ -7,7 +7,9 @@
   Railway deploy health checks and the container health check use this route.
 - `/api/operations` requires dashboard Basic Auth. It reports database
   readiness, provider state, bot/launch state, durable inbox/outbox counts, and
-  polling timestamps/failures. It never returns credentials.
+  polling timestamps/failures. Its `crm_sync` section reports discovered,
+  complete, pending, and failed histories plus stored message count. It never
+  returns credentials or message contents.
 - Railway deployment health checks run during deployment, not continuously.
   `.github/workflows/production-monitor.yml` checks `/ready` every 15 minutes
   and fails only after two consecutive failed probes. Scheduled workflows run
@@ -66,11 +68,16 @@ BOT_ENABLED_DEFAULT=false
 FAN_ALLOWLIST=<one or more exact Fansly account IDs>
 MAX_MESSAGES_PER_POLL=5
 POLL_INTERVAL=300
+CRM_SYNC_ENABLED=true
+CRM_SYNC_MESSAGE_PAGES_PER_CYCLE=25
+CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE=2
 ```
 
-`POLL_INTERVAL=300` is the minimum controlled-launch interval. The enabled
-loop always lists chats and may make additional message, vault, and send calls.
-Keep this conservative interval until real APIFansly credit usage is measured.
+`POLL_INTERVAL=300` is the minimum controlled-launch interval. CRM history
+synchronization keeps listing chats while automated replies are disabled.
+During the finite initial backfill it also reads bounded message pages. The
+dashboard exposes remaining and failed histories; watch those values and
+provider credits until `pending_chats` reaches zero.
 
 The APIFansly account must be connected in its console before launch. Startup
 must resolve the native Fansly creator ID from the configured

@@ -37,6 +37,8 @@ from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
 from .operations import RuntimeMonitor
 from .credit_budget import BASIC_MONTHLY_CREDITS, estimate_minimum_monthly_requests
+from .crm.sync import CrmSyncService
+from .persistence.crm import CrmSyncRepository
 
 load_dotenv()
 
@@ -72,6 +74,21 @@ BOT_ENABLED_DEFAULT = _env_bool("BOT_ENABLED_DEFAULT", False)
 MAX_MESSAGES_PER_POLL = max(
     1,
     int(os.getenv("MAX_MESSAGES_PER_POLL", "5")),
+)
+CRM_SYNC_ENABLED = _env_bool("CRM_SYNC_ENABLED", True)
+CRM_SYNC_MESSAGE_PAGES_PER_CYCLE = min(
+    max(
+        int(os.getenv("CRM_SYNC_MESSAGE_PAGES_PER_CYCLE", "25")),
+        1,
+    ),
+    100,
+)
+CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE = min(
+    max(
+        int(os.getenv("CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE", "2")),
+        1,
+    ),
+    10,
 )
 FAN_ALLOWLIST = {
     fan_id.strip()
@@ -154,7 +171,33 @@ else:
     api_error = f"API key for provider '{FANSLY_PROVIDER}' is not configured"
 
 bot = None
+crm_sync = None
 if api_ok:
+    if CRM_SYNC_ENABLED:
+        try:
+            crm_sync = CrmSyncService(
+                client=client,
+                creator_id=CREATOR_ID,
+                state_repo=state_repo,
+                sync_repo=CrmSyncRepository(database_engine),
+                message_store=message_store,
+                message_page_budget=CRM_SYNC_MESSAGE_PAGES_PER_CYCLE,
+                discovery_page_budget=(
+                    CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE
+                ),
+            )
+            logger.info(
+                "CRM provider-history sync enabled: %s message pages and "
+                "%s discovery pages per cycle",
+                CRM_SYNC_MESSAGE_PAGES_PER_CYCLE,
+                CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE,
+            )
+        except Exception as e:
+            logger.warning(
+                "CRM sync initialization failed: %s",
+                e,
+                exc_info=True,
+            )
     try:
         bot = FanslyBot(
             client=client,
@@ -283,20 +326,27 @@ consecutive_failures = 0
 consecutive_idle_cycles = 0
 
 while running:
-    if bot is None:
+    if bot is None and crm_sync is None:
         sleep_with_interrupt(IDLE_BACKOFF_MAX)
         continue
 
     had_activity = False
     runtime_monitor.poll_started()
     try:
-        had_activity = bot.poll_and_process(
-            max_chats=MAX_MESSAGES_PER_POLL
-        )
+        if crm_sync is not None:
+            crm_result = crm_sync.sync_cycle()
+            had_activity = bool(crm_result.had_activity)
+        if bot is not None:
+            had_activity = bool(
+                bot.poll_and_process(
+                    max_chats=MAX_MESSAGES_PER_POLL
+                )
+            ) or had_activity
         consecutive_failures = 0  # reset on success
         runtime_monitor.poll_succeeded(had_activity=bool(had_activity))
     except (AuthError, PaymentRequiredError) as e:
-        bot.enabled = False
+        if bot is not None:
+            bot.enabled = False
         settings_store.set("bot_enabled", "false")
         consecutive_failures = 0
         runtime_monitor.provider_blocked(e)

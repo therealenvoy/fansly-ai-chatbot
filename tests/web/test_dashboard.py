@@ -7,6 +7,7 @@ import json
 import base64
 import re
 import threading
+from datetime import datetime, timedelta, timezone
 from http.client import HTTPConnection
 from unittest.mock import MagicMock
 
@@ -15,9 +16,12 @@ import pytest
 from src.fansly_client import ProviderCapabilities
 from src.bot import LaunchGuardError
 from src.notes.repository import FAN_NOTES_TABLE
+from src.memory.store import MessageStore
+from src.persistence.crm import CrmSyncRepository
 from src.settings.store import SettingsStore
 from src.persistence.database import create_database_engine
 from src.persistence.schema import metadata
+from src.persistence.state import ConversationStateRepository
 from src.sequences.models import (
     Sequence,
     SequenceStep,
@@ -87,6 +91,8 @@ class TestDashboardShell:
             assert endpoint in DASHBOARD_HTML
         assert 'id="conversation-search"' in DASHBOARD_HTML
         assert "function selectConversation(fanId)" in DASHBOARD_HTML
+        assert "load-older-messages" in DASHBOARD_HTML
+        assert "history_complete" in DASHBOARD_HTML
 
     def test_content_editors_and_media_picker_are_present(self):
         assert "Script Studio" in DASHBOARD_HTML
@@ -183,6 +189,10 @@ def _make_bot(db_url):
     metadata.create_all(engine)
     FAN_NOTES_TABLE.create(engine, checkfirst=True)
     bot.note_repo.engine = engine
+    bot.message_store = MessageStore(engine=engine)
+    bot.state_repo = ConversationStateRepository(engine)
+    bot.state_repo.ensure_creator(bot.creator_id)
+    bot.sessions = {}
     bot.sequence_repo = SequenceRepository(engine=engine)
     bot.sequence_repo.create_tables()
     bot.record_provider_ppv_purchase.return_value = (
@@ -370,6 +380,13 @@ class TestBotStatusEndpoints:
         assert body["database_ready"] is True
         assert body["bot"]["available"] is True
         assert isinstance(body["pipeline"], dict)
+        assert body["crm_sync"] == {
+            "discovered_chats": 0,
+            "complete_chats": 0,
+            "pending_chats": 0,
+            "failed_chats": 0,
+            "stored_messages": 0,
+        }
 
     def test_bot_status_reflects_enabled_state(self, running_server):
         host, bot, _ = running_server
@@ -445,6 +462,75 @@ class TestBotStatusEndpoints:
         assert status == 200
         assert persisted["connected"] is False
         assert persisted["status"] == "offline"
+
+
+class TestCrmConversationHistory:
+    def test_all_provider_messages_are_available_through_pagination(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        bot.state_repo.ensure_conversation(
+            bot.creator_id,
+            "fan-1",
+            "chat-1",
+            display_name="Fan One",
+            username="fan_one",
+        )
+        sync_repo = CrmSyncRepository(bot.state_repo.engine)
+        sync_repo.discover_chat(
+            creator_id=bot.creator_id,
+            chat_id="chat-1",
+            fan_id="fan-1",
+            provider_head_message_id="message-204",
+        )
+        sync_repo.complete_initial_page(
+            creator_id=bot.creator_id,
+            chat_id="chat-1",
+            provider_head_message_id="message-204",
+            backfill_cursor=None,
+        )
+        started = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        for index in range(205):
+            bot.message_store.save_message(
+                "fan-1",
+                bot.creator_id,
+                "fan" if index % 2 == 0 else "creator",
+                f"message {index}",
+                message_id=f"message-{index}",
+                chat_id="chat-1",
+                attachments=[],
+                created_at=started + timedelta(minutes=index),
+            )
+
+        status, listing = _get(host, "/api/conversations")
+        assert status == 200
+        assert listing["fans"][0]["username"] == "fan_one"
+        assert listing["fans"][0]["message_count"] == 205
+        assert listing["fans"][0]["history_complete"] is True
+
+        status, newest = _get(
+            host,
+            "/api/conversations/fan-1?limit=100&offset=0",
+        )
+        assert status == 200
+        assert newest["message_count_stored"] == 205
+        assert newest["has_more_messages"] is True
+        assert newest["profile"]["username"] == "fan_one"
+        assert len(newest["messages"]) == 100
+        assert newest["messages"][0]["content"] == "message 105"
+        assert newest["messages"][-1]["content"] == "message 204"
+
+        status, oldest = _get(
+            host,
+            "/api/conversations/fan-1?limit=100&offset=200",
+        )
+        assert status == 200
+        assert oldest["has_more_messages"] is False
+        assert [row["content"] for row in oldest["messages"]] == [
+            f"message {index}"
+            for index in range(5)
+        ]
 
 
 class TestDashboardSecurity:
