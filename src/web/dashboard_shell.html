@@ -359,6 +359,12 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 const CSRF_TOKEN=__CSRF_TOKEN__;
 var currentTab='dashboard';
 var conversationData=[];
+var conversationTotal=0;
+var conversationOffset=0;
+var conversationPageSize=200;
+var conversationSearch='';
+var conversationSearchTimer=null;
+var conversationDiscoveryComplete=true;
 var activeConversationId='';
 var activeConversationMessages=[];
 var activeConversationDetail=null;
@@ -441,25 +447,45 @@ function loadDashboard(){
 
 function renderConversationList(fans){
   if(!fans.length)return'<div style="padding:12px">'+emptyState('◇','No conversations','New fan messages will appear here automatically.')+'</div>';
-  return fans.map(function(f){
+  var rows=fans.map(function(f){
     var fid=String(f.fan_id||''),name=f.display_name||f.username||fid.slice(0,12),handle=f.username?'@'+String(f.username).replace(/^@/,''):'',preview=(f.history_complete?'':'Syncing history · ')+(handle?handle+' · ':'')+Number(f.message_count||0)+' messages';
     return'<button type="button" class="conversation-item'+(activeConversationId===fid?' active':'')+'" data-action="select-conversation" data-fan-id="'+attr(fid)+'"><span class="avatar">'+esc(initial(name))+'</span><span class="conversation-copy"><span class="conversation-name">'+esc(name)+'</span><span class="conversation-preview">'+esc(preview)+'</span></span><span class="conversation-time">'+esc(ft(f.last_activity))+'</span></button>';
   }).join('');
+  if(fans.length<conversationTotal)rows+='<div style="padding:12px;text-align:center"><button class="btn-ghost" data-action="load-more-conversations">Load more conversations</button></div>';
+  return rows;
 }
 function loadFunnel(){
   var c=document.getElementById('content');
+  activeConversationId='';
+  activeConversationMessages=[];
+  activeConversationDetail=null;
+  conversationSearch='';
   c.innerHTML=pageHead('Messages','Inbox','Review live conversations and buying stages without losing durable fan context.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>')+
     '<div class="messages-layout" id="messages-layout"><section class="conversation-rail"><div class="conversation-toolbar"><div class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><input id="conversation-search" type="search" placeholder="Search conversations…" aria-label="Search conversations"></div><div class="conversation-filters"><span class="filter-pill active">All</span><span class="filter-pill">Recent</span><span class="filter-pill">Controlled launch</span></div></div><div class="conversation-list" id="conversation-list"><p style="padding:15px;color:var(--faint);font-size:10px">Loading…</p></div></section><section class="conversation-pane" id="conversation-pane"><div class="conversation-empty"><div class="bubble-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 3z"/></svg></div><h3>Select a conversation</h3><p>Choose a fan from the list to inspect messages, memory, purchase context, and funnel progress.</p></div></section></div>';
-  F('/api/conversations').then(function(d){
-    conversationData=d&&d.fans||[];
-    var list=document.getElementById('conversation-list');
-    if(list)list.innerHTML=renderConversationList(conversationData);
+  loadConversationList(true);
+}
+function loadConversationList(reset){
+  if(reset)conversationOffset=0;
+  var list=document.getElementById('conversation-list');if(!list)return;
+  var url='/api/conversations?limit='+conversationPageSize+'&offset='+conversationOffset+'&search='+encodeURIComponent(conversationSearch);
+  F(url).then(function(d){
+    if(!d){if(reset)list.innerHTML=emptyState('!','Inbox unavailable','The durable conversation index could not be loaded.');return}
+    var incoming=d.fans||[];
+    if(reset)conversationData=incoming;
+    else{
+      var known={};conversationData.forEach(function(f){known[String(f.fan_id)]=true});
+      incoming.forEach(function(f){if(!known[String(f.fan_id)])conversationData.push(f)});
+    }
+    conversationTotal=Number(d.total||conversationData.length);
+    conversationOffset=conversationData.length;
+    conversationDiscoveryComplete=d.discovery_complete!==false;
+    list.innerHTML=renderConversationList(conversationData);
   });
 }
 function filterConversations(query){
-  var q=String(query||'').toLowerCase();
-  var list=document.getElementById('conversation-list');if(!list)return;
-  list.innerHTML=renderConversationList(conversationData.filter(function(f){return String(f.display_name||f.fan_id||'').toLowerCase().indexOf(q)>=0}));
+  conversationSearch=String(query||'').trim();
+  if(conversationSearchTimer)clearTimeout(conversationSearchTimer);
+  conversationSearchTimer=setTimeout(function(){loadConversationList(true)},250);
 }
 function selectConversation(fanId){
   activeConversationId=fanId;
@@ -469,7 +495,7 @@ function selectConversation(fanId){
   var layout=document.getElementById('messages-layout'),pane=document.getElementById('conversation-pane');
   if(layout)layout.classList.add('chat-open');
   if(!pane)return;
-  pane.innerHTML='<div class="conversation-empty"><p>Loading conversation…</p></div>';
+  pane.innerHTML='<div class="conversation-empty"><p>Loading latest messages from Fansly…</p></div>';
   loadConversationPage(fanId,0,false);
 }
 function messageMarkup(m){
@@ -482,7 +508,7 @@ function renderActiveConversation(){
   var p=d.profile||{},name=p.display_name||p.username||String(d.fan_id||'').slice(0,12),handle=p.username?'@'+String(p.username).replace(/^@/,''):'';
   var pills='<div class="pill-row"><span class="pill">'+esc(p.spend_tier||'unknown')+'</span><span class="pill">'+money(p.total_spent||0)+' spent</span><span class="pill">'+Number(p.purchase_count||0)+' purchases</span><span class="pill">'+esc(d.funnel_stage||'new')+'</span></div>';
   var messages=activeConversationMessages.map(messageMarkup).join('');
-  var syncState=d.sync_error?'Sync error: '+d.sync_error:d.history_complete?'Full provider history synced':'Older provider history is still syncing';
+  var syncState=d.live_refresh_error?'Live refresh unavailable; showing stored messages':d.live_hydrated?'Live messages loaded from Fansly':d.sync_error?'Sync error: '+d.sync_error:d.history_complete?'Full provider history synced':'Older provider history is still syncing';
   var older=d.has_more_messages?'<div style="text-align:center;margin-bottom:14px"><button class="btn-ghost" data-action="load-older-messages" data-fan-id="'+attr(d.fan_id)+'">Load older messages</button></div>':'';
   pane.innerHTML='<div class="chat-head"><div><h3>'+esc(name)+'</h3><p>'+(handle?esc(handle)+' · ':'')+Number(d.message_count_stored||0)+' stored messages · '+esc(syncState)+'</p></div><button class="btn-ghost" data-action="fan-detail" data-fan-id="'+attr(d.fan_id)+'">View profile</button></div><div class="chat-body">'+pills+'<div style="height:18px"></div>'+older+(messages||'<div class="conversation-empty"><h3>No stored messages</h3><p>The provider history sync has not imported this conversation yet.</p></div>')+'</div>';
 }
@@ -716,6 +742,7 @@ document.addEventListener('click',function(event){
   else if(action==='close-drawer')closeDrawer();
   else if(action==='fan-detail')fanDetail(control.dataset.fanId||'');
   else if(action==='select-conversation')selectConversation(control.dataset.fanId||'');
+  else if(action==='load-more-conversations')loadConversationList(false);
   else if(action==='load-older-messages')loadConversationPage(control.dataset.fanId||activeConversationId,activeConversationMessages.length,true);
   else if(action==='test-connection')testConn();
   else if(action==='load-persona')loadPersona();
@@ -749,6 +776,7 @@ loadBotStatus();
 setInterval(loadBotStatus,15000);
 navTo(location.hash.slice(1)||'dashboard',true);
 setInterval(function(){if(currentTab==='funnel'&&!activeConversationId)loadFunnel()},60000);
+setInterval(function(){if(currentTab==='funnel'&&!activeConversationId&&!conversationDiscoveryComplete)loadConversationList(true)},5000);
 </script>
 </body>
 </html>

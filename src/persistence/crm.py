@@ -150,6 +150,26 @@ class CrmSyncRepository:
             rows = connection.execute(statement).mappings().all()
         return [self._state(row) for row in rows]
 
+    def for_fan(
+        self,
+        creator_id: str,
+        fan_id: str,
+    ) -> list[CrmChatSyncState]:
+        """Return only this creator's provider chats for one fan."""
+        statement = (
+            select(CRM_CHAT_SYNC)
+            .where(
+                and_(
+                    CRM_CHAT_SYNC.c.creator_id == creator_id,
+                    CRM_CHAT_SYNC.c.fan_id == fan_id,
+                )
+            )
+            .order_by(CRM_CHAT_SYNC.c.chat_id.asc())
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        return [self._state(row) for row in rows]
+
     def remaining(self, creator_id: str) -> int:
         has_new_head = self._different(
             CRM_CHAT_SYNC.c.provider_head_message_id,

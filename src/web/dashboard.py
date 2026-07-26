@@ -752,6 +752,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return DashboardReadRepository(self.engine)
 
     @property
+    def crm_sync(self):
+        return getattr(self.server, "crm_sync", None)
+
+    @property
     def script_repo(self) -> ScriptTemplateRepository | None:
         return getattr(self.server, "script_repo", None)
 
@@ -919,7 +923,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._authorize():
             return
         if p in ("/","/dashboard"): return self.h(DASHBOARD_HTML)
-        if p=="/api/conversations": return self._conv()
+        if p=="/api/conversations": return self._conv(q)
         if p.startswith("/api/conversations/"): return self._conv_detail(p.rsplit("/",1)[-1], q)
         if p=="/api/fans": return self._fans()
         if p=="/api/vault": return self._vault()
@@ -1116,15 +1120,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return {}
         return repository.fan_purchase_totals(self.creator_id)
 
-    def _conv(self):
+    def _conv(self, query=None):
         repository=self.dashboard_repo
         if repository is None:
-            return self.j({"fans":[]})
+            return self.j({
+                "fans":[],
+                "total":0,
+                "offset":0,
+                "limit":200,
+                "has_more":False,
+                "source":"durable_state_unavailable",
+            })
+        query=query or {}
+        try:
+            limit=min(max(int((query.get("limit") or ["200"])[0]),1),500)
+            offset=max(int((query.get("offset") or ["0"])[0]),0)
+        except (TypeError,ValueError):
+            return self.j({"error":"invalid conversation pagination"},400)
+        search=str((query.get("search") or [""])[0]).strip()
+        page=repository.conversation_page(
+            self.creator_id,
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+        provider_primed=False
+        provider_refresh_error=None
+        if (
+            page.total == 0
+            and offset == 0
+            and not search
+            and self.crm_sync is not None
+        ):
+            try:
+                self.crm_sync.refresh_chat_index()
+                provider_primed=True
+                page=repository.conversation_page(
+                    self.creator_id,
+                    limit=limit,
+                    offset=offset,
+                    search=search,
+                )
+            except Exception as error:
+                logger.exception("Live CRM chat-index refresh failed")
+                provider_refresh_error=type(error).__name__
         purchases = self._purchase_totals()
         notes={note.fan_id:note for note in self._list_notes()}
         fans = []
         seen=set()
-        for durable in repository.conversations(self.creator_id):
+        for durable in page.conversations:
             fid=durable.fan_id
             seen.add(fid)
             n=notes.get(fid)
@@ -1140,7 +1184,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 else None
             )
             fans.append({"fan_id":fid,"display_name":n.display_name if n and n.display_name else durable.display_name,"username":durable.username,"avatar_url":durable.avatar_url,"spend_tier":_spend_tier(total_spent),"funnel_stage":sess.funnel.current_stage.value if sess else durable.phase,"spiral_level":sess.funnel.level.number if sess else durable.escalation_level,"cooldown":sess.funnel.cooldown if sess else durable.cooldown,"message_count":durable.message_count,"last_activity":durable.last_activity_at.isoformat() if durable.last_activity_at else None,"fact_count":len(n.facts) if n else 0,"history_complete":durable.history_complete,"sync_error":durable.sync_error})
-        if self.bot is not None:
+        if self.bot is not None and offset == 0 and not search:
             for fid,sess in self.bot.sessions.items():
                 if fid in seen:
                     continue
@@ -1153,8 +1197,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
                 fans.append({"fan_id":fid,"display_name":n.display_name if n else None,"spend_tier":_spend_tier(total_spent),"funnel_stage":sess.funnel.current_stage.value,"spiral_level":sess.funnel.level.number,"cooldown":sess.funnel.cooldown,"message_count":sess.message_count,"last_activity":sess.last_activity.isoformat() if sess.last_activity else None,"fact_count":len(n.facts) if n else 0})
         fans.sort(key=lambda f:f.get("last_activity")or"",reverse=True)
+        discovery_complete=None
+        if self.crm_sync is not None:
+            try:
+                value=self.crm_sync.discovery_complete()
+                if isinstance(value,bool):
+                    discovery_complete=value
+            except Exception:
+                logger.exception("CRM discovery status read failed")
         return self.j({
             "fans":fans,
+            "total":max(
+                page.total,
+                len(fans) if offset == 0 else page.total,
+            ),
+            "offset":page.offset,
+            "limit":page.limit,
+            "has_more":page.has_more,
+            "provider_primed":provider_primed,
+            "provider_refresh_error":provider_refresh_error,
+            "discovery_complete":discovery_complete,
             "source":"durable_state_with_live_overlay",
         })
 
@@ -1183,6 +1245,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             message_offset=max(int((query.get("offset") or ["0"])[0]),0)
         except (TypeError,ValueError):
             return self.j({"error":"invalid message pagination"},400)
+        live_hydrated=False
+        live_refresh_error=None
+        if message_offset == 0 and self.crm_sync is not None:
+            try:
+                hydration=self.crm_sync.hydrate_recent(fan_id)
+                live_hydrated=bool(
+                    getattr(hydration,"requested_pages",0)
+                )
+            except Exception as error:
+                logger.exception(
+                    "Live CRM hydration failed for fan %s",
+                    fan_id,
+                )
+                live_refresh_error=type(error).__name__
         history_page=message_store.get_history_page(
             fan_id,
             self.creator_id,
@@ -1333,6 +1409,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if durable_summary is not None
                 else None
             ),
+            "live_hydrated":live_hydrated,
+            "live_refresh_error":live_refresh_error,
             "messages": history,
         })
 
@@ -2404,6 +2482,7 @@ class DashboardServer:
         csrf_token: Optional[str] = None,
         apifansly_webhook_token: Optional[str] = None,
         runtime_monitor=None,
+        crm_sync=None,
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
         if allowed_hosts is None:
@@ -2441,6 +2520,7 @@ class DashboardServer:
         self.server.provider_error = provider_error
         self.server.provider_last_checked_at = None
         self.server.runtime_monitor = runtime_monitor
+        self.server.crm_sync = crm_sync
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
             if bot is not None and hasattr(bot, "persona_loader")

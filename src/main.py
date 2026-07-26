@@ -293,6 +293,21 @@ signal.signal(signal.SIGTERM, shutdown)
 
 # ─── Dashboard Server ──────────────────────────────────
 
+if crm_sync is not None:
+    try:
+        index_result = crm_sync.refresh_chat_index()
+        logger.info(
+            "CRM inbox primed before dashboard start: chats=%s has_more=%s",
+            index_result.discovered_chats,
+            index_result.has_more,
+        )
+    except Exception as error:
+        logger.warning(
+            "CRM inbox prime failed; dashboard will use durable cache: %s",
+            error,
+            exc_info=True,
+        )
+
 dashboard = DashboardServer(
     bot,
     port=PORT,
@@ -304,6 +319,7 @@ dashboard = DashboardServer(
     persona_dir=PERSONA_CONFIG_DIR,
     brand_bible_path=BRAND_BIBLE_CONFIG_PATH,
     runtime_monitor=runtime_monitor,
+    crm_sync=crm_sync,
 )
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -32,6 +33,19 @@ class CrmSyncCycleResult:
     @property
     def had_activity(self) -> bool:
         return bool(self.inserted_messages or self.discovered_chats)
+
+
+@dataclass(frozen=True)
+class CrmIndexRefreshResult:
+    discovered_chats: int
+    has_more: bool
+
+
+@dataclass(frozen=True)
+class CrmHydrationResult:
+    found: bool
+    requested_pages: int
+    inserted_messages: int
 
 
 class CrmSyncService:
@@ -64,6 +78,10 @@ class CrmSyncService:
             max(int(discovery_page_budget), 1),
             10,
         )
+        # Provider clients are not assumed to be thread-safe. Keep requests
+        # serialized, but release the lock between background pages so an
+        # operator opening a chat does not wait for the whole backfill cycle.
+        self._provider_lock = threading.RLock()
 
     def sync_cycle(self) -> CrmSyncCycleResult:
         discovered, discovery_complete = self._discover_chats()
@@ -74,7 +92,10 @@ class CrmSyncService:
             limit=self.message_page_budget,
         ):
             try:
-                page_inserted, requested = self._sync_message_page(state)
+                with self._provider_lock:
+                    page_inserted, requested = self._sync_message_page(
+                        state
+                    )
                 inserted += page_inserted
                 pages += int(requested)
             except Exception as error:
@@ -104,48 +125,125 @@ class CrmSyncService:
             discovery_complete=discovery_complete,
         )
 
-    def _discover_chats(self) -> tuple[int, bool]:
-        discovered_ids: set[str] = set()
-        first_page, next_cursor = self.client.list_chats_page(
-            limit=100,
-            offset=0,
-            order="newest",
+    def refresh_chat_index(self) -> CrmIndexRefreshResult:
+        """Persist the newest chat index without downloading chat history."""
+        with self._provider_lock:
+            chats, next_cursor = self.client.list_chats_page(
+                limit=100,
+                offset=0,
+                order="newest",
+            )
+            self._record_discovered(chats, set())
+            stored = self.state_repo.get_poll_cursor(
+                self.creator_id,
+                self.DISCOVERY_SCOPE,
+            )
+            if stored is None:
+                stored = (
+                    self._encode_cursor(next_cursor)
+                    if next_cursor is not None
+                    else self.DISCOVERY_DONE
+                )
+                self.state_repo.set_poll_cursor(
+                    self.creator_id,
+                    self.DISCOVERY_SCOPE,
+                    stored,
+                )
+        return CrmIndexRefreshResult(
+            discovered_chats=len({chat.chat_id for chat in chats}),
+            has_more=next_cursor is not None,
         )
-        self._record_discovered(first_page, discovered_ids)
 
+    def hydrate_recent(self, fan_id: str) -> CrmHydrationResult:
+        """Fetch one newest message page only for the chat being opened."""
+        states = self.sync_repo.for_fan(self.creator_id, fan_id)
+        inserted = 0
+        requested = 0
+        for state in states:
+            with self._provider_lock:
+                messages, next_cursor = self.client.list_messages(
+                    state.chat_id,
+                    limit=100,
+                    cursor=None,
+                )
+                requested += 1
+                inserted += self._save_messages(state, messages)
+                provider_head = (
+                    state.provider_head_message_id
+                    or self._newest_message_id(messages)
+                )
+                if state.stored_head_message_id is None:
+                    self.sync_repo.complete_initial_page(
+                        creator_id=self.creator_id,
+                        chat_id=state.chat_id,
+                        provider_head_message_id=provider_head,
+                        backfill_cursor=next_cursor,
+                    )
+                    continue
+
+                found_stored_head = any(
+                    message.message_id == state.stored_head_message_id
+                    for message in messages
+                )
+                if found_stored_head or next_cursor is None:
+                    self.sync_repo.complete_incremental(
+                        creator_id=self.creator_id,
+                        chat_id=state.chat_id,
+                        provider_head_message_id=provider_head,
+                    )
+                else:
+                    self.sync_repo.continue_incremental(
+                        creator_id=self.creator_id,
+                        chat_id=state.chat_id,
+                        cursor=next_cursor,
+                    )
+        return CrmHydrationResult(
+            found=bool(states),
+            requested_pages=requested,
+            inserted_messages=inserted,
+        )
+
+    def discovery_complete(self) -> bool:
+        return (
+            self.state_repo.get_poll_cursor(
+                self.creator_id,
+                self.DISCOVERY_SCOPE,
+            )
+            == self.DISCOVERY_DONE
+        )
+
+    def _discover_chats(self) -> tuple[int, bool]:
+        refreshed = self.refresh_chat_index()
+        discovered = refreshed.discovered_chats
         stored = self.state_repo.get_poll_cursor(
             self.creator_id,
             self.DISCOVERY_SCOPE,
         )
-        if stored is None:
-            stored = (
-                self._encode_cursor(next_cursor)
-                if next_cursor is not None
-                else self.DISCOVERY_DONE
-            )
-
         extra_pages = self.discovery_page_budget - 1
         while stored != self.DISCOVERY_DONE and extra_pages > 0:
             cursor = self._decode_cursor(stored)
-            page, next_cursor = self.client.list_chats_page(
-                limit=100,
-                offset=cursor,
-                order="newest",
-            )
-            self._record_discovered(page, discovered_ids)
+            discovered_ids: set[str] = set()
+            with self._provider_lock:
+                page, next_cursor = self.client.list_chats_page(
+                    limit=100,
+                    offset=cursor,
+                    order="newest",
+                )
+                self._record_discovered(page, discovered_ids)
             stored = (
                 self._encode_cursor(next_cursor)
                 if next_cursor is not None
                 else self.DISCOVERY_DONE
             )
+            self.state_repo.set_poll_cursor(
+                self.creator_id,
+                self.DISCOVERY_SCOPE,
+                stored,
+            )
+            discovered += len(discovered_ids)
             extra_pages -= 1
 
-        self.state_repo.set_poll_cursor(
-            self.creator_id,
-            self.DISCOVERY_SCOPE,
-            stored,
-        )
-        return len(discovered_ids), stored == self.DISCOVERY_DONE
+        return discovered, stored == self.DISCOVERY_DONE
 
     def _record_discovered(
         self,

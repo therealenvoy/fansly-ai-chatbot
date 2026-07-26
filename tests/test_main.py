@@ -264,6 +264,7 @@ class TestStartupAuthValidation:
         importlib.reload(module)
 
         assert module.bot.enabled is False
+        mock_deps["crm_sync"].refresh_chat_index.assert_called()
         mock_deps["crm_sync"].sync_cycle.assert_called()
 
     def test_empty_pilot_allowlist_blocks_enabled_default(

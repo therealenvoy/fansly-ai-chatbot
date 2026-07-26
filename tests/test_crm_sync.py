@@ -9,6 +9,7 @@ from src.fansly_client import ChatInfo, FanslyApiClient, MessageInfo
 from src.memory.store import MessageStore
 from src.persistence.crm import CrmSyncRepository
 from src.persistence.database import create_database_engine
+from src.persistence.dashboard import DashboardReadRepository
 from src.persistence.schema import INBOUND_MESSAGES, metadata
 from src.persistence.state import ConversationStateRepository
 
@@ -174,3 +175,81 @@ def test_sync_resumes_deep_history_and_then_catches_new_messages():
         "newest",
         "brand new",
     ]
+
+
+def test_refresh_index_makes_conversations_visible_without_downloading_messages():
+    service, client, _, engine = _service()
+    client.list_chats_page.return_value = (
+        [
+            ChatInfo(
+                chat_id="chat-1",
+                partner_account_id="fan-1",
+                partner_username="instant_fan",
+                partner_display_name="Instant Fan",
+                last_message_id="message-9",
+            )
+        ],
+        100,
+    )
+
+    result = service.refresh_chat_index()
+
+    assert result.discovered_chats == 1
+    assert result.has_more is True
+    client.list_messages.assert_not_called()
+    visible = DashboardReadRepository(engine).conversations("creator-1")
+    assert len(visible) == 1
+    assert visible[0].username == "instant_fan"
+    assert visible[0].message_count == 0
+
+
+def test_hydrate_recent_fetches_only_opened_chat_without_queueing_replies():
+    service, client, store, engine = _service()
+    client.list_chats_page.return_value = (
+        [
+            ChatInfo(
+                chat_id="chat-1",
+                partner_account_id="fan-1",
+                partner_username="fan_one",
+                partner_display_name="Fan One",
+                last_message_id="message-2",
+            ),
+            ChatInfo(
+                chat_id="chat-2",
+                partner_account_id="fan-2",
+                partner_username="fan_two",
+                partner_display_name="Fan Two",
+                last_message_id="message-3",
+            ),
+        ],
+        None,
+    )
+    service.refresh_chat_index()
+    client.list_messages.return_value = (
+        [
+            _message("message-2", "latest", 20, fan=False),
+            _message("message-1", "hello", 10, fan=True),
+        ],
+        "older-page",
+    )
+
+    result = service.hydrate_recent("fan-1")
+
+    assert result.found is True
+    assert result.requested_pages == 1
+    assert result.inserted_messages == 2
+    client.list_messages.assert_called_once_with(
+        "chat-1",
+        limit=100,
+        cursor=None,
+    )
+    assert [row["content"] for row in store.get_history(
+        "fan-1",
+        "creator-1",
+    )] == ["hello", "latest"]
+    assert store.get_history("fan-2", "creator-1") == []
+    with engine.connect() as connection:
+        queued_for_reply = connection.execute(
+            select(func.count()).select_from(INBOUND_MESSAGES)
+        ).scalar_one()
+    assert queued_for_reply == 0

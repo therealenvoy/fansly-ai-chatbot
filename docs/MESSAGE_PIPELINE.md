@@ -40,22 +40,33 @@ establishes a baseline and does not reply to historical content.
 The CRM history mirror is intentionally separate from the automated
 inbox/outbox above. Pausing automated replies does not pause CRM visibility.
 
-1. Every cycle checks the newest provider chat page. During initial discovery,
-   it also advances a durable cursor through older chat pages.
-2. Every discovered chat creates or updates its fan identity, username, avatar,
+1. Startup fetches and persists the newest provider chat-index page before the
+   dashboard begins serving. Chat rows are visible without waiting for any
+   message-history download.
+2. Opening a conversation fetches exactly one newest message page for that
+   chat, then immediately serves the refreshed durable record. A provider
+   failure falls back to the stored messages instead of blanking the inbox.
+3. Every background cycle checks the newest provider chat page. During initial
+   discovery, it also advances a durable cursor through older chat pages.
+4. Every discovered chat creates or updates its fan identity, username, avatar,
    provider head message ID, and independent CRM synchronization state.
-3. Recent changed chats are synchronized before deep history. Both fan and
+5. Recent changed chats are synchronized before deep history. Both fan and
    creator messages are stored with provider IDs, provider timestamps, chat
    IDs, and attachment metadata.
-4. Older message cursors are persisted after every page. A restart resumes the
+6. Older message cursors are persisted after every page. A restart resumes the
    exact backfill instead of starting over.
-5. Provider message IDs make repeated pages idempotent. CRM synchronization
+7. Provider message IDs make repeated pages idempotent. CRM synchronization
    never inserts into `inbound_messages`, so imported history cannot trigger
    automated replies when the bot is later enabled.
-6. The dashboard reads actual `fan_messages` counts and exposes history in
-   100-message pages. “Load older messages” can traverse the entire stored
+8. The dashboard reads actual `fan_messages` counts and exposes history in
+   100-message pages. The conversation index is also server-paginated and
+   creator-scoped. “Load older messages” can traverse the entire stored
    conversation while the list shows whether provider history is still
    syncing.
+
+Provider calls share a short critical section, released after every page.
+Therefore an operator opening a chat can run between background backfill pages
+instead of waiting for a whole backfill cycle.
 
 `CRM_SYNC_MESSAGE_PAGES_PER_CYCLE` and
 `CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE` bound provider usage.

@@ -235,3 +235,76 @@ def test_conversation_summaries_come_from_durable_state():
     assert conversations[0].phase == "offer"
     assert conversations[0].escalation_level == 3
     assert conversations[0].message_count == 8
+
+
+def test_conversation_page_is_tenant_scoped_searchable_and_paginated():
+    repository = _repository()
+    now = datetime.now(timezone.utc)
+    with repository.engine.begin() as connection:
+        for index, username in enumerate(("amber", "bella", "cassie")):
+            fan_id = f"fan-{index}"
+            connection.execute(
+                FANS.insert().values(
+                    creator_id="creator-a",
+                    fan_id=fan_id,
+                    display_name=username.title(),
+                    username=username,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                CONVERSATIONS.insert().values(
+                    creator_id="creator-a",
+                    chat_id=f"chat-{index}",
+                    fan_id=fan_id,
+                    last_activity_at=now + timedelta(minutes=index),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        connection.execute(
+            CREATORS.insert().values(
+                id="creator-b",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        connection.execute(
+            FANS.insert().values(
+                creator_id="creator-b",
+                fan_id="foreign-fan",
+                username="foreign",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    first = repository.conversation_page(
+        "creator-a",
+        limit=2,
+        offset=0,
+    )
+    second = repository.conversation_page(
+        "creator-a",
+        limit=2,
+        offset=2,
+    )
+    searched = repository.conversation_page(
+        "creator-a",
+        limit=10,
+        search="BEL",
+    )
+
+    assert first.total == 4
+    assert first.has_more is True
+    assert [row.username for row in first.conversations] == [
+        "cassie",
+        "bella",
+    ]
+    assert second.has_more is False
+    assert {row.fan_id for row in second.conversations} == {
+        "fan-0",
+        "fan-a",
+    }
+    assert [row.username for row in searched.conversations] == ["bella"]

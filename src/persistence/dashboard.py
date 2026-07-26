@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from sqlalchemy import Engine, and_, func, select
+from sqlalchemy import Engine, and_, func, or_, select
 
 from src.notes.repository import FAN_NOTES_TABLE
 
@@ -64,6 +64,15 @@ class DurableConversationSummary:
     sync_error: str | None
 
 
+@dataclass(frozen=True)
+class ConversationPage:
+    conversations: list[DurableConversationSummary]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class DashboardReadRepository:
     """Build dashboard values only from durable, attributable records."""
 
@@ -107,6 +116,21 @@ class DashboardReadRepository:
         self,
         creator_id: str,
     ) -> list[DurableConversationSummary]:
+        return self.conversation_page(
+            creator_id,
+            limit=100_000,
+        ).conversations
+
+    def conversation_page(
+        self,
+        creator_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        search: str | None = None,
+    ) -> ConversationPage:
+        limit = min(max(int(limit), 1), 100_000)
+        offset = max(int(offset), 0)
         message_totals = (
             select(
                 FAN_MESSAGES.c.fan_id.label("fan_id"),
@@ -143,6 +167,26 @@ class DashboardReadRepository:
             message_totals,
             FANS.c.fan_id == message_totals.c.fan_id,
         )
+        predicates = [FANS.c.creator_id == creator_id]
+        normalized_search = str(search or "").strip().lower()
+        if normalized_search:
+            pattern = f"%{normalized_search}%"
+            predicates.append(
+                or_(
+                    func.lower(
+                        func.coalesce(FANS.c.display_name, "")
+                    ).like(pattern),
+                    func.lower(
+                        func.coalesce(FANS.c.username, "")
+                    ).like(pattern),
+                    func.lower(FANS.c.fan_id).like(pattern),
+                )
+            )
+        last_activity = func.coalesce(
+            message_totals.c.stored_last_activity_at,
+            FAN_RUNTIME_STATES.c.last_activity_at,
+            CONVERSATIONS.c.last_activity_at,
+        )
         statement = (
             select(
                 FANS.c.fan_id,
@@ -156,20 +200,30 @@ class DashboardReadRepository:
                     message_totals.c.stored_message_count,
                     0,
                 ).label("message_count"),
-                func.coalesce(
-                    message_totals.c.stored_last_activity_at,
-                    FAN_RUNTIME_STATES.c.last_activity_at,
-                    CONVERSATIONS.c.last_activity_at,
-                ).label("last_activity_at"),
+                last_activity.label("last_activity_at"),
                 CRM_CHAT_SYNC.c.history_complete,
                 CRM_CHAT_SYNC.c.last_error,
             )
             .select_from(fan_runtime_join)
-            .where(FANS.c.creator_id == creator_id)
+            .where(and_(*predicates))
+            .order_by(
+                last_activity.desc(),
+                FANS.c.fan_id.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        count_statement = (
+            select(func.count())
+            .select_from(fan_runtime_join)
+            .where(and_(*predicates))
         )
         with self.engine.connect() as conn:
+            total = int(
+                conn.execute(count_statement).scalar_one() or 0
+            )
             rows = conn.execute(statement).mappings().all()
-        return [
+        conversations = [
             DurableConversationSummary(
                 fan_id=row["fan_id"],
                 display_name=row["display_name"],
@@ -187,6 +241,13 @@ class DashboardReadRepository:
             )
             for row in rows
         ]
+        return ConversationPage(
+            conversations=conversations,
+            total=total,
+            limit=limit,
+            offset=offset,
+            has_more=offset + len(conversations) < total,
+        )
 
     def metrics(self, creator_id: str) -> DashboardMetrics:
         with self.engine.connect() as conn:
