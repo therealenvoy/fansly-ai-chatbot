@@ -26,6 +26,30 @@ def test_valid_launch_environment_passes(tmp_path):
     ) == []
 
 
+def test_controlled_launch_rejects_polling_faster_than_five_minutes(tmp_path):
+    persona = tmp_path / "config" / "creators" / "sunny_charm.yaml"
+    persona.parent.mkdir(parents=True)
+    persona.write_text("creator_id: sunny_charm", encoding="utf-8")
+    environment = _valid_environment()
+    environment["POLL_INTERVAL"] = "60"
+
+    errors = check_environment(environment, project_root=tmp_path)
+
+    assert "POLL_INTERVAL must be at least 300 seconds for controlled launch" in errors
+
+
+def test_invalid_poll_interval_is_reported_without_crashing(tmp_path):
+    persona = tmp_path / "config" / "creators" / "sunny_charm.yaml"
+    persona.parent.mkdir(parents=True)
+    persona.write_text("creator_id: sunny_charm", encoding="utf-8")
+    environment = _valid_environment()
+    environment["POLL_INTERVAL"] = "fast"
+
+    errors = check_environment(environment, project_root=tmp_path)
+
+    assert "POLL_INTERVAL must be a positive integer" in errors
+
+
 def test_unsafe_launch_environment_reports_all_blockers(tmp_path):
     environment = _valid_environment()
     environment.update({

@@ -24,13 +24,20 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          for attempt in 1 2; do
-            if curl \
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          check_ready() {
+            curl \
               --fail \
               --silent \
               --show-error \
               --max-time 20 \
-              "$READY_URL" >/dev/null; then
+              --output "$response_file" \
+              "$READY_URL" &&
+              python -c 'import json, sys; payload = json.load(open(sys.argv[1], encoding="utf-8")); raise SystemExit(0 if payload.get("status") == "ready" else 1)' "$response_file"
+          }
+          for attempt in 1 2; do
+            if check_ready; then
               echo "Production readiness check passed."
               exit 0
             fi

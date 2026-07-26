@@ -108,3 +108,4 @@ def test_production_uptime_monitor_checks_ready_twice():
     assert "https://sunny-charm-production.up.railway.app/ready" in workflow
     assert "for attempt in 1 2" in workflow
     assert "sleep 30" in workflow
+    assert 'payload.get("status") == "ready"' in workflow

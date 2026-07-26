@@ -10,6 +10,12 @@ import os
 from pathlib import Path
 from typing import Mapping
 
+from .credit_budget import (
+    BASIC_MONTHLY_CREDITS,
+    CONTROLLED_LAUNCH_MIN_POLL_INTERVAL,
+    estimate_minimum_monthly_requests,
+)
+
 
 def _enabled(value: str | None, *, default: bool) -> bool:
     if value is None:
@@ -49,6 +55,30 @@ def check_environment(
     }
     if controlled and not allowlist:
         errors.append("FAN_ALLOWLIST must contain at least one pilot fan")
+    poll_interval: int | None
+    try:
+        poll_interval = int(environment.get("POLL_INTERVAL", "300"))
+        if poll_interval <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        poll_interval = None
+        errors.append("POLL_INTERVAL must be a positive integer")
+    if (
+        controlled
+        and poll_interval is not None
+        and poll_interval < CONTROLLED_LAUNCH_MIN_POLL_INTERVAL
+    ):
+        errors.append(
+            "POLL_INTERVAL must be at least 300 seconds for controlled launch"
+        )
+    if (
+        poll_interval is not None
+        and estimate_minimum_monthly_requests(poll_interval)
+        > BASIC_MONTHLY_CREDITS
+    ):
+        errors.append(
+            "POLL_INTERVAL baseline exceeds the Basic plan's 20,000 monthly credits"
+        )
     if _enabled(
         environment.get("BOT_ENABLED_DEFAULT"),
         default=False,

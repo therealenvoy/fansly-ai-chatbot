@@ -34,6 +34,7 @@ from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
 from .operations import RuntimeMonitor
+from .credit_budget import BASIC_MONTHLY_CREDITS, estimate_minimum_monthly_requests
 
 load_dotenv()
 
@@ -54,7 +55,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 API_KEY = os.getenv("FANSLY_API_KEY", "")
 CREATOR_ID = os.getenv("CREATOR_ID", "sunny_charm")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))   # seconds, fast/active interval
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))  # seconds, fast/active interval
 IDLE_BACKOFF_MAX = int(os.getenv("IDLE_BACKOFF_MAX", "600"))  # cap for idle backoff
 MAX_BACKOFF = int(os.getenv("MAX_BACKOFF", "600"))      # max seconds between polls on error
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///data/fansly_bot.db")
@@ -186,16 +187,17 @@ if bot is None:
 
 # ─── Credit Awareness ──────────────────────────────────
 
-estimated_daily = 86400 // POLL_INTERVAL
+estimated_monthly = estimate_minimum_monthly_requests(POLL_INTERVAL)
 logger.info(
-    f"Estimated API requests (worst case, no idle backoff): ~{estimated_daily}/day "
-    f"at {POLL_INTERVAL}s interval"
+    "Estimated API request baseline (30 days, no idle backoff): "
+    f"~{estimated_monthly:,}/month at {POLL_INTERVAL}s interval "
+    "(2 calls/poll, before message reads and sends)"
 )
-if estimated_daily > 20000:
+if estimated_monthly > BASIC_MONTHLY_CREDITS:
     logger.warning(
-        f"At ~{estimated_daily} requests/day worst case, you may exceed Basic plan limits "
-        f"(20,000 credits/mo). Idle-adaptive backoff reduces real usage below this when "
-        f"chats are quiet, but consider raising POLL_INTERVAL if this concerns you."
+        f"At ~{estimated_monthly:,} baseline requests/month, this configuration can "
+        f"exceed the Basic plan ({BASIC_MONTHLY_CREDITS:,} credits/month) before "
+        "message reads and sends. Raise POLL_INTERVAL before enabling the bot."
     )
 
 # ─── Main Loop ─────────────────────────────────────────

@@ -63,7 +63,14 @@ CONTROLLED_LAUNCH=true
 BOT_ENABLED_DEFAULT=false
 FAN_ALLOWLIST=<one or more exact Fansly account IDs>
 MAX_MESSAGES_PER_POLL=5
+POLL_INTERVAL=300
 ```
+
+`POLL_INTERVAL=300` is the minimum controlled-launch interval. The enabled
+poll loop makes at least two API calls per poll (wallet sync plus chat listing),
+so a five-minute interval uses an estimated 17,280 requests per 30 days before
+message reads, pagination, or sends. A 60-second interval would use at least
+86,400 and cannot fit the Basic 20,000-credit monthly allowance.
 
 OnlyFansAPI currently limits its Fansly product to approved closed-beta
 participants. A general OnlyFans API key is not proof of Fansly access: startup

@@ -452,24 +452,22 @@ class TestIdleAdaptiveBackoff:
 # ═══════════════════════════════════════════════════════════════
 
 class TestCreditAwarenessLogging:
-    """Credit awareness should log estimated daily API request count."""
+    """Credit awareness should log a conservative monthly request baseline."""
 
-    def test_logs_estimated_daily_requests(self, module, caplog):
-        """Startup should log ~86400/POLL_INTERVAL as estimated daily requests."""
-        os.environ["POLL_INTERVAL"] = "30"
+    def test_logs_estimated_monthly_requests(self, module, caplog):
+        os.environ["POLL_INTERVAL"] = "300"
         importlib.reload(module)
 
         assert any(
-            "Estimated API requests" in r.message
+            "17,280/month" in r.message
             for r in caplog.records
-        ), "Expected log about estimated API requests"
+        ), "Expected conservative monthly baseline in startup logs"
 
     def test_warns_if_exceeding_basic_plan(self, module, caplog):
-        """If estimated requests >20000/day (Basic plan credits/mo), log a warning."""
-        os.environ["POLL_INTERVAL"] = "2"
+        os.environ["POLL_INTERVAL"] = "60"
         importlib.reload(module)
 
         assert any(
-            "exceed Basic plan" in r.message
+            "exceed the Basic plan" in r.message
             for r in caplog.records
         ), "Expected warning about exceeding Basic plan credits"
