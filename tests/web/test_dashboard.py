@@ -326,6 +326,33 @@ class TestDashboardSecurity:
         assert status == 400
         assert body == {"error": "invalid host"}
 
+    def test_railway_healthcheck_host_can_only_reach_health(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/health",
+            headers={"Host": "healthcheck.railway.app"},
+        )
+        assert status == 200
+        assert body == {"status": "ok", "service": "fansly-bot"}
+
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/",
+            headers={
+                "Host": "healthcheck.railway.app",
+                "Authorization": _authorization(),
+            },
+        )
+        assert status == 400
+        assert body == {"error": "invalid host"}
+
     def test_creator_path_traversal_is_rejected(
         self, running_server, monkeypatch, tmp_path
     ):

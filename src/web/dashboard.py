@@ -776,7 +776,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             hostname = urlsplit(f"//{host}").hostname
         except ValueError:
             return False
-        return bool(hostname and hostname.lower() in self.server.allowed_hosts)
+        if not hostname:
+            return False
+        normalized = hostname.lower()
+        if normalized == "healthcheck.railway.app":
+            return self.path.split("?", 1)[0] == "/health"
+        return normalized in self.server.allowed_hosts
 
     def _is_authenticated(self):
         expected_user = self.server.dashboard_user

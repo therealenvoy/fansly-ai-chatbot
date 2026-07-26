@@ -1,0 +1,13 @@
+-r requirements.txt
+
+# Test runner
+pytest>=8.0,<10.0
+
+# Optional emotion API and CLI
+click>=8.1,<9.0
+fastapi>=0.115,<1.0
+rich>=13.0,<16.0
+torch>=2.0,<3.0
+transformers>=4.30,<6.0
+uvicorn>=0.23,<1.0
+vaderSentiment>=3.3.2,<4.0
