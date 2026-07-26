@@ -8,13 +8,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import (
-    MetaData, Table, Column, String, Float, Integer,
-    DateTime, Text, Boolean, UniqueConstraint, desc
-)
+from sqlalchemy import desc
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.persistence.database import create_database_engine
+from src.persistence.schema import (
+    PPV_FAN_PROGRESS,
+    PPV_SEQUENCES,
+    PPV_SEQUENCE_STEPS,
+)
 
 from .models import (
     Sequence, SequenceStep, FanSequenceProgress,
@@ -25,46 +27,9 @@ logger = logging.getLogger(__name__)
 
 # ─── TABLE DEFINITIONS ─────────────────────────────────────
 
-SEQUENCES_TABLE = Table(
-    "ppv_sequences",
-    MetaData(),
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("name", String, nullable=False),
-    Column("trigger", String, nullable=False),           # SequenceTrigger enum value
-    Column("funnel_stage", String, nullable=False, default="rapport"),
-    Column("is_active", Boolean, default=True),
-    Column("created_at", DateTime, default=lambda: datetime.now(timezone.utc)),
-)
-
-STEPS_TABLE = Table(
-    "ppv_sequence_steps",
-    MetaData(),
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("sequence_id", Integer, nullable=False),
-    Column("position", Integer, nullable=False),           # 1-based ordering
-    Column("media_id", String, nullable=False),
-    Column("preview_id", String, nullable=True),
-    Column("price", Float, nullable=False),
-    Column("tease_script", Text, default=""),
-    Column("offer_script", Text, default=""),
-    Column("created_at", DateTime, default=lambda: datetime.now(timezone.utc)),
-)
-
-PROGRESS_TABLE = Table(
-    "ppv_fan_progress",
-    MetaData(),
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("fan_id", String, nullable=False),
-    Column("sequence_id", Integer, nullable=False),
-    Column("creator_id", String, nullable=False),
-    Column("current_step", Integer, default=0),
-    Column("status", String, default=StepStatus.PENDING.value),
-    Column("last_sent_at", DateTime, nullable=True),
-    Column("bought_at", DateTime, nullable=True),
-    Column("started_at", DateTime, default=lambda: datetime.now(timezone.utc)),
-    # Composite unique for upsert
-    UniqueConstraint("fan_id", "sequence_id", "creator_id", name="uq_fan_seq_progress"),
-)
+SEQUENCES_TABLE = PPV_SEQUENCES
+STEPS_TABLE = PPV_SEQUENCE_STEPS
+PROGRESS_TABLE = PPV_FAN_PROGRESS
 
 
 # ─── CONVERTERS ────────────────────────────────────────────
@@ -122,7 +87,7 @@ class SequenceRepository:
         self.engine = engine or create_database_engine(db_url)
 
     def create_tables(self):
-        """Create all sequence tables if they don't exist."""
+        """Create tables for isolated tests; production uses Alembic."""
         SEQUENCES_TABLE.create(self.engine, checkfirst=True)
         STEPS_TABLE.create(self.engine, checkfirst=True)
         PROGRESS_TABLE.create(self.engine, checkfirst=True)

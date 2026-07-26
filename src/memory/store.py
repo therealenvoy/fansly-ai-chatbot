@@ -11,24 +11,13 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import (
-    MetaData, Table, Column, String, Integer, DateTime, Text, select, desc
-)
+from sqlalchemy import select, desc
 from src.persistence.database import create_database_engine
+from src.persistence.schema import FAN_MESSAGES
 
 logger = logging.getLogger(__name__)
 
-MESSAGES_TABLE = Table(
-    "fan_messages",
-    MetaData(),
-    Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("fan_id", String, index=True),
-    Column("creator_id", String, index=True),
-    Column("sender", String),  # "fan" or "creator"
-    Column("content", Text),
-    Column("message_id", String, nullable=True),  # platform message id if known
-    Column("created_at", DateTime, default=lambda: datetime.now(timezone.utc)),
-)
+MESSAGES_TABLE = FAN_MESSAGES
 
 
 class MessageStore:
@@ -40,6 +29,7 @@ class MessageStore:
         self.engine = engine or create_database_engine(db_url)
 
     def create_table(self):
+        """Create the table for isolated tests; production uses Alembic."""
         MESSAGES_TABLE.create(self.engine, checkfirst=True)
 
     def save_message(

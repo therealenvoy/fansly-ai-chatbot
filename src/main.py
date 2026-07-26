@@ -106,11 +106,9 @@ if not persona_target.exists() and persona_default.exists():
         shutil.copyfile(persona_default, persona_target)
 persona_loader = PersonaLoader(config_dir=PERSONA_CONFIG_DIR)
 note_repo = FanNoteRepository(engine=database_engine)
-note_repo.create_table()
 
 # Long-term memory: persistent message history + LLM fact extraction
 message_store = MessageStore(engine=database_engine)
-message_store.create_table()
 fact_extractor = LLMFactExtractor(api_key=os.getenv("DEEPSEEK_API_KEY", ""))
 if fact_extractor.enabled:
     logger.info("LLM fact extraction enabled (DeepSeek)")
@@ -122,7 +120,6 @@ settings_store = SettingsStore(
     engine=database_engine,
     creator_id=CREATOR_ID,
 )
-settings_store.create_table()
 state_repo = ConversationStateRepository(database_engine)
 state_repo.ensure_creator(CREATOR_ID)
 runtime_monitor = RuntimeMonitor()
@@ -162,7 +159,6 @@ if api_ok:
             allowed_fan_ids=FAN_ALLOWLIST,
             require_fan_allowlist=CONTROLLED_LAUNCH,
         )
-        bot.sequence_repo.create_tables()
         bot_enabled_str = settings_store.get(
             "bot_enabled",
             str(BOT_ENABLED_DEFAULT).lower(),

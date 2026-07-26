@@ -9,6 +9,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -34,6 +35,83 @@ NAMING_CONVENTION = {
 }
 
 metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+# Pre-existing durable tables are part of the same Alembic-owned metadata.
+FAN_NOTES = Table(
+    "fan_notes",
+    metadata,
+    Column("fan_id", String, primary_key=True),
+    Column("creator_id", String, primary_key=True),
+    Column("display_name", String, nullable=True),
+    Column("preferences", Text, default="[]"),
+    Column("occupation", String, nullable=True),
+    Column("total_spent", Float, default=0.0),
+    Column("purchase_count", Integer, default=0),
+    Column("last_purchase_at", DateTime, nullable=True),
+    Column("emotional_triggers", Text, default="[]"),
+    Column("hard_limits", Text, default="[]"),
+    Column("facts", Text, default="[]"),
+    Column("notes", Text, default=""),
+    Column("first_contact_at", DateTime, nullable=True),
+    Column("relationship_stage", String, default="new"),
+)
+
+FAN_MESSAGES = Table(
+    "fan_messages",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("fan_id", String, index=True),
+    Column("creator_id", String, index=True),
+    Column("sender", String),
+    Column("content", Text),
+    Column("message_id", String, nullable=True),
+    Column("created_at", DateTime, default=utcnow),
+)
+
+PPV_SEQUENCES = Table(
+    "ppv_sequences",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("name", String, nullable=False),
+    Column("trigger", String, nullable=False),
+    Column("funnel_stage", String, nullable=False, default="rapport"),
+    Column("is_active", Boolean, default=True),
+    Column("created_at", DateTime, default=utcnow),
+)
+
+PPV_SEQUENCE_STEPS = Table(
+    "ppv_sequence_steps",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("sequence_id", Integer, nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("media_id", String, nullable=False),
+    Column("preview_id", String, nullable=True),
+    Column("price", Float, nullable=False),
+    Column("tease_script", Text, default=""),
+    Column("offer_script", Text, default=""),
+    Column("created_at", DateTime, default=utcnow),
+)
+
+PPV_FAN_PROGRESS = Table(
+    "ppv_fan_progress",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("fan_id", String, nullable=False),
+    Column("sequence_id", Integer, nullable=False),
+    Column("creator_id", String, nullable=False),
+    Column("current_step", Integer, default=0),
+    Column("status", String, default="pending"),
+    Column("last_sent_at", DateTime, nullable=True),
+    Column("bought_at", DateTime, nullable=True),
+    Column("started_at", DateTime, default=utcnow),
+    UniqueConstraint(
+        "fan_id",
+        "sequence_id",
+        "creator_id",
+        name="uq_fan_seq_progress",
+    ),
+)
 
 CREATORS = Table(
     "creators",

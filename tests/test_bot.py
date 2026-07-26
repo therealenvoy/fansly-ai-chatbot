@@ -1,10 +1,13 @@
 """Tests for FanslyBot on/off toggle."""
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from src.bot import FanslyBot, LaunchGuardError
 from src.notes.repository import FanNoteRepository
 from src.persona.loader import PersonaLoader
-from src.fansly_client import FanslyApiClient, FanslyConfig
+from src.fansly_client import FanslyApiClient, MessageInfo
+from src.persistence.database import create_database_engine
+from src.persistence.schema import metadata
+from src.persistence.state import ConversationStateRepository
 
 
 @pytest.fixture
@@ -12,7 +15,7 @@ def bot():
     """Create a FanslyBot with mocked dependencies for toggle testing."""
     client = MagicMock(spec=FanslyApiClient)
     client.account_id = "test"
-    client.get_all_chats.return_value = []
+    client.list_chats_page.return_value = ([], None)
 
     pl = MagicMock(spec=PersonaLoader)
     pl.load.return_value = MagicMock()
@@ -20,10 +23,20 @@ def bot():
     pl.load.return_value.pet_names = ["babe"]
     pl.load.return_value.common_typos = {}
 
-    nr = FanNoteRepository("sqlite:///:memory:")
+    engine = create_database_engine(
+        "sqlite:///:memory:",
+        environment={"APP_ENV": "test"},
+    )
+    metadata.create_all(engine)
+    nr = FanNoteRepository(engine=engine)
     nr.create_table()
 
-    b = FanslyBot(client=client, persona_loader=pl, note_repo=nr)
+    b = FanslyBot(
+        client=client,
+        persona_loader=pl,
+        note_repo=nr,
+        state_repo=ConversationStateRepository(engine),
+    )
     # Reset enabled after __init__ so we test the default, not our override
     b.enabled = True
     return b
@@ -38,10 +51,20 @@ def test_bot_enabled_by_default():
     pl.load.return_value.forbidden_phrases = []
     pl.load.return_value.pet_names = ["babe"]
     pl.load.return_value.common_typos = {}
-    nr = FanNoteRepository("sqlite:///:memory:")
+    engine = create_database_engine(
+        "sqlite:///:memory:",
+        environment={"APP_ENV": "test"},
+    )
+    metadata.create_all(engine)
+    nr = FanNoteRepository(engine=engine)
     nr.create_table()
 
-    b = FanslyBot(client=client, persona_loader=pl, note_repo=nr)
+    b = FanslyBot(
+        client=client,
+        persona_loader=pl,
+        note_repo=nr,
+        state_repo=ConversationStateRepository(engine),
+    )
     assert b.enabled == True
 
 
@@ -49,14 +72,14 @@ def test_poll_skips_when_disabled(bot):
     """poll_and_process should return early when bot is disabled."""
     bot.enabled = False
     bot.poll_and_process()
-    bot.client.get_all_chats.assert_not_called()
+    bot.client.list_chats_page.assert_not_called()
 
 
 def test_poll_calls_api_when_enabled(bot):
     """poll_and_process should call API when bot is enabled."""
     bot.enabled = True
     bot.poll_and_process()
-    bot.client.get_all_chats.assert_called_once()
+    bot.client.list_chats_page.assert_called_once()
 
 
 def test_toggle_off(bot):
@@ -109,12 +132,12 @@ def test_controlled_launch_rejects_enable_without_allowlist(bot):
     assert bot.enabled is False
 
 
-def test_controlled_launch_filters_compatibility_chats(bot):
+def test_controlled_launch_filters_durable_chats(bot):
     from src.fansly_client import ChatInfo
 
     bot.require_fan_allowlist = True
     bot.allowed_fan_ids = frozenset({"pilot"})
-    bot.client.get_all_chats.return_value = [
+    bot.client.list_chats_page.return_value = ([
         ChatInfo(
             chat_id="allowed",
             partner_account_id="pilot",
@@ -129,37 +152,54 @@ def test_controlled_launch_filters_compatibility_chats(bot):
             partner_display_name="Other",
             unread_count=1,
         ),
-    ]
+    ], None)
     bot.client.list_messages.return_value = ([], None)
 
     bot.poll_and_process()
 
-    bot.client.list_messages.assert_called_once_with("allowed", limit=10)
+    bot.client.list_messages.assert_called_once_with(
+        "allowed",
+        limit=100,
+        cursor=None,
+    )
 
 
 def test_poll_skips_list_messages_for_chats_with_no_unread(bot):
     """Chats with unread_count=0 should never trigger a list_messages call."""
     from src.fansly_client import ChatInfo
-    bot.client.get_all_chats.return_value = [
+    bot.client.list_chats_page.return_value = ([
         ChatInfo(chat_id="c1", partner_account_id="p1", partner_username="u1",
                  partner_display_name="U1", unread_count=0),
         ChatInfo(chat_id="c2", partner_account_id="p2", partner_username="u2",
                  partner_display_name="U2", unread_count=3),
-    ]
+    ], None)
     bot.client.list_messages.return_value = ([], None)
 
     bot.poll_and_process()
 
-    bot.client.list_messages.assert_called_once_with("c2", limit=10)
+    bot.client.list_messages.assert_called_once_with(
+        "c2",
+        limit=100,
+        cursor=None,
+    )
 
 
 def test_poll_returns_true_when_unread_found(bot):
     from src.fansly_client import ChatInfo
-    bot.client.get_all_chats.return_value = [
+    bot.client.list_chats_page.return_value = ([
         ChatInfo(chat_id="c1", partner_account_id="p1", partner_username="u1",
                  partner_display_name="U1", unread_count=2),
-    ]
-    bot.client.list_messages.return_value = ([], None)
+    ], None)
+    bot.client.list_messages.return_value = ([
+        MessageInfo(
+            message_id="message-1",
+            content="hello",
+            sender_id="p1",
+            created_at=1,
+            is_from_fan=True,
+        )
+    ], None)
+    bot._prepare_message = MagicMock(return_value=None)
 
     result = bot.poll_and_process()
 
@@ -168,10 +208,10 @@ def test_poll_returns_true_when_unread_found(bot):
 
 def test_poll_returns_false_when_no_unread_anywhere(bot):
     from src.fansly_client import ChatInfo
-    bot.client.get_all_chats.return_value = [
+    bot.client.list_chats_page.return_value = ([
         ChatInfo(chat_id="c1", partner_account_id="p1", partner_username="u1",
                  partner_display_name="U1", unread_count=0),
-    ]
+    ], None)
 
     result = bot.poll_and_process()
 

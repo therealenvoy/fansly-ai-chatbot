@@ -68,10 +68,10 @@ class FanslyBot:
         client: FanslyApiClient,
         persona_loader: PersonaLoader,
         note_repo: FanNoteRepository,
+        state_repo: "ConversationStateRepository",
         creator_id: str = "sunny_charm",
         message_store: Optional[MessageStore] = None,
         fact_extractor: Optional[LLMFactExtractor] = None,
-        state_repo: Optional["ConversationStateRepository"] = None,
         allowed_fan_ids: Optional[set[str]] = None,
         require_fan_allowlist: bool = False,
     ):
@@ -95,22 +95,21 @@ class FanslyBot:
         self.message_store = message_store
         self.fact_extractor = fact_extractor
         self.state_repo = state_repo
+        if self.state_repo is None:
+            raise ValueError(
+                "state_repo is required; all message processing must use "
+                "the durable inbox/outbox"
+            )
         self.allowed_fan_ids = frozenset(
             str(fan_id).strip()
             for fan_id in (allowed_fan_ids or set())
             if str(fan_id).strip()
         )
         self.require_fan_allowlist = bool(require_fan_allowlist)
-        self.processing_repo = (
-            MessageProcessingRepository(state_repo.engine)
-            if state_repo is not None
-            else None
+        self.processing_repo = MessageProcessingRepository(
+            self.state_repo.engine
         )
-        self.purchase_repo = (
-            PurchaseRepository(state_repo.engine)
-            if state_repo is not None
-            else None
-        )
+        self.purchase_repo = PurchaseRepository(self.state_repo.engine)
         self.content_policy = MessageContentPolicy()
         self._runtime_state_versions: dict[str, int] = {}
         self.note_extractor = NoteExtractor(llm_client=None)  # merge() only
@@ -147,19 +146,14 @@ class FanslyBot:
         # Bot on/off toggle — poll_and_process() returns early when disabled
         self.enabled = True
 
-        # Message deduplication: track processed message_ids per fan
-        # Prevents re-processing messages already handled (fixes C1 bug)
-        self._processed_message_ids: dict[str, set[str]] = {}
-        self._max_dedup_entries = 1000  # LRU eviction threshold
-        if self.processing_repo:
-            recovered = self.processing_repo.recover_interrupted(
-                self.creator_id
+        recovered = self.processing_repo.recover_interrupted(
+            self.creator_id
+        )
+        if any(recovered.values()):
+            logger.warning(
+                "Recovered interrupted message work: %s",
+                recovered,
             )
-            if any(recovered.values()):
-                logger.warning(
-                    "Recovered interrupted message work: %s",
-                    recovered,
-                )
 
     # ─── MAIN LOOP ──────────────────────────────────────
 
@@ -180,28 +174,9 @@ class FanslyBot:
             logger.debug("Bot disabled — skipping poll cycle")
             return False
 
-        if self.processing_repo and self.state_repo:
-            return self._poll_and_process_durable(
-                max_messages=max_chats,
-            )
-
-        chats = [
-            chat
-            for chat in self.client.get_all_chats(filter_type=filter_type)
-            if self._fan_allowed(chat.partner_account_id)
-        ]
-        unread_chats = [c for c in chats if c.unread_count > 0]
-        logger.info(f"{len(chats)} chats total, {len(unread_chats)} with unread messages")
-
-        for chat in unread_chats[:max_chats]:
-            try:
-                self._process_chat(chat)
-            except Exception as e:
-                logger.error(f"Error processing chat {chat.chat_id}: {e}")
-            finally:
-                self._persist_runtime_state(chat.partner_account_id)
-
-        return len(unread_chats) > 0
+        return self._poll_and_process_durable(
+            max_messages=max_chats,
+        )
 
     def _poll_and_process_durable(self, *, max_messages: int) -> bool:
         """Ingest changed chats, then drain the durable inbox oldest-first."""
@@ -692,44 +667,6 @@ class FanslyBot:
         logger.info(f"Bot {'enabled' if self.enabled else 'disabled'}")
         return self.enabled
 
-    def _process_chat(self, chat: ChatInfo):
-        """Compatibility path for tests/dev without the durable repository."""
-        messages, _ = self.client.list_messages(chat.chat_id, limit=10)
-        inbound = sorted(
-            (message for message in messages if message.is_from_fan),
-            key=lambda message: (
-                message.created_at,
-                message.message_id,
-            ),
-        )
-        for message in inbound:
-            if self._has_processed(
-                chat.partner_account_id,
-                message.message_id,
-            ):
-                continue
-            prepared = self._prepare_message(chat, message, messages)
-            if prepared:
-                outbound = self._coerce_outbound(prepared)
-                unsupported = self._unsupported_reason(outbound)
-                if unsupported:
-                    raise RuntimeError(unsupported)
-                sent = self._deliver_message(chat.chat_id, outbound)
-                if not sent.success or not sent.message_id:
-                    raise RuntimeError(
-                        "Provider did not confirm a sent message ID"
-                    )
-                self._record_sent_reply(
-                    chat.partner_account_id,
-                    outbound.content,
-                    sent.message_id,
-                )
-            self._mark_processed(
-                chat.partner_account_id,
-                message.message_id,
-                chat.chat_id,
-            )
-
     def _prepare_message(
         self,
         chat: ChatInfo,
@@ -740,31 +677,25 @@ class FanslyBot:
         fan_id = chat.partner_account_id
         messages = messages or [latest]
 
-        if self.state_repo:
-            self.state_repo.ensure_conversation(
-                self.creator_id,
-                fan_id,
-                chat.chat_id,
-                display_name=chat.partner_display_name,
-            )
+        self.state_repo.ensure_conversation(
+            self.creator_id,
+            fan_id,
+            chat.chat_id,
+            display_name=chat.partner_display_name,
+        )
 
         # Get or create fan session
         if fan_id not in self.sessions:
-            if self.state_repo:
-                session, durable_state = self.state_repo.load_session(
-                    self.creator_id,
-                    fan_id,
-                )
-                self.sessions[fan_id] = session
-                self._runtime_state_versions[fan_id] = durable_state.version
-                self._extract_counters[fan_id] = durable_state.extract_counter
-                self.rhythm_engines[fan_id] = self.state_repo.restore_rhythm(
-                    durable_state
-                )
-            else:
-                self.sessions[fan_id] = FanSession(
-                    fan_id=fan_id, creator_id=self.creator_id
-                )
+            session, durable_state = self.state_repo.load_session(
+                self.creator_id,
+                fan_id,
+            )
+            self.sessions[fan_id] = session
+            self._runtime_state_versions[fan_id] = durable_state.version
+            self._extract_counters[fan_id] = durable_state.extract_counter
+            self.rhythm_engines[fan_id] = self.state_repo.restore_rhythm(
+                durable_state
+            )
 
         # Get fan notes
         note = self.note_repo.get(fan_id, self.creator_id)
@@ -1091,17 +1022,6 @@ class FanslyBot:
                 logger.error(f"Failed to persist styled reply: {e}")
         logger.info("Replied to %s: %s...", fan_id, content[:50])
 
-    def _styled_send(self, chat_id: str, fan_id: str, text: str) -> str:
-        """Compatibility helper; production delivery uses the durable outbox."""
-        approved = self._style_and_approve(fan_id, text)
-        if not approved:
-            return ""
-        sent = self.client.send_message(chat_id, approved)
-        if not sent.success or not sent.message_id:
-            raise RuntimeError("Provider did not confirm a sent message ID")
-        self._record_sent_reply(fan_id, approved, sent.message_id)
-        return approved
-
     def _generate_push_message(self, note: Optional[FanNote]) -> str:
         """Generate a flirtatious push spike, personalized with remembered facts."""
         if note and note.facts:
@@ -1200,43 +1120,7 @@ class FanslyBot:
 
     # ─── MESSAGE DEDUPLICATION ──────────────────────────
 
-    def _has_processed(self, fan_id: str, message_id: str) -> bool:
-        """Check if a message has already been processed."""
-        if self.state_repo:
-            return self.state_repo.has_processed(
-                self.creator_id,
-                message_id,
-            )
-        return fan_id in self._processed_message_ids and message_id in self._processed_message_ids[fan_id]
-
-    def _mark_processed(
-        self,
-        fan_id: str,
-        message_id: str,
-        chat_id: str | None = None,
-    ):
-        """Mark a message as processed. LRU eviction at max_dedup_entries."""
-        if self.state_repo:
-            self.state_repo.mark_processed(
-                self.creator_id,
-                message_id,
-                fan_id,
-                chat_id,
-            )
-            return
-        if fan_id not in self._processed_message_ids:
-            self._processed_message_ids[fan_id] = set()
-        self._processed_message_ids[fan_id].add(message_id)
-        # Evict oldest if over threshold (clear entire fan set as simple LRU)
-        total = sum(len(s) for s in self._processed_message_ids.values())
-        if total > self._max_dedup_entries:
-            # Remove the fan with the most entries
-            worst = max(self._processed_message_ids, key=lambda fid: len(self._processed_message_ids[fid]))
-            self._processed_message_ids[worst].clear()
-
     def _persist_runtime_state(self, fan_id: str):
-        if not self.state_repo:
-            return
         session = self.sessions.get(fan_id)
         if session is None:
             return

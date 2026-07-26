@@ -5,15 +5,11 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import inspect, text
 
-from src.memory.store import MessageStore
 from src.messaging.models import OutboundMessage
-from src.notes.repository import FanNoteRepository
 from src.persistence.database import create_database_engine
 from src.persistence.migrations import upgrade_database
 from src.persistence.pipeline import MessageProcessingRepository
 from src.persistence.state import ConversationStateRepository
-from src.sequences.repository import SequenceRepository
-from src.settings.store import SettingsStore
 
 
 POSTGRES_URL = os.getenv("TEST_POSTGRES_URL")
@@ -40,16 +36,6 @@ def postgres_engine():
 def test_postgres_migrations_and_runtime_tables_initialize(
     postgres_engine,
 ):
-    creator_id = f"ci-{uuid4().hex[:12]}"
-
-    FanNoteRepository(engine=postgres_engine).create_table()
-    MessageStore(engine=postgres_engine).create_table()
-    SettingsStore(
-        engine=postgres_engine,
-        creator_id=creator_id,
-    ).create_table()
-    SequenceRepository(engine=postgres_engine).create_tables()
-
     table_names = set(inspect(postgres_engine).get_table_names())
     assert {
         "alembic_version",
@@ -70,7 +56,7 @@ def test_postgres_migrations_and_runtime_tables_initialize(
     with postgres_engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260726_02"
+        ).scalar_one() == "20260726_03"
 
 
 def test_postgres_pipeline_is_idempotent_ordered_and_durable(

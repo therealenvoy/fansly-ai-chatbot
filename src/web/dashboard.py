@@ -1754,7 +1754,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 engine=self.engine,
                 creator_id=self.creator_id,
             )
-            store.create_table()
             store.set("bot_enabled", str(target).lower())
             persisted=True
             new_state = self.bot.toggle(force=target)

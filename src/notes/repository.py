@@ -2,34 +2,15 @@
 
 import json
 from datetime import datetime
-from sqlalchemy import (
-    MetaData, Table, Column, String, Float, Integer,
-    DateTime, Text, text
-)
+from sqlalchemy import MetaData
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from src.notes.models import FanNote
 from src.persistence.database import create_database_engine
+from src.persistence.schema import FAN_NOTES
 
 
-FAN_NOTES_TABLE = Table(
-    "fan_notes",
-    MetaData(),
-    Column("fan_id", String, primary_key=True),
-    Column("creator_id", String, primary_key=True),
-    Column("display_name", String, nullable=True),
-    Column("preferences", Text, default="[]"),
-    Column("occupation", String, nullable=True),
-    Column("total_spent", Float, default=0.0),
-    Column("purchase_count", Integer, default=0),
-    Column("last_purchase_at", DateTime, nullable=True),
-    Column("emotional_triggers", Text, default="[]"),
-    Column("hard_limits", Text, default="[]"),
-    Column("facts", Text, default="[]"),
-    Column("notes", Text, default=""),
-    Column("first_contact_at", DateTime, nullable=True),
-    Column("relationship_stage", String, default="new"),
-)
+FAN_NOTES_TABLE = FAN_NOTES
 
 
 def _note_to_row(note: FanNote) -> dict:
@@ -73,22 +54,8 @@ class FanNoteRepository:
         self.metadata = MetaData()
 
     def create_table(self):
-        """Create the fan_notes table if it doesn't exist, and migrate new columns."""
+        """Create the table for isolated tests; production uses Alembic."""
         FAN_NOTES_TABLE.create(self.engine, checkfirst=True)
-        # Dialect-agnostic migration: add columns introduced after initial deploys.
-        from sqlalchemy import inspect as sa_inspect
-        insp = sa_inspect(self.engine)
-        try:
-            existing = {c["name"] for c in insp.get_columns("fan_notes")}
-        except Exception:
-            existing = set()
-        with self.engine.connect() as conn:
-            for col, ddl in [("facts", "TEXT DEFAULT '[]'")]:
-                if col not in existing:
-                    conn.execute(
-                        text(f"ALTER TABLE fan_notes ADD COLUMN {col} {ddl}")
-                    )
-            conn.commit()
 
     def save(self, note: FanNote):
         """Upsert a FanNote (fan_id + creator_id as composite key)."""
