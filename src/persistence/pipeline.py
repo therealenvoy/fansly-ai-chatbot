@@ -9,6 +9,10 @@ from sqlalchemy import Engine, and_, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
+from src.messaging.models import OutboundMessage
+from src.sequences.models import StepStatus
+from src.sequences.repository import PROGRESS_TABLE, STEPS_TABLE
+
 from .schema import (
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
@@ -26,6 +30,7 @@ OUTBOX_PENDING = "pending"
 OUTBOX_SENDING = "sending"
 OUTBOX_SENT = "sent"
 OUTBOX_DELIVERY_UNKNOWN = "delivery_unknown"
+OUTBOX_BLOCKED_UNSUPPORTED = "blocked_unsupported"
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,11 @@ class OutboxMessageRecord:
     fan_id: str
     chat_id: str
     content: str
+    message_kind: str
+    media_ids: tuple[str, ...]
+    price_millis: int | None
+    sequence_id: int | None
+    sequence_step_id: int | None
     status: str
     provider_message_id: str | None
     attempt_count: int
@@ -165,15 +175,25 @@ class MessageProcessingRepository:
         self,
         *,
         inbound: InboundMessageRecord,
-        content: str,
+        message: OutboundMessage | None = None,
+        content: str | None = None,
     ) -> tuple[OutboxMessageRecord, bool]:
         """Persist one approved response per inbound message."""
+        if message is None:
+            if content is None:
+                raise ValueError("message is required")
+            message = OutboundMessage.text(content)
         values = {
             "inbound_message_id": inbound.id,
             "creator_id": inbound.creator_id,
             "fan_id": inbound.fan_id,
             "chat_id": inbound.chat_id,
-            "content": content,
+            "content": message.content,
+            "message_kind": message.kind.value,
+            "media_ids": list(message.media_ids),
+            "price_millis": message.price_millis,
+            "sequence_id": message.sequence_id,
+            "sequence_step_id": message.sequence_step_id,
             "status": OUTBOX_PENDING,
             "attempt_count": 0,
             "created_at": utcnow(),
@@ -191,6 +211,55 @@ class MessageProcessingRepository:
                 )
             ).mappings().one()
         return self._outbox(row), created
+
+    def complete_unsupported(
+        self,
+        outbox_id: int,
+        reason: str,
+    ) -> tuple[OutboxMessageRecord, InboundMessageRecord]:
+        """Complete an inbound while preserving a blocked delivery intent."""
+        now = utcnow()
+        with self.engine.begin() as conn:
+            outbox = conn.execute(
+                select(OUTBOX_MESSAGES)
+                .where(OUTBOX_MESSAGES.c.id == outbox_id)
+                .with_for_update()
+            ).mappings().one()
+            if outbox["status"] != OUTBOX_PENDING:
+                raise RuntimeError(
+                    f"Outbox {outbox_id} is {outbox['status']}, not pending"
+                )
+            conn.execute(
+                update(OUTBOX_MESSAGES)
+                .where(OUTBOX_MESSAGES.c.id == outbox_id)
+                .values(
+                    status=OUTBOX_BLOCKED_UNSUPPORTED,
+                    last_error=self._error(reason),
+                )
+            )
+            inbound_id = outbox["inbound_message_id"]
+            conn.execute(
+                update(INBOUND_MESSAGES)
+                .where(INBOUND_MESSAGES.c.id == inbound_id)
+                .values(
+                    status=INBOUND_COMPLETED,
+                    completed_at=now,
+                    locked_at=None,
+                    last_error=None,
+                )
+            )
+            inbound = conn.execute(
+                select(INBOUND_MESSAGES).where(
+                    INBOUND_MESSAGES.c.id == inbound_id
+                )
+            ).mappings().one()
+            self._insert_processed(conn, inbound, now)
+            blocked = conn.execute(
+                select(OUTBOX_MESSAGES).where(
+                    OUTBOX_MESSAGES.c.id == outbox_id
+                )
+            ).mappings().one()
+        return self._outbox(blocked), self._inbound(inbound)
 
     def claim_outbox(
         self,
@@ -253,6 +322,7 @@ class MessageProcessingRepository:
                 raise RuntimeError(
                     f"Outbox {outbox_id} is {outbox['status']}, not sending"
                 )
+            ppv_step = self._ppv_step(conn, outbox)
             conn.execute(
                 update(OUTBOX_MESSAGES)
                 .where(OUTBOX_MESSAGES.c.id == outbox_id)
@@ -281,21 +351,14 @@ class MessageProcessingRepository:
                     == outbox["inbound_message_id"]
                 )
             ).mappings().one()
-            processed = self._insert(PROCESSED_PLATFORM_MESSAGES).values(
-                creator_id=inbound["creator_id"],
-                platform_message_id=inbound["platform_message_id"],
-                fan_id=inbound["fan_id"],
-                chat_id=inbound["chat_id"],
-                processed_at=now,
-            )
-            conn.execute(
-                processed.on_conflict_do_nothing(
-                    index_elements=[
-                        "creator_id",
-                        "platform_message_id",
-                    ]
+            self._insert_processed(conn, inbound, now)
+            if ppv_step is not None:
+                self._mark_ppv_sent(
+                    conn,
+                    outbox=outbox,
+                    step=ppv_step,
+                    sent_at=now,
                 )
-            )
             sent = conn.execute(
                 select(OUTBOX_MESSAGES).where(
                     OUTBOX_MESSAGES.c.id == outbox_id
@@ -329,21 +392,7 @@ class MessageProcessingRepository:
                     last_error=None,
                 )
             )
-            processed = self._insert(PROCESSED_PLATFORM_MESSAGES).values(
-                creator_id=inbound["creator_id"],
-                platform_message_id=inbound["platform_message_id"],
-                fan_id=inbound["fan_id"],
-                chat_id=inbound["chat_id"],
-                processed_at=now,
-            )
-            conn.execute(
-                processed.on_conflict_do_nothing(
-                    index_elements=[
-                        "creator_id",
-                        "platform_message_id",
-                    ]
-                )
-            )
+            self._insert_processed(conn, inbound, now)
             completed = conn.execute(
                 select(INBOUND_MESSAGES).where(
                     INBOUND_MESSAGES.c.id == inbound_id
@@ -596,6 +645,78 @@ class MessageProcessingRepository:
             f"Unsupported database dialect: {self.engine.dialect.name}"
         )
 
+    def _insert_processed(self, conn, inbound, processed_at: datetime) -> None:
+        processed = self._insert(PROCESSED_PLATFORM_MESSAGES).values(
+            creator_id=inbound["creator_id"],
+            platform_message_id=inbound["platform_message_id"],
+            fan_id=inbound["fan_id"],
+            chat_id=inbound["chat_id"],
+            processed_at=processed_at,
+        )
+        conn.execute(
+            processed.on_conflict_do_nothing(
+                index_elements=[
+                    "creator_id",
+                    "platform_message_id",
+                ]
+            )
+        )
+
+    @staticmethod
+    def _ppv_step(conn, outbox):
+        if outbox["message_kind"] != "ppv":
+            return None
+        if (
+            outbox["sequence_id"] is None
+            or outbox["sequence_step_id"] is None
+        ):
+            raise RuntimeError("PPV outbox lacks sequence provenance")
+        step = conn.execute(
+            select(STEPS_TABLE).where(
+                and_(
+                    STEPS_TABLE.c.id == outbox["sequence_step_id"],
+                    STEPS_TABLE.c.sequence_id == outbox["sequence_id"],
+                )
+            )
+        ).mappings().first()
+        if step is None:
+            raise RuntimeError("PPV sequence step does not exist")
+        return step
+
+    def _mark_ppv_sent(
+        self,
+        conn,
+        *,
+        outbox,
+        step,
+        sent_at: datetime,
+    ) -> None:
+        values = {
+            "fan_id": outbox["fan_id"],
+            "sequence_id": outbox["sequence_id"],
+            "creator_id": outbox["creator_id"],
+            "current_step": step["position"] + 1,
+            "status": StepStatus.SENT.value,
+            "last_sent_at": sent_at,
+            "bought_at": None,
+            "started_at": sent_at,
+        }
+        statement = self._insert(PROGRESS_TABLE).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                "fan_id",
+                "sequence_id",
+                "creator_id",
+            ],
+            set_={
+                "current_step": step["position"] + 1,
+                "status": StepStatus.SENT.value,
+                "last_sent_at": sent_at,
+                "bought_at": None,
+            },
+        )
+        conn.execute(statement)
+
     @staticmethod
     def _error(error: str) -> str:
         return str(error).strip()[:2000] or "unknown error"
@@ -626,6 +747,11 @@ class MessageProcessingRepository:
             fan_id=row["fan_id"],
             chat_id=row["chat_id"],
             content=row["content"],
+            message_kind=row["message_kind"],
+            media_ids=tuple(row["media_ids"] or []),
+            price_millis=row["price_millis"],
+            sequence_id=row["sequence_id"],
+            sequence_step_id=row["sequence_step_id"],
             status=row["status"],
             provider_message_id=row["provider_message_id"],
             attempt_count=row["attempt_count"],

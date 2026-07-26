@@ -1,5 +1,5 @@
 """
-Fansly AI Bot Orchestrator — Ties all 17 systems to the apifansly.com API.
+Fansly AI Bot orchestrator for the OnlyFansAPI Fansly product.
 
 This is the main chat loop: poll chats → process messages → send replies.
 Every message flows through the persona, funnel, script, NLP, reciprocity,
@@ -36,16 +36,18 @@ from .analytics.dashboard import KPIDashboard
 from .style.mirror import StyleMirror, StyleProfile
 from .sequences.repository import SequenceRepository
 from .sequences.engine import SequenceEngine
-from .sequences.models import StepStatus
 from .humanize.filter import HumanizerFilter
 from .humanize.variation import VariationPool
+from .messaging.models import OutboundKind, OutboundMessage
 from .messaging.policy import MessageContentPolicy
 from .persistence.pipeline import (
     InboundMessageRecord,
     MessageProcessingRepository,
+    OutboxMessageRecord,
     OUTBOX_PENDING,
     OUTBOX_SENDING,
 )
+from .persistence.purchases import PurchaseRepository
 
 if TYPE_CHECKING:
     from .persistence.state import ConversationStateRepository
@@ -90,6 +92,11 @@ class FanslyBot:
             if state_repo is not None
             else None
         )
+        self.purchase_repo = (
+            PurchaseRepository(state_repo.engine)
+            if state_repo is not None
+            else None
+        )
         self.content_policy = MessageContentPolicy()
         self._runtime_state_versions: dict[str, int] = {}
         self.note_extractor = NoteExtractor(llm_client=None)  # merge() only
@@ -125,11 +132,6 @@ class FanslyBot:
 
         # Bot on/off toggle — poll_and_process() returns early when disabled
         self.enabled = True
-
-        # Track known purchase counts per fan to detect new purchases
-        self._purchase_count_cache: dict[str, int] = {}
-        # Initialize cache from existing fan notes to prevent false advance_level on restart
-        self._init_purchase_cache()
 
         # Message deduplication: track processed message_ids per fan
         # Prevents re-processing messages already handled (fixes C1 bug)
@@ -178,6 +180,7 @@ class FanslyBot:
 
     def _poll_and_process_durable(self, *, max_messages: int) -> bool:
         """Ingest changed chats, then drain the durable inbox oldest-first."""
+        ledger_updates = self._sync_wallet_transactions()
         checkpoint = self.state_repo.get_poll_cursor(
             self.creator_id,
             "changed-chats",
@@ -212,7 +215,53 @@ class FanslyBot:
             processed += 1
             if not terminal:
                 break
-        return bool(ingested or processed)
+        return bool(ledger_updates or ingested or processed)
+
+    def _sync_wallet_transactions(self) -> int:
+        """Persist provider revenue without assigning it to a fan."""
+        capabilities = self.client.capabilities
+        if capabilities.supports_wallet_transactions is not True:
+            return 0
+        checkpoint = self.state_repo.get_poll_cursor(
+            self.creator_id,
+            "wallet-head",
+        )
+        offset: int | None = 0
+        new_head: str | None = None
+        rows = []
+        reached_checkpoint = False
+        try:
+            while offset is not None and not reached_checkpoint:
+                page, offset = self.client.list_wallet_transactions_page(
+                    limit=100,
+                    offset=offset,
+                )
+                if new_head is None and page:
+                    new_head = page[0].transaction_id
+                for transaction in page:
+                    if transaction.transaction_id == checkpoint:
+                        reached_checkpoint = True
+                        break
+                    rows.append(transaction)
+                if checkpoint is None:
+                    # Establish a bounded initial baseline. Historical wallet
+                    # backfill is an explicit operational job, not a surprise
+                    # cost inside the chat polling loop.
+                    break
+            stored = self.purchase_repo.ingest_wallet_transactions(
+                self.creator_id,
+                rows,
+            )
+            if new_head is not None:
+                self.state_repo.set_poll_cursor(
+                    self.creator_id,
+                    "wallet-head",
+                    new_head,
+                )
+            return stored
+        except Exception:
+            logger.exception("Failed to synchronize provider wallet ledger")
+            return 0
 
     def _fetch_incremental_chats(
         self,
@@ -420,21 +469,35 @@ class FanslyBot:
                     ),
                     is_from_fan=True,
                 )
-                approved = self._prepare_message(
+                prepared = self._prepare_message(
                     chat,
                     message,
                     [message],
                 )
                 self._persist_runtime_state(inbound.fan_id)
-                if not approved:
+                if not prepared:
                     self.processing_repo.complete_without_response(
                         inbound.id
                     )
                     return True
+                outbound = self._coerce_outbound(prepared)
                 outbox, _ = self.processing_repo.enqueue_outbox(
                     inbound=inbound,
-                    content=approved,
+                    message=outbound,
                 )
+                unsupported = self._unsupported_reason(outbound)
+                if unsupported:
+                    self.processing_repo.complete_unsupported(
+                        outbox.id,
+                        unsupported,
+                    )
+                    logger.error(
+                        "Blocked unsupported %s delivery for inbound %s: %s",
+                        outbound.kind.value,
+                        inbound.platform_message_id,
+                        unsupported,
+                    )
+                    return True
 
             if outbox.status != OUTBOX_PENDING:
                 return True
@@ -442,10 +505,7 @@ class FanslyBot:
             if sending is None:
                 return False
             try:
-                sent = self.client.send_message(
-                    sending.chat_id,
-                    sending.content,
-                )
+                sent = self._deliver_outbox(sending)
                 if not sent.success or not sent.message_id:
                     raise RuntimeError(
                         "Provider did not confirm a sent message ID"
@@ -496,6 +556,74 @@ class FanslyBot:
             )
             return terminal
 
+    @staticmethod
+    def _coerce_outbound(
+        value: OutboundMessage | str,
+    ) -> OutboundMessage:
+        if isinstance(value, OutboundMessage):
+            return value
+        if isinstance(value, str):
+            return OutboundMessage.text(value)
+        raise TypeError("prepared response must be an outbound message")
+
+    def _unsupported_reason(
+        self,
+        message: OutboundMessage,
+    ) -> str | None:
+        capabilities = self.client.capabilities
+        if (
+            message.kind == OutboundKind.MEDIA
+            and capabilities.supports_free_media_messages is not True
+        ):
+            return "configured provider does not support free media messages"
+        if (
+            message.kind == OutboundKind.PPV
+            and capabilities.supports_paid_messages is not True
+        ):
+            return (
+                "OnlyFansAPI's current Fansly send-message contract does "
+                "not document paid/paywalled messages"
+            )
+        return None
+
+    def _deliver_message(
+        self,
+        chat_id: str,
+        message: OutboundMessage,
+    ):
+        if message.kind == OutboundKind.TEXT:
+            return self.client.send_message(chat_id, message.content)
+        if message.kind == OutboundKind.MEDIA:
+            return self.client.send_message(
+                chat_id,
+                message.content,
+                media_ids=[
+                    {"mediaId": media_id}
+                    for media_id in message.media_ids
+                ],
+            )
+        if len(message.media_ids) != 1:
+            raise ValueError("PPV delivery requires exactly one media ID")
+        return self.client.send_ppv(
+            chat_id=chat_id,
+            content=message.content,
+            media_id=message.media_ids[0],
+            price=message.price_millis / 1000,
+        )
+
+    def _deliver_outbox(self, outbox: OutboxMessageRecord):
+        return self._deliver_message(
+            outbox.chat_id,
+            OutboundMessage(
+                kind=OutboundKind(outbox.message_kind),
+                content=outbox.content,
+                media_ids=outbox.media_ids,
+                price_millis=outbox.price_millis,
+                sequence_id=outbox.sequence_id,
+                sequence_step_id=outbox.sequence_step_id,
+            ),
+        )
+
     def toggle(self, force: Optional[bool] = None) -> bool:
         """Toggle bot on/off. Returns new enabled state.
 
@@ -524,19 +652,20 @@ class FanslyBot:
                 message.message_id,
             ):
                 continue
-            approved = self._prepare_message(chat, message, messages)
-            if approved:
-                sent = self.client.send_message(
-                    chat.chat_id,
-                    approved,
-                )
+            prepared = self._prepare_message(chat, message, messages)
+            if prepared:
+                outbound = self._coerce_outbound(prepared)
+                unsupported = self._unsupported_reason(outbound)
+                if unsupported:
+                    raise RuntimeError(unsupported)
+                sent = self._deliver_message(chat.chat_id, outbound)
                 if not sent.success or not sent.message_id:
                     raise RuntimeError(
                         "Provider did not confirm a sent message ID"
                     )
                 self._record_sent_reply(
                     chat.partner_account_id,
-                    approved,
+                    outbound.content,
                     sent.message_id,
                 )
             self._mark_processed(
@@ -550,7 +679,7 @@ class FanslyBot:
         chat: ChatInfo,
         latest: MessageInfo,
         messages: list[MessageInfo] | None = None,
-    ) -> str | None:
+    ) -> OutboundMessage | None:
         """Load persistent state and produce one policy-approved response."""
         fan_id = chat.partner_account_id
         messages = messages or [latest]
@@ -573,9 +702,6 @@ class FanslyBot:
                 self.sessions[fan_id] = session
                 self._runtime_state_versions[fan_id] = durable_state.version
                 self._extract_counters[fan_id] = durable_state.extract_counter
-                self._purchase_count_cache[fan_id] = (
-                    durable_state.purchase_count_seen
-                )
                 self.rhythm_engines[fan_id] = self.state_repo.restore_rhythm(
                     durable_state
                 )
@@ -636,24 +762,6 @@ class FanslyBot:
 
         # ─── DECISION PIPELINE ───────────────────────────
 
-        # 0. Initialize purchase cache on first contact
-        if fan_id not in self._purchase_count_cache:
-            self._purchase_count_cache[fan_id] = note.purchase_count if note else 0
-
-        # Check if fan made a new purchase since last check
-        purchase_detected = False
-        if note and note.purchase_count > self._purchase_count_cache.get(fan_id, 0):
-            self._purchase_count_cache[fan_id] = note.purchase_count
-            purchase_detected = True
-            # Advance spiral level
-            session.funnel.advance_level()
-            # Mark all active sequences as purchased at current step
-            for seq in self.sequence_repo.list_sequences(active_only=True):
-                progress = self.sequence_repo.get_progress(fan_id, seq.id, self.creator_id)
-                if progress and progress.status == StepStatus.SENT:
-                    self.sequence_engine.mark_purchased(fan_id, seq.id)
-                    logger.info(f"Detected purchase by {fan_id}, advanced sequence + spiral level")
-
         # Check ghosting: if fan hasn't messaged in 48h+, enter warmup
         if session.last_activity and not session.funnel.is_warmup:
             hours_since = (datetime.now(timezone.utc) - session.last_activity).total_seconds() / 3600
@@ -713,8 +821,6 @@ class FanslyBot:
             if risk > 0.6:
                 reply = self._prepare_reengagement(fan_id, risk)
             elif self.reciprocity.is_premium_ready(fan_id):
-                # Phase 6 will attach a typed PPV payload to this same outbox.
-                # Until then, only the approved text offer is delivered.
                 reply = self._prepare_premium_offer(fan_id, note)
             else:
                 # 4. Generate contextual reply based on funnel stage
@@ -723,16 +829,28 @@ class FanslyBot:
                 )
 
         if reply:
+            outbound = self._coerce_outbound(reply)
             # Repair explicit persona phrases before final policy validation.
-            validation = self.validator.validate(reply)
+            validation = self.validator.validate(outbound.content)
             if not validation.passed:
                 logger.warning(
                     f"Persona violation for {fan_id}: {validation.violations}"
                 )
                 # Fix: strip forbidden phrases
                 for phrase in self.persona.forbidden_phrases:
-                    reply = reply.replace(phrase, self.persona.pet_names[0] if self.persona.pet_names else "babe")
-            return self._style_and_approve(fan_id, reply)
+                    outbound = outbound.with_content(
+                        outbound.content.replace(
+                            phrase,
+                            self.persona.pet_names[0]
+                            if self.persona.pet_names
+                            else "babe",
+                        )
+                    )
+            approved = self._style_and_approve(
+                fan_id,
+                outbound.content,
+            )
+            return outbound.with_content(approved) if approved else None
         return None
 
     # ─── REPLY GENERATION ───────────────────────────────
@@ -744,7 +862,7 @@ class FanslyBot:
         message: MessageInfo,
         session: FanSession,
         note: FanNote,
-    ) -> Optional[str]:
+    ) -> OutboundMessage | str | None:
         """Generate a context-aware reply using the full system pipeline."""
         funnel = session.funnel
         context = {
@@ -805,23 +923,35 @@ class FanslyBot:
             return self._generate_push_message(note)
 
         elif funnel.current_stage == SpiralPhase.OFFER:
-            # Select the next offer. Phase 6 will attach PPV media/price as a
-            # typed outbox payload; Phase 5 keeps every send on the text
-            # outbox instead of bypassing it with direct provider calls.
+            # Select the next offer as a typed PPV intent. Provider capability
+            # validation happens before any delivery attempt.
             if funnel.can_send_ppv():
                 result = self.sequence_engine.get_next_ppv(fan_id, "offer", fan_total_spent=note.total_spent if note else 0)
                 if result:
-                    _, step = result
-                    return (
+                    sequence, step = result
+                    if sequence.id is None or step.id is None:
+                        logger.error(
+                            "Cannot prepare PPV without sequence provenance"
+                        )
+                        return None
+                    content = (
                         step.offer_script
                         or step.tease_script
                         or self.variation.pick("push")
                     )
+                    return OutboundMessage.ppv(
+                        content=content,
+                        media_ids=(step.media_id,),
+                        price_millis=int(round(step.price * 1000)),
+                        sequence_id=sequence.id,
+                        sequence_step_id=step.id,
+                    )
 
-                # Fallback to generic script if no sequence configured
-                scripts = self.script_library.get_by_category(ScriptCategory.PPV_SOFT_TEASE)
-                if scripts and len(scripts[0].messages) > 2:
-                    return self.script_engine.resolve(scripts[0], context)[2]
+                logger.warning(
+                    "PPV offer skipped for %s: no configured media sequence",
+                    fan_id,
+                )
+                return None
 
         elif funnel.current_stage == SpiralPhase.HANDLE:
             # Classify objection and route
@@ -927,8 +1057,14 @@ class FanslyBot:
         return self.variation.pick("push")
 
     def _prepare_aftercare(self, fan_id: str) -> str | None:
-        """Prepare aftercare, then loop the durable funnel to rapport."""
-        plan = self.aftercare.trigger_aftercare(50.0, fan_id)  # TODO: get actual amount
+        """Prepare an already-attributed aftercare plan."""
+        plan = self.aftercare.plans.get(fan_id)
+        if plan is None:
+            logger.error(
+                "Aftercare skipped for %s: no attributed purchase plan",
+                fan_id,
+            )
+            return None
         response = (
             self.variation.pick("aftercare")
             if "thanks" in plan.actions
@@ -961,20 +1097,35 @@ class FanslyBot:
         self,
         fan_id: str,
         note: FanNote,
-    ) -> str:
-        """Prepare premium offer text without bypassing the outbox."""
+    ) -> OutboundMessage | None:
+        """Prepare a typed premium intent without bypassing the outbox."""
         result = self.sequence_engine.get_next_ppv(fan_id, "offer", fan_total_spent=note.total_spent if note else 0)
         if result:
-            _, step = result
+            sequence, step = result
             if step.price >= 25 or step.offer_script:
+                if sequence.id is None or step.id is None:
+                    logger.error(
+                        "Cannot prepare premium PPV without provenance"
+                    )
+                    return None
                 self.reciprocity.mark_premium_pitched(fan_id)
-                return (
+                content = (
                     step.offer_script
                     or step.tease_script
                     or self.variation.pick("premium_ppv")
                 )
-        self.reciprocity.mark_premium_pitched(fan_id)
-        return self.variation.pick("premium_ppv")
+                return OutboundMessage.ppv(
+                    content=content,
+                    media_ids=(step.media_id,),
+                    price_millis=int(round(step.price * 1000)),
+                    sequence_id=sequence.id,
+                    sequence_step_id=step.id,
+                )
+        logger.warning(
+            "Premium offer skipped for %s: no attributable PPV sequence",
+            fan_id,
+        )
+        return None
 
     def _days_since_last_purchase(self, note: Optional[FanNote]) -> int:
         if not note or not note.last_purchase_at:
@@ -983,28 +1134,13 @@ class FanslyBot:
         delta = datetime.now(timezone.utc) - note.last_purchase_at
         return delta.days
 
+    def _init_purchase_cache(self) -> None:
+        """Deprecated compatibility hook; purchases are provider-event driven."""
+        return None
+
     def _has_classified(self, fan_id: str) -> bool:
         note = self.note_repo.get(fan_id, self.creator_id)
         return note is not None and note.relationship_stage.startswith("classified_")
-
-    def _init_purchase_cache(self):
-        """Initialize purchase_count cache from all stored fan notes.
-        Prevents false advance_level() on bot restart."""
-        try:
-            from .notes.repository import FAN_NOTES_TABLE, _row_to_note
-            with self.note_repo.engine.connect() as c:
-                rows = c.execute(
-                    FAN_NOTES_TABLE.select().where(FAN_NOTES_TABLE.c.creator_id == self.creator_id)
-                ).fetchall()
-            for row in rows:
-                try:
-                    note = _row_to_note(row)
-                    self._purchase_count_cache[note.fan_id] = note.purchase_count
-                except Exception:
-                    pass
-            logger.info(f"Purchase cache initialized with {len(self._purchase_count_cache)} fans")
-        except Exception as e:
-            logger.warning(f"Could not initialize purchase cache: {e}")
 
     # ─── MESSAGE DEDUPLICATION ──────────────────────────
 
@@ -1049,11 +1185,35 @@ class FanslyBot:
         if session is None:
             return
         try:
+            current = self.state_repo.load_state(
+                self.creator_id,
+                fan_id,
+            )
+            if current is not None:
+                known_version = self._runtime_state_versions.get(fan_id)
+                if (
+                    known_version is not None
+                    and current.version != known_version
+                ):
+                    session.funnel.level.number = max(
+                        session.funnel.level.number,
+                        current.escalation_level,
+                    )
+                    session.funnel.level.ppvs_bought = max(
+                        session.funnel.level.ppvs_bought,
+                        current.ppvs_bought,
+                    )
+                    session.funnel.consecutive_rejections = (
+                        current.consecutive_rejections
+                    )
+                self._runtime_state_versions[fan_id] = current.version
             rhythm = self.rhythm_engines.get(fan_id)
             state = self.state_repo.capture_session(
                 session,
                 extract_counter=self._extract_counters.get(fan_id, 0),
-                purchase_count_seen=self._purchase_count_cache.get(fan_id, 0),
+                purchase_count_seen=(
+                    current.purchase_count_seen if current else 0
+                ),
                 rhythm=rhythm,
                 version=self._runtime_state_versions.get(fan_id, 1),
             )

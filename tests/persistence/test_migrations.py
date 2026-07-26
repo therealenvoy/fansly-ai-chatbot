@@ -75,4 +75,7 @@ def test_postgresql_offline_upgrade_compiles_without_sqlite_types():
     assert "CREATE TABLE inbound_messages" in sql
     assert "BIGSERIAL" in sql
     assert "CREATE TABLE fan_runtime_states" in sql
+    assert "ALTER TABLE outbox_messages ADD COLUMN message_kind" in sql
+    assert "CREATE TABLE provider_wallet_transactions" in sql
+    assert "CREATE TABLE purchase_events" in sql
     assert "JSON NOT NULL" in sql

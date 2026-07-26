@@ -1,8 +1,9 @@
-"""Fansly API Client — integration layer between apifansly.com and our 17-system chatbot.
+"""Provider-neutral Fansly contracts and retired compatibility client.
 
-Base URL: https://v1.apifansly.com/api/fansly
-Auth: x-api-key header
-Docs: https://docs.apifansly.com
+The application runtime is built only through ``src.client_factory`` and uses
+OnlyFansAPI's Fansly product. ``ApifanslyClient`` remains temporarily for
+legacy tests and is not selectable by application configuration; Phase 8
+removes that compatibility implementation.
 """
 
 import os
@@ -39,8 +40,36 @@ class AuthError(FanslyClientError):
 
 # ─── Abstract API Client Interface ───────────────────────────
 
+class UnsupportedProviderFeature(FanslyClientError):
+    """The configured provider does not document the requested capability."""
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    supports_free_media_messages: bool = False
+    supports_paid_messages: bool = False
+    supports_attributed_purchases: bool = False
+    supports_wallet_transactions: bool = False
+
+
+@dataclass(frozen=True)
+class WalletTransaction:
+    transaction_id: str
+    transaction_type: int
+    destination: str
+    amount_millis: int
+    destination_tax_millis: int
+    new_balance_millis: int
+    created_at: float
+    status: int
+
+
 class FanslyApiClient(ABC):
     """Abstract interface for a Fansly API provider. Bot code depends only on this."""
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities()
 
     @property
     @abstractmethod
@@ -110,6 +139,16 @@ class FanslyApiClient(ABC):
     def get_album_media(
         self, album_id: str, cursor: Optional[str] = None
     ) -> tuple[list[dict], Optional[str]]: ...
+
+    def list_wallet_transactions_page(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[WalletTransaction], Optional[int]]:
+        raise UnsupportedProviderFeature(
+            "Wallet transactions are not supported by this provider"
+        )
 
     @abstractmethod
     def close(self): ...

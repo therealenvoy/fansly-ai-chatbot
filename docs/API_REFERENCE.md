@@ -1,214 +1,98 @@
-# apifansly.com API — Complete Reference for Fansly AI Chatbot
+# OnlyFansAPI Fansly contract
 
-> Last updated: 2026-07-24 · Docs: https://docs.apifansly.com
+This project sends all Fansly traffic through OnlyFansAPI's Fansly product.
+Do not use the retired `v1.apifansly.com` endpoints, `x-api-key` authentication,
+or their request/response shapes.
 
-## Quick Reference
+Canonical documentation:
 
-- **Base URL:** `https://v1.apifansly.com/api/fansly`
-- **Auth Header:** `x-api-key: YOUR_API_KEY`
-- **Content-Type:** `application/json`
-- **Response Format:** `{statusCode, message, data, timestamp}`
+- https://docs.onlyfansapi.com/api-reference/fansly
+- https://docs.onlyfansapi.com/api-reference/fansly/chats/list-chats
+- https://docs.onlyfansapi.com/api-reference/fansly/chat-messages/send-chat-message
+- https://docs.onlyfansapi.com/api-reference/fansly/media/upload-media
+- https://docs.onlyfansapi.com/api-reference/fansly/earnings/list-wallet-transactions
 
-## Plans
+The Fansly surface is currently closed beta and may change. Verify the current
+documentation before adding or changing a provider request.
 
-| Plan | Price | Accounts | Credits/Mo | RPM |
-|------|-------|----------|------------|-----|
-| Free | $0 | 1 | 30 | 100 |
-| Starter | $49 | 2 | 24,000 | 600 |
-| Pro | $129 | 5 | 60,000 | 1,000 |
-| Enterprise | Custom | Custom | Custom | Unlimited |
+## Connection
 
-## Credit System
-- 1 Standard Request = 1 Credit
-- 1 Media MB = 2 Credits
-- 80 Webhook Events = 1 Credit
-- Every 80KB of response data = 1 Credit
-- Monthly reset, no rollover
+- Base URL: `https://app.onlyfansapi.com`
+- Authentication: `Authorization: Bearer <FANSLY_API_KEY>`
+- Account IDs are resolved from `GET /api/fansly/accounts`.
+- Fansly account IDs use the `fansly_acct_` form.
 
-## Rate Limits
-- Per-minute sliding window
-- Response headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Plan`, `X-RateLimit-Retry-After`
-- 429 on exceed → implement exponential backoff
+## Chats
 
----
-
-## MESSAGING ENDPOINTS (Critical for Bot)
-
-### List Chats
+```text
+GET /api/fansly/{fanslyAccount}/chats
 ```
-GET /{account_id}/chats?filter=all&sort=newest&cursor=NEXT_CURSOR&search=QUERY&subscriptionTierId=TIER_ID
-```
-Query params: `filter` (all/vips/followers/subscribers), `sort` (newest/oldest/unread), `cursor`, `search`, `subscriptionTierId`
 
-Response highlights: `data.data.response.data[].groupId` (this is your chat_id), `.partnerUsername`, `.unreadCount`, `.lastMessageId`, `.aggregationData.accounts[].displayName`, `.avatar`
+Supported query fields used by the bot:
 
-### List Chat Messages
-```
-GET /{account_id}/chats/{chat_id}/messages?limit=10&cursor=CURSOR
-```
-`limit`: min 1, max 10. `cursor`: for pagination (found at `response.cursor`)
+- `limit`: 1-100
+- `offset`: non-negative pagination offset
+- `order`: `newest`, `oldest`, or `unread`
 
-Response highlights: `messages[].id`, `.content`, `.senderId`, `.createdAt` (unix), `.attachments`, `.totalTipAmount`, `accountMedia[].price`, `.access` (bool), `.media.locations[].location` (CDN URL)
+Important response fields:
 
-### Send Message (THE KEY ENDPOINT)
+- `data.data[].groupId`
+- `partnerAccountId`
+- `unreadCount`
+- `lastMessageId`
+- `lastUnreadMessageId`
+- `data.hasMore`
+
+## Chat messages
+
+```text
+GET /api/fansly/{fanslyAccount}/chats/{chat_id}/messages
+POST /api/fansly/{fanslyAccount}/chats/{chat_id}/messages
 ```
-POST /{account_id}/chats/{chat_id}/messages
-```
-Body:
+
+The documented send body supports:
+
 ```json
 {
-  "content": "Message text here",
-  "mediaIds": [{"mediaId": "MEDIA_ID", "previewId": null}],
-  "access_type": ["ppv"],
-  "price": 15.00
+  "text": "Message text",
+  "mediaFiles": ["fansly_media_..."],
+  "replyToMessageId": "optional-message-id"
 }
 ```
 
-**Media Permissions:** `access_type` can be: `ppv`, `subscription`, `follow`, `list`, `limited_time` (single string or array)
-- `price`: dollar amount for PPV
-- `subscriptionTierId` / `subscriptionTierName`: for tier-locked
-- `listId` / `listLabel`: for list-restricted
-- `validBefore` / `validAfter`: epoch timestamps for time-limited
-- `permissions[]`: array of custom rules — OR'd together (fan needs to satisfy ANY one rule)
+`mediaFiles` must contain `fansly_media_` IDs from the Fansly upload endpoint.
 
-**PPV limits:** Max $200 per message on Fansly platform.
+The current documented Fansly send body does **not** expose price, paywall,
+`requirePurchase`, access-rule, or preview fields. The implementation therefore
+rejects paid/PPV sends before making an HTTP request. It must not borrow the
+OnlyFans product's PPV fields or the retired apifansly.com request shape.
 
-**Response:** `201 Created` with message ID, timestamps, attachment details
+## Media upload
 
-### Like Message
-```
-POST /{account_id}/chats/{chat_id}/messages/{message_id}/like
+```text
+POST /api/fansly/{fanslyAccount}/media/upload
 ```
 
----
+Provide exactly one of `file` or `file_url`. The synchronous response returns a
+reusable `prefixed_id` beginning with `fansly_media_`. Large asynchronous
+uploads return a polling URL and require a separate completion workflow.
 
-## EARNINGS ENDPOINTS
+## Wallet ledger
 
-### Earning Statistics
-```
-GET /{account_id}/earnings
-```
-Response: `{pendingBalance: 529}` (in dollars)
-
-### List Transactions
-```
-GET /{account_id}/earnings/transactions?before=TIMESTAMP_MS&after=TIMESTAMP_MS&limit=20&offset=0
+```text
+GET /api/fansly/{fanslyAccount}/earnings/transactions
 ```
 
-### Fan Earnings (LTV tracking!)
-```
-GET /{account_id}/earnings/fans/{fan_id}
-```
-Response: `[{year, month, totalGross, totalNet}]` — monthly breakdown
+The endpoint accepts `limit` (1-100) and `offset`. It returns transaction IDs,
+type codes, millidollar amounts, balances, statuses, and timestamps.
 
----
+The documented row does not identify a fan or purchased message. Wallet rows
+are therefore stored as aggregate provider transactions and never used to:
 
-## MEDIA ENDPOINTS
+- increment a fan's purchase count;
+- advance a PPV sequence;
+- trigger aftercare;
+- claim that a particular fan unlocked a message.
 
-### Upload Media (2-step)
-**Step 1:** `POST /{accountId}/media/upload` (multipart/form-data, field: `file`)
-→ Returns `{jobId}`
-
-**Step 2:** `GET /media/upload/{jobId}/status`
-→ Poll until `state: "completed"`, then grab `result.mediaId`
-
-### Download Media
-```
-POST /media/download
-Body: {"cdnUrl": "https://cdn3.fansly.com/..."}
-```
-→ Returns raw binary (stream for large files, 60-120s timeout for video)
-
----
-
-## VAULT ENDPOINTS
-
-### List Albums
-```
-GET /{accountId}/vault/albums
-```
-Response: `{albums: [{id, title, itemCount, type, ...}]}`
-
-### Get Album Media
-```
-GET /{accountId}/vault/albums/{albumId}/media?cursor=CURSOR
-```
-Response: array of media items with `mediaId`, `previewId`, `price`, `media.locations[]`
-
----
-
-## ANALYTICS ENDPOINTS
-
-### Profile Statistics
-```
-GET /{accountId}/analytics/profilestats?beforeDate=MS&afterDate=MS&period=86400000&year=2026&month=7
-```
-Covers: media views, avg engagement time, unique viewers, profile visits, traffic sources, FYP tags, top media
-
-### Media Statistics
-```
-GET /{accountId}/analytics/media/{mediaOfferId}?beforeDate=&afterDate=&period=
-```
-
----
-
-## WEBHOOKS
-- Register URL in Developer Console
-- Receives POST with JSON event payload
-- Must validate cryptographic signature
-- Return 200 OK promptly
-- Events: new messages, subscriptions, tips, purchases
-
----
-
-## MESSAGE FORMATTING
-- **NO markdown** — `**bold**`, `*italic*` render as raw text
-- Plain text + emojis ✅
-- Hashtags `#tag` → auto-linked
-- URLs → auto-linked
-- Line breaks: `\n`
-- Unicode bold/italic generators work (e.g., `𝗧𝗵𝗶𝘀`, `𝘛𝘩𝘪𝘴`)
-
----
-
-## ACCOUNT CONNECTION
-- Automated login via [Fansly API Console → Accounts](https://app.apifansly.com/accounts)
-- Enter email + password + proxy country
-- Supports 2FA (prompted during connection)
-- Each connected account gets an `account_id`
-
----
-
-## ERROR CODES
-| Code | Meaning |
-|------|---------|
-| 200 | Success |
-| 201 | Created |
-| 400 | Bad Request |
-| 401 | Unauthorized (bad API key) |
-| 403 | Forbidden |
-| 404 | Not Found |
-| 429 | Rate Limited |
-
----
-
-## BOT INTEGRATION NOTES
-
-### Chat Loop:
-1. `GET /{account_id}/chats?filter=all&sort=newest` → get all chats
-2. `GET /{account_id}/chats/{chat_id}/messages?limit=10` → read last 10 messages per chat
-3. Process messages through our 17-system pipeline (persona, funnel, scripts, NLP, etc.)
-4. `POST /{account_id}/chats/{chat_id}/messages` → send reply (text only or with PPV media)
-
-### Sending PPV:
-1. Upload media → `POST /media/upload` → poll status → get `mediaId`
-2. Send message with `mediaIds`, `access_type: ["ppv"]`, `price: X.XX`
-
-### Fan LTV Tracking:
-- Use `GET /{account_id}/earnings/fans/{fan_id}` to get per-fan earnings
-- Feed into our `FanNote.total_spent` and `TierClassifier`
-
-### Rate Limit Safety:
-- Pro plan: 1000 RPM = ~16 req/sec → safe for real-time chat
-- Batch list-chats every 30s, not every message
-- Cache chat lists and fan notes between polls
+An attributed purchase requires a separate verified event containing the fan
+ID and exact provider message ID.

@@ -1,3 +1,8 @@
+> **Superseded:** This historical plan guessed paid-message fields that are
+> not present in the current OnlyFansAPI Fansly contract. Use
+> `docs/API_REFERENCE.md` and `docs/PURCHASE_AND_PPV.md` as the authoritative
+> integration contract.
+
 # Fansly API Provider Switch Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

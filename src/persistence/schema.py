@@ -161,6 +161,11 @@ OUTBOX_MESSAGES = Table(
     Column("fan_id", String(128), nullable=False),
     Column("chat_id", String(128), nullable=False),
     Column("content", Text, nullable=False),
+    Column("message_kind", String(32), nullable=False, default="text"),
+    Column("media_ids", JSON, nullable=False, default=list),
+    Column("price_millis", Integer, nullable=True),
+    Column("sequence_id", Integer, nullable=True),
+    Column("sequence_step_id", Integer, nullable=True),
     Column("status", String(32), nullable=False, default="pending"),
     Column("provider_message_id", String(128), nullable=True),
     Column("attempt_count", Integer, nullable=False, default=0),
@@ -172,6 +177,51 @@ OUTBOX_MESSAGES = Table(
         "creator_id",
         "provider_message_id",
         name="uq_outbox_creator_provider_message",
+    ),
+)
+
+PROVIDER_WALLET_TRANSACTIONS = Table(
+    "provider_wallet_transactions",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("provider_transaction_id", String(128), primary_key=True),
+    Column("transaction_type", Integer, nullable=False),
+    Column("destination", String(64), nullable=False),
+    Column("amount_millis", BigInteger, nullable=False),
+    Column("destination_tax_millis", BigInteger, nullable=False),
+    Column("new_balance_millis", BigInteger, nullable=False),
+    Column("provider_created_at", DateTime(timezone=True), nullable=False),
+    Column("provider_status", Integer, nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+PURCHASE_EVENTS = Table(
+    "purchase_events",
+    metadata,
+    Column(
+        "id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("provider_purchase_id", String(128), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column(
+        "outbox_message_id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("outbox_messages.id"),
+        nullable=False,
+    ),
+    Column("provider_message_id", String(128), nullable=False),
+    Column("amount_millis", BigInteger, nullable=False),
+    Column("source", String(64), nullable=False),
+    Column("provider_created_at", DateTime(timezone=True), nullable=False),
+    Column("applied_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "creator_id",
+        "provider_purchase_id",
+        name="uq_purchase_creator_provider_purchase",
     ),
 )
 
@@ -188,4 +238,15 @@ Index(
     OUTBOX_MESSAGES.c.status,
     OUTBOX_MESSAGES.c.created_at,
     OUTBOX_MESSAGES.c.id,
+)
+Index(
+    "ix_wallet_transaction_time",
+    PROVIDER_WALLET_TRANSACTIONS.c.creator_id,
+    PROVIDER_WALLET_TRANSACTIONS.c.provider_created_at,
+)
+Index(
+    "ix_purchase_fan_time",
+    PURCHASE_EVENTS.c.creator_id,
+    PURCHASE_EVENTS.c.fan_id,
+    PURCHASE_EVENTS.c.provider_created_at,
 )

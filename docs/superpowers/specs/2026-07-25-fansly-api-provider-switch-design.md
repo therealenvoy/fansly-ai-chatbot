@@ -1,3 +1,8 @@
+> **Superseded:** This historical design guessed paid-message fields that are
+> not present in the current OnlyFansAPI Fansly contract. Use
+> `docs/API_REFERENCE.md` and `docs/PURCHASE_AND_PPV.md` as the authoritative
+> integration contract.
+
 # Design: Switch Fansly API Provider (apifansly.com → OnlyFansAPI's Fansly API)
 
 ## Objective

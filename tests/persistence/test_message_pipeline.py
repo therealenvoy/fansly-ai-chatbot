@@ -5,6 +5,8 @@ from sqlalchemy import select
 
 from src.bot import FanslyBot
 from src.fansly_client import ChatInfo, FanslyApiClient, MessageInfo
+from src.fansly_client import ProviderCapabilities, WalletTransaction
+from src.messaging.models import OutboundMessage
 from src.notes.repository import FanNoteRepository
 from src.persistence.database import create_database_engine
 from src.persistence.pipeline import MessageProcessingRepository
@@ -253,3 +255,96 @@ def test_uncertain_provider_failure_is_never_automatically_retried():
     assert bot.poll_and_process() is False
     bot._prepare_message.assert_not_called()
     assert bot.client.send_message.call_count == 1
+
+
+def test_unsupported_ppv_intent_is_preserved_but_never_sent():
+    engine, bot = _bot()
+    bot.client.capabilities = ProviderCapabilities(
+        supports_free_media_messages=True,
+        supports_paid_messages=False,
+        supports_wallet_transactions=False,
+    )
+    chat = _chat(unread_count=1, last_message_id="message-1")
+    bot.client.list_chats_page.return_value = ([chat], None)
+    bot.client.list_messages.return_value = ([_message(1)], None)
+    bot._prepare_message = MagicMock(
+        return_value=OutboundMessage.ppv(
+            content="unlock",
+            media_ids=("fansly_media_1",),
+            price_millis=10_000,
+            sequence_id=1,
+            sequence_step_id=1,
+        )
+    )
+
+    assert bot.poll_and_process() is True
+
+    bot.client.send_message.assert_not_called()
+    bot.client.send_ppv.assert_not_called()
+    inbound = _rows(engine, INBOUND_MESSAGES)[0]
+    outbox = _rows(engine, OUTBOX_MESSAGES)[0]
+    assert inbound["status"] == "completed"
+    assert outbox["status"] == "blocked_unsupported"
+    assert outbox["message_kind"] == "ppv"
+    assert outbox["media_ids"] == ["fansly_media_1"]
+    assert outbox["price_millis"] == 10_000
+
+
+def test_documented_free_media_delivery_uses_the_same_outbox():
+    engine, bot = _bot()
+    bot.client.capabilities = ProviderCapabilities(
+        supports_free_media_messages=True,
+    )
+    chat = _chat(unread_count=1, last_message_id="message-1")
+    bot.client.list_chats_page.return_value = ([chat], None)
+    bot.client.list_messages.return_value = ([_message(1)], None)
+    bot._prepare_message = MagicMock(
+        return_value=OutboundMessage.media(
+            "look",
+            ("fansly_media_1",),
+        )
+    )
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="provider-media-1",
+    )
+
+    assert bot.poll_and_process() is True
+
+    bot.client.send_message.assert_called_once_with(
+        "chat-a",
+        "look",
+        media_ids=[{"mediaId": "fansly_media_1"}],
+    )
+    outbox = _rows(engine, OUTBOX_MESSAGES)[0]
+    assert outbox["status"] == "sent"
+    assert outbox["message_kind"] == "media"
+    assert outbox["provider_message_id"] == "provider-media-1"
+
+
+def test_wallet_sync_is_idempotent_and_does_not_invent_a_buyer():
+    engine, bot = _bot()
+    bot.client.capabilities = ProviderCapabilities(
+        supports_wallet_transactions=True,
+    )
+    transaction = WalletTransaction(
+        transaction_id="wallet-1",
+        transaction_type=2116,
+        destination="wallet",
+        amount_millis=5000,
+        destination_tax_millis=1000,
+        new_balance_millis=105000,
+        created_at=1780444800000,
+        status=1,
+    )
+    bot.client.list_wallet_transactions_page.return_value = (
+        [transaction],
+        None,
+    )
+    bot.client.list_chats_page.return_value = ([], None)
+
+    assert bot.poll_and_process() is True
+    assert bot.purchase_repo.count_wallet_transactions("creator-a") == 1
+    assert bot.purchase_repo.count_purchase_events("creator-a") == 0
+    assert bot.poll_and_process() is False
+    assert bot.purchase_repo.count_wallet_transactions("creator-a") == 1

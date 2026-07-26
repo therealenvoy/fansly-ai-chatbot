@@ -18,11 +18,14 @@ twice.
    rows so multiple workers cannot reorder sends.
 7. Load the fan's persistent session and validate inbound content.
 8. Generate, humanize, style, and validate one response.
-9. Insert that approved response into `outbox_messages`. There can be only one
+9. Insert that approved typed response into `outbox_messages`, including its
+   kind, media IDs, price, and sequence provenance. There can be only one
    outbox row per inbound row.
 10. Commit the outbox status as `sending`, then call the provider exactly once.
 11. Atomically store the returned provider message ID, mark the outbox `sent`,
     mark the inbound `completed`, and insert the processed-message marker.
+    A supported PPV also moves only its exact sequence step to `sent` in this
+    transaction.
 
 The first scan of a conversation with no local checkpoint processes only the
 newest `unreadCount` fan messages. A first-seen chat with no unread messages
@@ -40,6 +43,8 @@ establishes a baseline and does not reply to historical content.
 - `delivery_unknown` requires manual provider-history reconciliation. This is
   deliberate: the provider may have accepted the request before the client
   timed out, so retrying could send a duplicate.
+- A typed PPV intent on a provider without documented paid-message support is
+  stored as `blocked_unsupported`; no provider request is made.
 
 ## Provider contract
 
@@ -61,6 +66,7 @@ The focused tests are:
 python -m pytest -q tests/persistence/test_pipeline.py
 python -m pytest -q tests/persistence/test_message_pipeline.py
 python -m pytest -q tests/messaging/test_policy.py
+python -m pytest -q tests/persistence/test_purchases.py
 ```
 
 The full test suite must also pass before publishing or deploying.

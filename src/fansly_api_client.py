@@ -4,9 +4,9 @@ Base URL: https://app.onlyfansapi.com
 Auth: Authorization: Bearer <token>
 Docs: https://docs.onlyfansapi.com/api-reference/fansly (closed beta)
 
-Confirmed gaps in this closed beta: no vault/album endpoints, no earnings
-endpoints. Methods for those raise NotImplementedError rather than
-silently returning empty data.
+Confirmed gaps in this closed beta: no vault/album endpoints, no documented
+paid-message fields, and wallet transactions have no fan/message attribution.
+Unsupported operations fail closed rather than fabricating provider behavior.
 """
 
 import logging
@@ -22,6 +22,9 @@ from .fansly_client import (
     AuthError,
     PaymentRequiredError,
     NotFoundError,
+    ProviderCapabilities,
+    UnsupportedProviderFeature,
+    WalletTransaction,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,6 +46,15 @@ class FanslyApiClientImpl(FanslyApiClient):
             base_url=BASE_URL,
             headers=headers,
             timeout=timeout,
+        )
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            supports_free_media_messages=True,
+            supports_paid_messages=False,
+            supports_attributed_purchases=False,
+            supports_wallet_transactions=True,
         )
 
     @property
@@ -199,9 +211,27 @@ class FanslyApiClientImpl(FanslyApiClient):
         access_type: Optional[list[str]] = None,
         price: Optional[float] = None,
     ) -> SentMessage:
+        if price is not None or access_type:
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI's documented Fansly send endpoint does not "
+                "currently expose price or access/paywall fields"
+            )
+        if not content.strip() and not media_ids:
+            raise ValueError(
+                "Fansly messages require text, at least one media ID, or both"
+            )
         body = {"text": content}
         if media_ids:
-            body["mediaFiles"] = [m["mediaId"] for m in media_ids]
+            ids = [m["mediaId"] for m in media_ids]
+            if any(
+                not isinstance(media_id, str)
+                or not media_id.startswith("fansly_media_")
+                for media_id in ids
+            ):
+                raise ValueError(
+                    "Fansly media messages require fansly_media_ upload IDs"
+                )
+            body["mediaFiles"] = ids
 
         data = self._request(
             "POST", f"/api/fansly/{self.account_id}/chats/{chat_id}/messages", json=body
@@ -222,24 +252,48 @@ class FanslyApiClientImpl(FanslyApiClient):
         price: float,
         preview_id: Optional[str] = None,
     ) -> SentMessage:
-        body = {
-            "text": content,
-            "mediaFiles": [media_id],
-            "requirePurchase": True,
-            "price": int(round(price * 1000)),  # dollars -> millidollars
-        }
-        if preview_id:
-            body["previews"] = {media_id: preview_id}
-
-        data = self._request(
-            "POST", f"/api/fansly/{self.account_id}/chats/{chat_id}/messages", json=body
+        raise UnsupportedProviderFeature(
+            "Paid Fansly chat messages are not present in the current "
+            "OnlyFansAPI Fansly send-message contract"
         )
-        msg = data.get("data", {})
-        return SentMessage(
-            message_id=msg["id"],
-            content=msg.get("content", ""),
-            created_at=msg.get("createdAt", 0),
-            success=True,
+
+    def list_wallet_transactions_page(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[WalletTransaction], Optional[int]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("limit must be between 1 and 100")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        payload = self._request(
+            "GET",
+            f"/api/fansly/{self.account_id}/earnings/transactions",
+            params={"limit": limit, "offset": offset},
+        )
+        inner = payload.get("data", {})
+        rows = inner.get("data", [])
+        transactions = [
+            WalletTransaction(
+                transaction_id=str(row["transactionId"]),
+                transaction_type=int(row["type"]),
+                destination=str(row.get("destination", "")),
+                amount_millis=int(row.get("amount", 0)),
+                destination_tax_millis=int(
+                    row.get("destinationTax", 0)
+                ),
+                new_balance_millis=int(row.get("newBalance", 0)),
+                created_at=float(row.get("createdAt", 0)),
+                status=int(row.get("status", 0)),
+            )
+            for row in rows
+        ]
+        total = int(inner.get("total", len(rows)))
+        next_offset = offset + len(rows)
+        return (
+            transactions,
+            next_offset if rows and next_offset < total else None,
         )
 
     def like_message(self, chat_id: str, message_id: str) -> bool:

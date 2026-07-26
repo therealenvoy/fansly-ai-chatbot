@@ -8,7 +8,12 @@ import pytest
 import httpx
 from unittest.mock import MagicMock
 
-from src.fansly_client import FanslyApiClient, AuthError, PaymentRequiredError
+from src.fansly_client import (
+    AuthError,
+    FanslyApiClient,
+    PaymentRequiredError,
+    UnsupportedProviderFeature,
+)
 from src.fansly_api_client import FanslyApiClientImpl
 
 
@@ -108,11 +113,49 @@ UPLOAD_MEDIA_BODY = {
     "credits_used": 1,
 }
 
+WALLET_TRANSACTIONS_BODY = {
+    "data": {
+        "total": 2,
+        "data": [
+            {
+                "transactionId": "500000000000000001",
+                "type": 2116,
+                "destination": "wallet",
+                "amount": 5000,
+                "destinationTax": 1000,
+                "newBalance": 105000,
+                "createdAt": 1780444800000,
+                "status": 1,
+            },
+            {
+                "transactionId": "500000000000000002",
+                "type": 15001,
+                "destination": "wallet",
+                "amount": 10000,
+                "destinationTax": 2000,
+                "newBalance": 115000,
+                "createdAt": 1780444900000,
+                "status": 1,
+            },
+        ],
+    }
+}
+
 
 class TestFanslyApiClientImplIsAFanslyApiClient:
     def test_is_instance_of_abc(self):
         client = FanslyApiClientImpl(api_key="sk_test")
         assert isinstance(client, FanslyApiClient)
+
+    def test_capabilities_match_documented_fansly_surface(self):
+        capabilities = FanslyApiClientImpl(
+            api_key="sk_test"
+        ).capabilities
+
+        assert capabilities.supports_free_media_messages is True
+        assert capabilities.supports_paid_messages is False
+        assert capabilities.supports_attributed_purchases is False
+        assert capabilities.supports_wallet_transactions is True
 
 
 class TestAccountIdResolution:
@@ -228,32 +271,93 @@ class TestSendMessage:
         sent_body = client.client.request.call_args.kwargs["json"]
         assert sent_body["text"] == "Hey there!"
 
-
-class TestSendPpv:
-    def test_sends_ppv_with_millidollar_price(self):
+    def test_sends_documented_free_media_message(self):
         client = FanslyApiClientImpl(api_key="sk_test")
         client._account_id = "fansly_acct_123"
-        client.client.request = MagicMock(return_value=_resp(SEND_MESSAGE_BODY))
-
-        client.send_ppv("200000000000000001", "unlock this", "fansly_media_123", price=10.0)
-
-        sent_body = client.client.request.call_args.kwargs["json"]
-        assert sent_body["mediaFiles"] == ["fansly_media_123"]
-        assert sent_body["requirePurchase"] is True
-        assert sent_body["price"] == 10000  # $10.00 -> 10000 millidollars
-
-    def test_sends_ppv_with_preview(self):
-        client = FanslyApiClientImpl(api_key="sk_test")
-        client._account_id = "fansly_acct_123"
-        client.client.request = MagicMock(return_value=_resp(SEND_MESSAGE_BODY))
-
-        client.send_ppv(
-            "200000000000000001", "unlock", "fansly_media_123",
-            price=5.0, preview_id="fansly_media_preview_1",
+        client.client.request = MagicMock(
+            return_value=_resp(SEND_MESSAGE_BODY)
         )
 
-        sent_body = client.client.request.call_args.kwargs["json"]
-        assert sent_body["previews"] == {"fansly_media_123": "fansly_media_preview_1"}
+        client.send_message(
+            "200000000000000001",
+            "look",
+            media_ids=[{"mediaId": "fansly_media_123"}],
+        )
+
+        assert client.client.request.call_args.kwargs["json"] == {
+            "text": "look",
+            "mediaFiles": ["fansly_media_123"],
+        }
+
+    def test_rejects_undocumented_paywall_fields_without_request(self):
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock()
+
+        with pytest.raises(UnsupportedProviderFeature):
+            client.send_message(
+                "200000000000000001",
+                "unlock",
+                access_type=["ppv"],
+                price=10.0,
+            )
+
+        client.client.request.assert_not_called()
+
+
+class TestSendPpv:
+    def test_fails_closed_because_paid_send_is_not_documented(self):
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock()
+
+        with pytest.raises(UnsupportedProviderFeature):
+            client.send_ppv(
+                "200000000000000001",
+                "unlock this",
+                "fansly_media_123",
+                price=10.0,
+            )
+
+        client.client.request.assert_not_called()
+
+    def test_rejects_empty_message_without_request(self):
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock()
+
+        with pytest.raises(ValueError, match="require text"):
+            client.send_message(
+                "200000000000000001",
+                "  ",
+            )
+
+        client.client.request.assert_not_called()
+
+
+class TestWalletTransactions:
+    def test_parses_documented_wallet_ledger_without_fan_attribution(self):
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock(
+            return_value=_resp(WALLET_TRANSACTIONS_BODY)
+        )
+
+        transactions, next_offset = (
+            client.list_wallet_transactions_page(limit=100, offset=0)
+        )
+
+        assert next_offset is None
+        assert [row.transaction_id for row in transactions] == [
+            "500000000000000001",
+            "500000000000000002",
+        ]
+        assert transactions[0].amount_millis == 5000
+        assert transactions[0].transaction_type == 2116
+        assert client.client.request.call_args.kwargs["params"] == {
+            "limit": 100,
+            "offset": 0,
+        }
 
 
 class TestLikeMessage:
