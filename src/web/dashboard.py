@@ -23,7 +23,11 @@ from sqlalchemy import text
 
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.pipeline import MessageProcessingRepository
+from ..media.repository import MediaAsset, MediaAssetRepository
 from ..persona.models import PersonaDocument
+from ..scripts.loader import BUILTIN_SCRIPTS
+from ..scripts.models import ScriptCategory, ScriptTemplate, ScriptVariable
+from ..scripts.repository import ScriptTemplateRepository
 from ..sequences.models import Sequence, SequenceTrigger, SequenceStep, FanSequenceProgress, StepStatus
 
 logger = logging.getLogger("fansly-bot.dashboard")
@@ -34,6 +38,10 @@ PERSONA_DIR = "/data/config/creators"
 BRAND_BIBLE_PATH = "/data/config/brand_bible.md"
 MAX_BODY_BYTES = 1024 * 1024
 CREATOR_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+PROVIDER_MEDIA_ID_PATTERN = re.compile(
+    r"^fansly_media_[A-Za-z0-9_-]{1,96}$"
+)
+SCRIPT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 
 
 class PayloadTooLargeError(ValueError):
@@ -637,6 +645,12 @@ setInterval(function(){loadFunnel()},60000);
 </body>
 </html>"""
 
+# Keep the dashboard presentation separate from the HTTP and API logic. The
+# public module-level name remains unchanged for callers and regression tests.
+DASHBOARD_HTML = (
+    Path(__file__).with_name("dashboard_shell.html").read_text(encoding="utf-8")
+)
+
 # ─── Backend (unchanged API logic) ────────────────────
 
 def _list_vault(vault_dir):
@@ -677,7 +691,22 @@ def _note(n, purchase=None):
     return {"fan_id":n.fan_id,"display_name":n.display_name,"preferences":n.preferences,"occupation":n.occupation,"total_spent":total_spent,"purchase_count":purchase_count,"last_purchase_at":last_purchase_at.isoformat() if last_purchase_at else None,"emotional_triggers":n.emotional_triggers,"hard_limits":n.hard_limits,"facts":n.facts,"notes":n.notes,"relationship_stage":n.relationship_stage,"spend_tier":_spend_tier(total_spent),"purchase_source":"attributed_provider_events"}
 
 def _script(s):
-    return {"name":s.name,"category":s.category.value if hasattr(s.category,"value") else str(s.category),"description":s.description,"messages":s.messages,"message_count":len(s.messages)}
+    return {
+        "name":s.name,
+        "category":(
+            s.category.value
+            if hasattr(s.category,"value")
+            else str(s.category)
+        ),
+        "description":s.description,
+        "messages":list(s.messages),
+        "message_count":len(s.messages),
+        "variables":[
+            variable.model_dump()
+            for variable in getattr(s,"variables",[])
+        ],
+        "conditions":dict(getattr(s,"conditions",{})),
+    }
 
 def _body(h):
     raw_length = h.headers.get("Content-Length", "0")
@@ -720,6 +749,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.engine is None:
             return None
         return DashboardReadRepository(self.engine)
+
+    @property
+    def script_repo(self) -> ScriptTemplateRepository | None:
+        return getattr(self.server, "script_repo", None)
+
+    @property
+    def media_repo(self) -> MediaAssetRepository | None:
+        return getattr(self.server, "media_repo", None)
 
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
@@ -884,6 +921,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/conversations/"): return self._conv_detail(p.rsplit("/",1)[-1])
         if p=="/api/fans": return self._fans()
         if p=="/api/vault": return self._vault()
+        if p=="/api/media-assets": return self._media_assets(q)
         if p=="/api/kpis": return self._kpi()
         if p=="/api/scripts": return self._scrs()
         if p=="/api/connection": return self._conn(False)
@@ -912,6 +950,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/persona": return self._pers_post(q,b)
         if p=="/api/brand-bible": return self._bible_post(b)
         if p=="/api/connection/test": return self._conn(True)
+        if p=="/api/scripts": return self._script_save(b)
+        if p.startswith("/api/scripts/") and len(p.split("/"))==4: return self._script_save(b,p.rsplit("/",1)[-1])
+        if p=="/api/media-assets": return self._media_asset_save(b)
         if p=="/api/sequences": return self._seq_create(b)
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_update(p.rsplit("/",1)[-1], b)
         if p=="/api/bot/toggle": return self._bot_toggle(b)
@@ -921,6 +962,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not self._authorize(require_csrf=True):
             return
         p = self.path.split("?")[0]
+        if p.startswith("/api/scripts/") and len(p.split("/"))==4: return self._script_delete(p.rsplit("/",1)[-1])
+        if p.startswith("/api/media-assets/") and len(p.split("/"))==4: return self._media_asset_delete(p.rsplit("/",1)[-1])
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_delete(p.rsplit("/",1)[-1])
         self.j({"error":"not found"},404)
 
@@ -1160,8 +1203,299 @@ class DashboardHandler(BaseHTTPRequestHandler):
         })
 
     def _scrs(self):
-        if not self.bot: return self.j({"scripts":[]})
-        return self.j({"scripts":[_script(s) for s in getattr(self.bot.script_library,"templates",[])]})
+        inventory = {
+            template.name: {
+                **_script(template),
+                "id":None,
+                "origin":"builtin",
+                "is_active":True,
+                "editable":True,
+            }
+            for template in BUILTIN_SCRIPTS
+        }
+        if self.script_repo is not None:
+            try:
+                for stored in self.script_repo.list_scripts():
+                    inventory[stored.template.name] = {
+                        **stored.as_json(),
+                        "message_count":len(stored.template.messages),
+                        "origin":"custom",
+                        "editable":True,
+                    }
+            except Exception as e:
+                logger.exception("Failed to list editable scripts")
+                return self.j({"error":str(e)},500)
+        return self.j({
+            "scripts":sorted(
+                inventory.values(),
+                key=lambda item:(item["category"],item["name"]),
+            ),
+            "categories":[category.value for category in ScriptCategory],
+            "editing_available":self.script_repo is not None,
+            "storage":"durable_creator_overrides",
+        })
+
+    @staticmethod
+    def _script_variables(
+        messages: list[str],
+        supplied,
+    ) -> list[ScriptVariable]:
+        if supplied is not None:
+            if not isinstance(supplied,list):
+                raise ValueError("variables must be an array")
+            return [ScriptVariable(**value) for value in supplied]
+        names = []
+        for message in messages:
+            for name in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)\}",message):
+                if name not in names:
+                    names.append(name)
+        source_defaults = {
+            "fan_name":"fan_notes.display_name",
+            "fan_preference":"fan_notes.preferences.0",
+            "content_detail":"custom.content_type",
+        }
+        return [
+            ScriptVariable(
+                name=name,
+                source=source_defaults.get(name,f"custom.{name}"),
+                fallback="friend" if name=="fan_name" else "",
+            )
+            for name in names
+        ]
+
+    def _script_from_body(self, body) -> tuple[ScriptTemplate,bool]:
+        data=json.loads(body or "{}")
+        if not isinstance(data,dict):
+            raise ValueError("request body must be an object")
+        name=data.get("name","")
+        if not isinstance(name,str) or not SCRIPT_NAME_PATTERN.fullmatch(name):
+            raise ValueError(
+                "name must be 1-100 letters, numbers, hyphens, or underscores"
+            )
+        messages=data.get("messages",[])
+        if (
+            not isinstance(messages,list)
+            or not 1<=len(messages)<=20
+            or any(
+                not isinstance(message,str)
+                or not message.strip()
+                or len(message)>2000
+                for message in messages
+            )
+        ):
+            raise ValueError(
+                "messages must contain 1-20 non-empty strings"
+            )
+        description=data.get("description","")
+        if not isinstance(description,str) or len(description)>1000:
+            raise ValueError("description must be at most 1000 characters")
+        conditions=data.get("conditions",{})
+        if not isinstance(conditions,dict):
+            raise ValueError("conditions must be an object")
+        is_active=data.get("is_active",True)
+        if not isinstance(is_active,bool):
+            raise ValueError("is_active must be a boolean")
+        template=ScriptTemplate(
+            name=name,
+            category=ScriptCategory(data.get("category","welcome")),
+            description=description,
+            messages=[message.strip() for message in messages],
+            variables=self._script_variables(
+                messages,
+                data.get("variables"),
+            ),
+            conditions=conditions,
+        )
+        return template,is_active
+
+    def _script_save(self, body, script_id_str=None):
+        if self.script_repo is None:
+            return self.j({"error":"script storage is unavailable"},503)
+        try:
+            script_id=int(script_id_str) if script_id_str else None
+            template,is_active=self._script_from_body(body)
+            saved=self.script_repo.save(
+                template,
+                script_id=script_id,
+                is_active=is_active,
+            )
+            if self.bot is not None and hasattr(self.bot,"reload_scripts"):
+                self.bot.reload_scripts()
+            return self.j({
+                "status":"ok",
+                "script":saved.as_json(),
+                "runtime_applied":self.bot is not None,
+            })
+        except LookupError as e:
+            return self.j({"error":str(e)},404)
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            json.JSONDecodeError,
+        ) as e:
+            return self.j({"error":str(e)},400)
+        except Exception as e:
+            logger.exception("Failed to save script")
+            return self.j({"error":str(e)},500)
+
+    def _script_delete(self, script_id_str):
+        if self.script_repo is None:
+            return self.j({"error":"script storage is unavailable"},503)
+        try:
+            if not self.script_repo.delete(int(script_id_str)):
+                return self.j({"error":"not found"},404)
+            if self.bot is not None and hasattr(self.bot,"reload_scripts"):
+                self.bot.reload_scripts()
+            return self.j({
+                "status":"ok",
+                "runtime_applied":self.bot is not None,
+            })
+        except ValueError:
+            return self.j({"error":"invalid script id"},400)
+        except Exception as e:
+            logger.exception("Failed to delete script")
+            return self.j({"error":str(e)},500)
+
+    def _media_assets(self,q):
+        if self.media_repo is None:
+            return self.j({
+                "assets":[],
+                "editing_available":False,
+                "provider_listing_supported":False,
+                "reason":"media registry storage is unavailable",
+            })
+        query=(q.get("query",[""])or[""])[0]
+        media_type=(q.get("type",[""])or[""])[0]
+        try:
+            assets=self.media_repo.list_assets(
+                query=query,
+                media_type=media_type,
+            )
+            return self.j({
+                "assets":[asset.as_json() for asset in assets],
+                "editing_available":True,
+                "provider_listing_supported":False,
+                "reason":(
+                    "OnlyFansAPI does not currently expose a Fansly "
+                    "account-media listing endpoint. This registry contains "
+                    "media explicitly registered by the operator."
+                ),
+            })
+        except Exception as e:
+            logger.exception("Failed to list media registry")
+            return self.j({"error":str(e),"assets":[]},500)
+
+    @staticmethod
+    def _optional_https_url(value,field):
+        if value in {None,""}:
+            return None
+        if not isinstance(value,str) or len(value)>4000:
+            raise ValueError(f"{field} is invalid")
+        parsed=urlsplit(value)
+        if (
+            parsed.scheme!="https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError(f"{field} must be an HTTPS URL")
+        return value
+
+    def _media_asset_save(self,body):
+        if self.media_repo is None:
+            return self.j({"error":"media registry is unavailable"},503)
+        try:
+            data=json.loads(body or "{}")
+            if not isinstance(data,dict):
+                raise ValueError("request body must be an object")
+            provider_id=data.get("provider_media_id","")
+            if (
+                not isinstance(provider_id,str)
+                or not PROVIDER_MEDIA_ID_PATTERN.fullmatch(provider_id)
+            ):
+                raise ValueError(
+                    "provider_media_id must be a fansly_media_ ID"
+                )
+            title=data.get("title","")
+            if not isinstance(title,str) or not title.strip() or len(title)>255:
+                raise ValueError("title is required and must be at most 255 characters")
+            media_type=data.get("media_type","video")
+            if media_type not in {"video","image","gif","audio","other"}:
+                raise ValueError("invalid media_type")
+            tags=data.get("tags",[])
+            if (
+                not isinstance(tags,list)
+                or len(tags)>20
+                or any(
+                    not isinstance(tag,str)
+                    or not tag.strip()
+                    or len(tag)>40
+                    for tag in tags
+                )
+            ):
+                raise ValueError("tags must contain at most 20 short strings")
+            account_media_id=data.get("account_media_id")
+            if account_media_id not in {None,""} and (
+                not isinstance(account_media_id,str)
+                or not account_media_id.isdigit()
+                or len(account_media_id)>128
+            ):
+                raise ValueError("account_media_id must be numeric")
+            asset=MediaAsset(
+                id=None,
+                creator_id=self.creator_id,
+                provider_media_id=provider_id,
+                account_media_id=account_media_id or None,
+                title=title.strip(),
+                file_name=(
+                    data.get("file_name")
+                    if isinstance(data.get("file_name"),str)
+                    else None
+                ),
+                media_type=media_type,
+                mime_type=(
+                    data.get("mime_type")
+                    if isinstance(data.get("mime_type"),str)
+                    else None
+                ),
+                thumbnail_url=self._optional_https_url(
+                    data.get("thumbnail_url"),
+                    "thumbnail_url",
+                ),
+                preview_url=self._optional_https_url(
+                    data.get("preview_url"),
+                    "preview_url",
+                ),
+                tags=tuple(dict.fromkeys(tag.strip() for tag in tags)),
+                source="manual",
+                status="ready",
+            )
+            saved=self.media_repo.save(asset)
+            return self.j({"status":"ok","asset":saved.as_json()})
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            json.JSONDecodeError,
+        ) as e:
+            return self.j({"error":str(e)},400)
+        except Exception as e:
+            logger.exception("Failed to save media asset")
+            return self.j({"error":str(e)},500)
+
+    def _media_asset_delete(self,asset_id_str):
+        if self.media_repo is None:
+            return self.j({"error":"media registry is unavailable"},503)
+        try:
+            if not self.media_repo.delete(int(asset_id_str)):
+                return self.j({"error":"not found"},404)
+            return self.j({"status":"ok"})
+        except ValueError:
+            return self.j({"error":"invalid media asset id"},400)
+        except Exception as e:
+            logger.exception("Failed to delete media asset")
+            return self.j({"error":str(e)},500)
 
     def _conn(self,test):
         if not self.client:
@@ -1323,9 +1657,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not CREATOR_ID_PATTERN.fullmatch(cid):
             return self.j({"error": "invalid creator id"}, 400)
         p = Path(self.server.persona_dir)/f"{cid}.yaml"
+        raw=p.read_text(encoding="utf-8") if p.exists() else ""
+        parsed={}
+        if raw:
+            try:
+                parsed=yaml.safe_load(raw) or {}
+            except Exception:
+                parsed={}
+        if isinstance(parsed,dict):
+            parsed.pop("creator_id",None)
+        else:
+            parsed={}
         return self.j({
             "creator_id":cid,
-            "yaml":p.read_text(encoding="utf-8") if p.exists() else "",
+            "yaml":raw,
+            "persona":parsed,
             "runtime_applied":bool(
                 self.bot is not None
                 and cid==self.bot.creator_id
@@ -1864,6 +2210,22 @@ class DashboardServer:
         )
         self.server.allowed_hosts = hosts
         self.server.csrf_token = csrf_token or secrets.token_urlsafe(32)
+        self.server.script_repo = (
+            ScriptTemplateRepository(
+                self.server.engine,
+                self.server.creator_id,
+            )
+            if self.server.engine is not None
+            else None
+        )
+        self.server.media_repo = (
+            MediaAssetRepository(
+                self.server.engine,
+                self.server.creator_id,
+            )
+            if self.server.engine is not None
+            else None
+        )
         self.csrf_token = self.server.csrf_token
     def handle_request(self): self.server.handle_request()
     def shutdown(self): self.server.shutdown()

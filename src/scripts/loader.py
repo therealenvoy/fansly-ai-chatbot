@@ -287,6 +287,16 @@ class ScriptLibrary:
         """Populate the library with the built-in script templates."""
         self.templates = list(BUILTIN_SCRIPTS)
 
+    def apply_overrides(
+        self,
+        templates: list[ScriptTemplate],
+    ) -> None:
+        """Overlay durable creator scripts by name without duplicating them."""
+        by_name = {template.name: template for template in self.templates}
+        for template in templates:
+            by_name[template.name] = template
+        self.templates = list(by_name.values())
+
     def get_by_category(self, category: ScriptCategory) -> list[ScriptTemplate]:
         """Return all templates belonging to *category*."""
         return [t for t in self.templates if t.category == category]

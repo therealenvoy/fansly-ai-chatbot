@@ -303,6 +303,65 @@ PURCHASE_EVENTS = Table(
     ),
 )
 
+SCRIPT_TEMPLATES = Table(
+    "script_templates",
+    metadata,
+    Column(
+        "id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("name", String(100), nullable=False),
+    Column("category", String(64), nullable=False),
+    Column("description", Text, nullable=False, default=""),
+    Column("messages", JSON, nullable=False, default=list),
+    Column("variables", JSON, nullable=False, default=list),
+    Column("conditions", JSON, nullable=False, default=dict),
+    Column("is_active", Boolean, nullable=False, default=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "creator_id",
+        "name",
+        name="uq_script_template_creator_name",
+    ),
+)
+
+MEDIA_ASSETS = Table(
+    "media_assets",
+    metadata,
+    Column(
+        "id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("provider_media_id", String(128), nullable=False),
+    Column("account_media_id", String(128), nullable=True),
+    Column("title", String(255), nullable=False),
+    Column("file_name", String(255), nullable=True),
+    Column("media_type", String(32), nullable=False, default="video"),
+    Column("mime_type", String(128), nullable=True),
+    Column("thumbnail_url", Text, nullable=True),
+    Column("preview_url", Text, nullable=True),
+    Column("duration_ms", Integer, nullable=True),
+    Column("width", Integer, nullable=True),
+    Column("height", Integer, nullable=True),
+    Column("tags", JSON, nullable=False, default=list),
+    Column("source", String(32), nullable=False, default="manual"),
+    Column("status", String(32), nullable=False, default="ready"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "creator_id",
+        "provider_media_id",
+        name="uq_media_asset_creator_provider_id",
+    ),
+)
+
 Index(
     "ix_inbound_pending_order",
     INBOUND_MESSAGES.c.creator_id,
@@ -327,4 +386,15 @@ Index(
     PURCHASE_EVENTS.c.creator_id,
     PURCHASE_EVENTS.c.fan_id,
     PURCHASE_EVENTS.c.provider_created_at,
+)
+Index(
+    "ix_script_template_category",
+    SCRIPT_TEMPLATES.c.creator_id,
+    SCRIPT_TEMPLATES.c.category,
+)
+Index(
+    "ix_media_asset_type",
+    MEDIA_ASSETS.c.creator_id,
+    MEDIA_ASSETS.c.media_type,
+    MEDIA_ASSETS.c.created_at,
 )

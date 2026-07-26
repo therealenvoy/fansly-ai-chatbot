@@ -61,11 +61,26 @@ database transaction.
 Provider vault browsing is shown as unavailable unless the client explicitly
 advertises that capability.
 
+The operator media registry is intentionally separate from the native Fansly
+vault. It contains provider IDs explicitly registered by the operator or
+created by future dashboard uploads. OnlyFansAPI currently supports upload and
+fetch-by-known-ID operations for Fansly, but not a complete account-media
+listing. The dashboard therefore never labels the registry as a full vault
+sync.
+
 ## Configuration controls
 
 Creator persona YAML is validated before an atomic file replacement. When the
 running bot uses that creator, the validated persona is reloaded immediately;
 the response reports whether the runtime update succeeded.
+
+The normal dashboard presents the persona as structured fields. The server
+still validates the complete `PersonaDocument`, preserves fields not changed
+by the form, and writes the same durable creator configuration.
+
+Creator script changes are stored as durable overrides. Built-in scripts remain
+the fallback; an active override with the same name replaces the built-in at
+runtime, and deleting the override restores the built-in.
 
 The brand-bible file is an operator reference only. Saving it is atomic, but
 the bot does not consume it at runtime and the dashboard says so explicitly.

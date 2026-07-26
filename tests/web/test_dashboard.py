@@ -41,7 +41,16 @@ class TestDashboardShell:
     """Regression checks for the responsive dashboard navigation."""
 
     def test_all_primary_destinations_are_semantic_buttons(self):
-        for tab in ("funnel", "vault", "fans", "scripts", "kpis", "sequences", "settings"):
+        for tab in (
+            "dashboard",
+            "funnel",
+            "vault",
+            "fans",
+            "scripts",
+            "kpis",
+            "sequences",
+            "settings",
+        ):
             assert f'class="nav-item' in DASHBOARD_HTML
             assert f'data-tab="{tab}"' in DASHBOARD_HTML
         assert '<nav aria-label="Primary">' in DASHBOARD_HTML
@@ -59,6 +68,36 @@ class TestDashboardShell:
     def test_inline_event_handlers_are_not_used(self):
         assert " onclick=" not in DASHBOARD_HTML
         assert " onchange=" not in DASHBOARD_HTML
+
+    def test_reference_led_dark_visual_system_is_present(self):
+        assert "color-scheme:dark" in DASHBOARD_HTML
+        assert 'class="app-shell"' in DASHBOARD_HTML
+        assert 'class="hero-card surface"' in DASHBOARD_HTML
+        assert 'class="aurora"' in DASHBOARD_HTML
+        assert "Creator Intelligence" in DASHBOARD_HTML
+
+    def test_dashboard_and_messages_use_existing_read_contracts(self):
+        for endpoint in (
+            "/api/kpis",
+            "/api/conversations",
+            "/api/bot/status",
+            "/api/operations",
+        ):
+            assert endpoint in DASHBOARD_HTML
+        assert 'id="conversation-search"' in DASHBOARD_HTML
+        assert "function selectConversation(fanId)" in DASHBOARD_HTML
+
+    def test_content_editors_and_media_picker_are_present(self):
+        assert "Script Studio" in DASHBOARD_HTML
+        assert 'id="script-messages"' in DASHBOARD_HTML
+        assert "/api/scripts" in DASHBOARD_HTML
+        assert "conditions:dashboardScriptDraft.conditions||{}" in DASHBOARD_HTML
+        assert "variables:dashboardScriptDraft.variables" in DASHBOARD_HTML
+        assert "/api/media-assets" in DASHBOARD_HTML
+        assert 'id="media-provider-id"' in DASHBOARD_HTML
+        assert 'id="persona-tone"' in DASHBOARD_HTML
+        assert 'id="persona-boundaries"' in DASHBOARD_HTML
+        assert "function pickMedia(idx)" in DASHBOARD_HTML
 
 
 def _request(host, method, path, body="", headers=None):
@@ -617,6 +656,130 @@ class TestBotToggleEndpoint:
 
 
 class TestTruthfulDashboardControls:
+    def test_creator_script_override_crud_and_runtime_reload(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = {
+            "name": "welcome_evening",
+            "category": "welcome",
+            "description": "Evening greeting",
+            "messages": [
+                "hey {fan_name}",
+                "how was your evening?",
+            ],
+            "is_active": True,
+        }
+
+        status, created = _post(host, "/api/scripts", payload)
+
+        assert status == 200
+        assert created["script"]["name"] == "welcome_evening"
+        assert created["script"]["variables"] == [
+            {
+                "name": "fan_name",
+                "source": "fan_notes.display_name",
+                "fallback": "friend",
+            }
+        ]
+        script_id = created["script"]["id"]
+        bot.reload_scripts.assert_called_once_with()
+
+        status, listing = _get(host, "/api/scripts")
+        assert status == 200
+        saved = next(
+            script
+            for script in listing["scripts"]
+            if script["name"] == "welcome_evening"
+        )
+        assert saved["origin"] == "custom"
+        assert saved["messages"] == payload["messages"]
+
+        payload["description"] = "Updated greeting"
+        status, updated = _post(
+            host,
+            f"/api/scripts/{script_id}",
+            payload,
+        )
+        assert status == 200
+        assert updated["script"]["description"] == "Updated greeting"
+
+        status, deleted = _delete(
+            host,
+            f"/api/scripts/{script_id}",
+        )
+        assert status == 200
+        assert deleted["runtime_applied"] is True
+
+    def test_invalid_script_is_rejected(self, running_server):
+        host, _, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/scripts",
+            {
+                "name": "not a valid id",
+                "category": "welcome",
+                "messages": [],
+            },
+        )
+
+        assert status == 400
+        assert "name must be" in body["error"]
+
+    def test_media_registry_crud(self, running_server):
+        host, _, _ = running_server
+        payload = {
+            "title": "Red dress teaser",
+            "provider_media_id": "fansly_media_01JR1234",
+            "account_media_id": "925889499706191874",
+            "media_type": "video",
+            "tags": ["red", "tease"],
+            "thumbnail_url": "https://cdn3.fansly.com/example.jpeg",
+        }
+
+        status, created = _post(host, "/api/media-assets", payload)
+
+        assert status == 200
+        assert created["asset"]["provider_media_id"] == (
+            "fansly_media_01JR1234"
+        )
+        asset_id = created["asset"]["id"]
+
+        status, listing = _get(host, "/api/media-assets?query=red")
+        assert status == 200
+        assert listing["provider_listing_supported"] is False
+        assert [asset["id"] for asset in listing["assets"]] == [
+            asset_id
+        ]
+
+        status, deleted = _delete(
+            host,
+            f"/api/media-assets/{asset_id}",
+        )
+        assert status == 200
+        assert deleted == {"status": "ok"}
+
+    def test_media_registry_rejects_non_https_preview(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/media-assets",
+            {
+                "title": "Unsafe preview",
+                "provider_media_id": "fansly_media_safe",
+                "thumbnail_url": "javascript:alert(1)",
+            },
+        )
+
+        assert status == 400
+        assert body["error"] == "thumbnail_url must be an HTTPS URL"
+
     def test_kpis_use_durable_events_and_report_unavailable_values(
         self,
         running_server,
@@ -808,6 +971,14 @@ class TestTruthfulDashboardControls:
             tmp_path / "personas" / "test_creator.yaml"
         ).exists()
         bot.reload_persona.assert_called_once_with()
+
+        status, loaded = _get(
+            host,
+            "/api/persona?creator=test_creator",
+        )
+        assert status == 200
+        assert loaded["persona"]["tone"] == "warm"
+        assert loaded["persona"]["signature_phrases"] == ["hey"]
 
     def test_invalid_persona_is_not_saved(
         self,

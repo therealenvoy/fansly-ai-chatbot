@@ -25,6 +25,7 @@ from .memory.llm import LLMFactExtractor
 from .profiling.classifier import FanClassifier
 from .rhythm.engine import PushPullEngine
 from .scripts.loader import ScriptLibrary
+from .scripts.repository import ScriptTemplateRepository
 from .scripts.engine import ScriptEngine, ScriptCategory
 from .tiers.classifier import TierClassifier
 from .churn.predictor import ChurnPredictor
@@ -118,8 +119,12 @@ class FanslyBot:
         # 17-system components
         self.classifier = FanClassifier()
         self.rhythm_engines: dict[str, PushPullEngine] = {}
+        self.script_repo = ScriptTemplateRepository(
+            self.state_repo.engine,
+            creator_id,
+        )
         self.script_library = ScriptLibrary()
-        self.script_library.load_builtin()
+        self.reload_scripts()
         self.script_engine = ScriptEngine(self.script_library)
         self.tier_classifier = TierClassifier()
         self.churn_predictor = ChurnPredictor()
@@ -163,6 +168,18 @@ class FanslyBot:
         validator = PersonaValidator(persona)
         self.persona = persona
         self.validator = validator
+
+    def reload_scripts(self) -> None:
+        """Reload built-ins plus active creator-owned script overrides."""
+        self.script_library.load_builtin()
+        self.script_library.apply_overrides(
+            [
+                stored.template
+                for stored in self.script_repo.list_scripts(
+                    active_only=True
+                )
+            ]
+        )
 
     def poll_and_process(self, filter_type: str = "all", max_chats: int = 50) -> bool:
         """Main loop: fetch chats, process chats with unread messages, send replies.
