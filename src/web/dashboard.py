@@ -11,6 +11,7 @@ import math
 import os
 import re
 import secrets
+from dataclasses import asdict
 from datetime import datetime, timezone
 
 import yaml
@@ -19,11 +20,12 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional, TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
-from sqlalchemy import text
+from sqlalchemy import case, func, select, text
 
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
 from ..persistence.pipeline import MessageProcessingRepository
+from ..persistence.schema import CONVERSATION_DECISIONS
 from ..persistence.presence import PresenceRepository
 from ..media.repository import MediaAsset, MediaAssetRepository
 from ..persona.models import PersonaDocument
@@ -31,6 +33,18 @@ from ..scripts.loader import BUILTIN_SCRIPTS
 from ..scripts.models import ScriptCategory, ScriptTemplate, ScriptVariable
 from ..scripts.repository import ScriptTemplateRepository
 from ..sequences.models import Sequence, SequenceTrigger, SequenceStep, FanSequenceProgress, StepStatus
+from ..conversation.brain2_schema import (
+    BRAIN_EXPERIMENT_ASSIGNMENTS,
+    BRAIN_EXPERIMENT_EVENTS,
+    BRAIN_EXPERIMENTS,
+    BRAIN_SHADOW_RUNS,
+    CONVERSATION_EPISODES,
+    CONVERSATION_OUTCOMES,
+    FAN_CONVERSATION_STATES,
+    FAN_MEMORIES_V2,
+)
+from ..conversation.brain2_repository import PersistentExperimentRepository
+from ..settings.brain import BrainSettingsError
 from ..settings.chat_guidance import (
     MAX_CHAT_INSTRUCTIONS_CHARS,
     ChatGuidanceError,
@@ -964,6 +978,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/fan-progress/"): return self._fan_progress(p.rsplit("/",1)[-1])
         if p=="/api/bot/status": return self._bot_status()
         if p=="/api/operations": return self._operations()
+        if p=="/api/brain/status": return self._brain_status()
+        if p=="/api/brain/metrics": return self._brain_metrics()
+        if p=="/api/brain/runs": return self._brain_runs(q)
+        if p=="/api/brain/context": return self._brain_context(q)
+        if p=="/api/brain/experiments": return self._brain_experiments()
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -993,6 +1012,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/sequences": return self._seq_create(b)
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_update(p.rsplit("/",1)[-1], b)
         if p=="/api/bot/toggle": return self._bot_toggle(b)
+        if p=="/api/brain/settings": return self._brain_settings_save(b)
+        if p=="/api/brain/experiments": return self._brain_experiments_save(b)
         self.j({"error":"not found"},404)
 
     def _onlyfansapi_fansly_webhook(self):
@@ -2083,6 +2104,363 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 None,
             ),
         })
+
+    def _brain_settings_service(self):
+        service = getattr(self.bot, "brain_settings_service", None)
+        if service is None:
+            self.j({"error": "Brain settings are unavailable"}, 503)
+            return None
+        return service
+
+    def _brain_status(self):
+        service = self._brain_settings_service()
+        if service is None:
+            return
+        settings = service.snapshot()
+        return self.j({
+            "creator_id": self.creator_id,
+            "live_authority": (
+                "advanced" if settings.mode == "advanced" else "current"
+            ),
+            "shadow_version": settings.version,
+            "advanced_send_blocked": settings.mode != "advanced",
+            "settings": asdict(settings),
+            "conversation_only": bool(
+                getattr(getattr(self.bot, "bot_mode", None), "value", "")
+                == "conversation"
+            ),
+        })
+
+    def _brain_settings_save(self, body: str):
+        service = self._brain_settings_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                return self.j({"error": "request body must be an object"}, 400)
+            settings = service.save(data)
+        except (BrainSettingsError, TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "ok",
+            "saved": True,
+            "runtime_applied": True,
+            "settings": asdict(settings),
+        })
+
+    def _brain_metrics(self):
+        if self.engine is None:
+            return self.j({"error": "database is unavailable"}, 503)
+        try:
+            with self.engine.connect() as connection:
+                runs = connection.execute(
+                    select(
+                        func.count(BRAIN_SHADOW_RUNS.c.id),
+                        func.sum(BRAIN_SHADOW_RUNS.c.model_calls),
+                        func.avg(BRAIN_SHADOW_RUNS.c.latency_ms),
+                    ).where(
+                        BRAIN_SHADOW_RUNS.c.creator_id == self.creator_id
+                    )
+                ).one()
+                outcomes = connection.execute(
+                    select(
+                        func.count(CONVERSATION_OUTCOMES.c.id),
+                        func.sum(
+                            case(
+                                (
+                                    CONVERSATION_OUTCOMES.c.fan_replied.is_(True),
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                    ).where(
+                        CONVERSATION_OUTCOMES.c.creator_id == self.creator_id
+                    )
+                ).one()
+                memories = connection.execute(
+                    select(func.count(FAN_MEMORIES_V2.c.id)).where(
+                        FAN_MEMORIES_V2.c.creator_id == self.creator_id
+                    )
+                ).scalar_one()
+            outcome_count = int(outcomes[0] or 0)
+            reply_count = int(outcomes[1] or 0)
+            return self.j({
+                "source": "durable_brain2_records",
+                "shadow_runs": int(runs[0] or 0),
+                "shadow_model_calls": int(runs[1] or 0),
+                "shadow_average_latency_ms": (
+                    float(runs[2]) if runs[2] is not None else None
+                ),
+                "eligible_sent_turns": outcome_count,
+                "fan_replies": reply_count,
+                "reply_rate": (
+                    reply_count / outcome_count if outcome_count else None
+                ),
+                "memory_records": int(memories or 0),
+                "shadow_outbox_writes": 0,
+            })
+        except Exception:
+            logger.exception("Failed to load Brain 2.0 metrics")
+            return self.j({"error": "brain metrics are unavailable"}, 500)
+
+    def _brain_runs(self, query):
+        if self.engine is None:
+            return self.j({"error": "database is unavailable"}, 503)
+        try:
+            limit = min(max(int((query.get("limit") or [25])[0]), 1), 100)
+        except (TypeError, ValueError):
+            return self.j({"error": "limit must be an integer"}, 400)
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(BRAIN_SHADOW_RUNS)
+                .where(BRAIN_SHADOW_RUNS.c.creator_id == self.creator_id)
+                .order_by(BRAIN_SHADOW_RUNS.c.created_at.desc())
+                .limit(limit)
+            ).mappings().all()
+        return self.j({
+            "runs": [
+                {
+                    "id": int(row["id"]),
+                    "brain_version": row["brain_version"],
+                    "status": row["status"],
+                    "route": row["route"],
+                    "router": row["router"],
+                    "judge": row["judge"],
+                    "gate": row["gate"],
+                    "model_calls": row["model_calls"],
+                    "latency_ms": row["latency_ms"],
+                    "error_code": row["error_code"],
+                    "created_at": row["created_at"],
+                    "completed_at": row["completed_at"],
+                }
+                for row in rows
+            ]
+        })
+
+    def _brain_context(self, query):
+        if self.engine is None:
+            return self.j({"error": "database is unavailable"}, 503)
+        fan_id = str((query.get("fan_id") or [""])[0]).strip()
+        if not fan_id or len(fan_id) > 128:
+            return self.j({"error": "valid fan_id is required"}, 400)
+        with self.engine.connect() as connection:
+            state = connection.execute(
+                select(FAN_CONVERSATION_STATES).where(
+                    FAN_CONVERSATION_STATES.c.creator_id == self.creator_id,
+                    FAN_CONVERSATION_STATES.c.fan_id == fan_id,
+                )
+            ).mappings().first()
+            memories = connection.execute(
+                select(FAN_MEMORIES_V2)
+                .where(
+                    FAN_MEMORIES_V2.c.creator_id == self.creator_id,
+                    FAN_MEMORIES_V2.c.fan_id == fan_id,
+                )
+                .order_by(FAN_MEMORIES_V2.c.updated_at.desc())
+                .limit(100)
+            ).mappings().all()
+            episodes = connection.execute(
+                select(CONVERSATION_EPISODES)
+                .where(
+                    CONVERSATION_EPISODES.c.creator_id == self.creator_id,
+                    CONVERSATION_EPISODES.c.fan_id == fan_id,
+                )
+                .order_by(CONVERSATION_EPISODES.c.episode_ended_at.desc())
+                .limit(10)
+            ).mappings().all()
+            decisions = connection.execute(
+                select(CONVERSATION_DECISIONS)
+                .where(
+                    CONVERSATION_DECISIONS.c.creator_id == self.creator_id,
+                    CONVERSATION_DECISIONS.c.fan_id == fan_id,
+                )
+                .order_by(CONVERSATION_DECISIONS.c.created_at.desc())
+                .limit(20)
+            ).mappings().all()
+        state_payload = None
+        if state is not None:
+            state_payload = {
+                key: state[key]
+                for key in (
+                    "relationship_stage",
+                    "current_mood",
+                    "current_energy",
+                    "engagement_estimate",
+                    "current_objective",
+                    "current_tactic",
+                    "active_thread",
+                    "recent_objectives",
+                    "recent_tactics",
+                    "question_streak",
+                    "pet_name_streak",
+                    "last_fan_energy",
+                    "last_creator_energy",
+                    "state_version",
+                    "updated_at",
+                )
+            }
+        return self.j({
+            "fan_id": fan_id,
+            "state": state_payload,
+            "memories": [
+                {
+                    "id": int(row["id"]),
+                    "memory_type": row["memory_type"],
+                    "display_value": row["display_value"],
+                    "confidence": row["confidence"],
+                    "importance": row["importance"],
+                    "source_message_id": row["source_message_id"],
+                    "source_timestamp": row["source_timestamp"],
+                    "status": row["status"],
+                    "superseded_by_id": row["superseded_by_id"],
+                }
+                for row in memories
+            ],
+            "episodes": [
+                {
+                    "id": int(row["id"]),
+                    "main_topics": row["main_topics"],
+                    "emotional_tone": row["emotional_tone"],
+                    "resolved_threads": row["resolved_threads"],
+                    "unresolved_threads": row["unresolved_threads"],
+                    "future_callback": row["future_callback"],
+                    "source_start_message_id": row["source_start_message_id"],
+                    "source_end_message_id": row["source_end_message_id"],
+                    "episode_started_at": row["episode_started_at"],
+                    "episode_ended_at": row["episode_ended_at"],
+                }
+                for row in episodes
+            ],
+            "decisions": [
+                {
+                    "id": int(row["id"]),
+                    "trigger_kind": row["trigger_kind"],
+                    "fan_state": row["fan_state"],
+                    "objective": row["objective"],
+                    "tactic": row["tactic"],
+                    "open_thread": row["open_thread"],
+                    "confidence": row["confidence"],
+                    "model": row["model"],
+                    "created_at": row["created_at"],
+                }
+                for row in decisions
+            ],
+        })
+
+    def _brain_experiments(self):
+        if self.engine is None:
+            return self.j({"error": "database is unavailable"}, 503)
+        repository = PersistentExperimentRepository(self.engine)
+        experiments = repository.list_for_creator(self.creator_id)
+        payload = []
+        with self.engine.connect() as connection:
+            for experiment in experiments:
+                assignment_rows = connection.execute(
+                    select(
+                        BRAIN_EXPERIMENT_ASSIGNMENTS.c.variant,
+                        func.count(BRAIN_EXPERIMENT_ASSIGNMENTS.c.id),
+                    )
+                    .where(
+                        BRAIN_EXPERIMENT_ASSIGNMENTS.c.experiment_id
+                        == experiment["id"],
+                        BRAIN_EXPERIMENT_ASSIGNMENTS.c.creator_id
+                        == self.creator_id,
+                    )
+                    .group_by(BRAIN_EXPERIMENT_ASSIGNMENTS.c.variant)
+                ).all()
+                outcome_rows = connection.execute(
+                    select(
+                        CONVERSATION_OUTCOMES.c.variant,
+                        func.count(CONVERSATION_OUTCOMES.c.id),
+                        func.sum(
+                            case(
+                                (CONVERSATION_OUTCOMES.c.fan_replied.is_(True), 1),
+                                else_=0,
+                            )
+                        ),
+                        func.sum(
+                            case(
+                                (CONVERSATION_OUTCOMES.c.negative_signal.is_(True), 1),
+                                else_=0,
+                            )
+                        ),
+                    )
+                    .where(
+                        CONVERSATION_OUTCOMES.c.creator_id == self.creator_id,
+                        CONVERSATION_OUTCOMES.c.experiment_id
+                        == str(experiment["id"]),
+                    )
+                    .group_by(CONVERSATION_OUTCOMES.c.variant)
+                ).all()
+                events = repository.events(
+                    experiment_id=int(experiment["id"]),
+                    creator_id=self.creator_id,
+                )
+                payload.append({
+                    "id": int(experiment["id"]),
+                    "name": experiment["name"],
+                    "status": experiment["status"],
+                    "variants": experiment["variants"],
+                    "minimum_sample_size": experiment["minimum_sample_size"],
+                    "started_at": experiment["started_at"],
+                    "ended_at": experiment["ended_at"],
+                    "sample_counts": {
+                        str(row[0]): int(row[1] or 0)
+                        for row in assignment_rows
+                    },
+                    "outcomes": {
+                        str(row[0] or "unassigned"): {
+                            "sent_turns": int(row[1] or 0),
+                            "fan_replies": int(row[2] or 0),
+                            "negative_signals": int(row[3] or 0),
+                        }
+                        for row in outcome_rows
+                    },
+                    "audit": [
+                        {
+                            "event_type": event["event_type"],
+                            "actor": event["actor"],
+                            "details": event["details"],
+                            "created_at": event["created_at"],
+                        }
+                        for event in events
+                    ],
+                    "automatic_promotion": False,
+                })
+        return self.j({"experiments": payload})
+
+    def _brain_experiments_save(self, body: str):
+        if self.engine is None:
+            return self.j({"error": "database is unavailable"}, 503)
+        try:
+            data = json.loads(body) if body else {}
+            action = str(data.get("action") or "").strip().casefold()
+            repository = PersistentExperimentRepository(self.engine)
+            if action == "create":
+                name = str(data.get("name") or "").strip()
+                variants = data.get("variants")
+                if not name or len(name) > 128 or not isinstance(variants, dict):
+                    raise ValueError("name and variants are required")
+                experiment_id = repository.create(
+                    creator_id=self.creator_id,
+                    name=name,
+                    variants={str(key): int(value) for key, value in variants.items()},
+                    minimum_sample_size=int(data.get("minimum_sample_size") or 100),
+                )
+                return self.j({
+                    "status": "created",
+                    "experiment_id": experiment_id,
+                    "automatic_promotion": False,
+                }, 201)
+            if action == "pause":
+                experiment_id = int(data.get("experiment_id"))
+                repository.pause(experiment_id, creator_id=self.creator_id)
+                return self.j({"status": "paused", "experiment_id": experiment_id})
+            raise ValueError("action must be create or pause")
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
 
     def _operations(self):
         pipeline_counts = {}

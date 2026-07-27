@@ -324,6 +324,9 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l2-2h9v13h-17z"/></svg><span>Vault</span>
       </button>
       <span class="nav-label">Workspace</span>
+      <button type="button" class="nav-item" data-tab="brain">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4a3 3 0 0 0-3 3v1a3 3 0 0 0-2 3v2a3 3 0 0 0 3 3 3 3 0 0 0 5 2 3 3 0 0 0 5-2 3 3 0 0 0 3-3v-2a3 3 0 0 0-2-3V7a3 3 0 0 0-6-1 3 3 0 0 0-3-2zM12 6v12"/></svg><span>Brain</span>
+      </button>
       <button type="button" class="nav-item" data-tab="settings">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.8-1L14.4 3h-4.8l-.4 3.1a8 8 0 0 0-1.8 1L5 6.1 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.4-1a8 8 0 0 0 1.8 1l.4 3h4.8l.4-3a8 8 0 0 0 1.8-1l2.4 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/></svg><span>Settings</span>
       </button>
@@ -400,7 +403,7 @@ function botControlMarkup(){return'<div class="bot-control-group"><button type="
 async function F(u){try{var r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return null;return await r.json()}catch(e){return null}}
 async function M(u,options){options=options||{};options.credentials='same-origin';options.cache='no-store';options.headers=Object.assign({},options.headers||{}, {'X-CSRF-Token':CSRF_TOKEN});return fetch(u,options)}
 
-var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,scripts:loadScripts,sequences:loadSequences,vault:loadVault,settings:loadSettings};
+var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,scripts:loadScripts,sequences:loadSequences,vault:loadVault,brain:loadBrain,settings:loadSettings};
 function navTo(tab,skipHash){
   if(!loaders[tab])tab='dashboard';
   currentTab=tab;
@@ -642,6 +645,28 @@ function saveMediaAsset(){
 }
 function deleteMediaAsset(id){if(!confirm('Remove this item from the bot registry? This does not delete it from Fansly.'))return;M('/api/media-assets/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadVault()})}
 
+async function loadBrain(){
+  var c=document.getElementById('content');
+  c.innerHTML=pageHead('Intelligence','Conversation Brain','Inspect safe shadow reasoning, durable outcomes, and runtime controls.',botControlMarkup())+'<p class="muted-note">Loading Brain 2.0…</p>';
+  var data=await Promise.all([F('/api/brain/status'),F('/api/brain/metrics'),F('/api/brain/runs?limit=10'),F('/api/brain/experiments')]),status=data[0],metrics=data[1],runs=data[2],experiments=data[3];
+  if(!status||!metrics){c.innerHTML=pageHead('Intelligence','Conversation Brain','Brain operations are unavailable.',botControlMarkup())+'<section class="block"><p class="muted-note">Unable to load Brain 2.0 status.</p></section>';return}
+  var s=status.settings||{},h=pageHead('Intelligence','Conversation Brain','Current live authority stays separate from bounded strategic shadow analysis.',botControlMarkup());
+  h+='<div class="cards">'+metricCard('Live authority',status.live_authority,'Advanced send '+(status.advanced_send_blocked?'blocked':'enabled'),'<path d="M9 4a3 3 0 0 0-3 3v2a3 3 0 0 0 1 5 3 3 0 0 0 5 2 3 3 0 0 0 5-2 3 3 0 0 0 1-5V7a3 3 0 0 0-6-1 3 3 0 0 0-3-2zM12 6v12"/>')+metricCard('Shadow runs',metrics.shadow_runs,'Outbox writes: '+metrics.shadow_outbox_writes,'<path d="m13 2-8 12h6l-1 8 9-13h-6z"/>')+metricCard('Observed reply rate',metrics.reply_rate==null?'—':Math.round(metrics.reply_rate*100)+'%',metrics.eligible_sent_turns+' eligible sent turns','<path d="M21 11.5a8.5 8.5 0 0 1-9 8.5 9 9 0 0 1-4-.9L3 21l1.7-4.6A8.5 8.5 0 1 1 21 11.5z"/>')+metricCard('Evidence memories',metrics.memory_records,'Durable source-backed records','<circle cx="9" cy="8" r="3"/><path d="M3.5 19c.4-3.8 2.2-5.7 5.5-5.7s5.1 1.9 5.5 5.7M16 5a3 3 0 0 1 0 6M17 14c2 .6 3.2 2.2 3.5 5"/>')+'</div>';
+  h+='<section class="block"><h3>Runtime controls</h3><p class="block-copy">Changes persist per creator and apply immediately. Advanced live authority remains deployment-blocked.</p><div class="g3"><div><label for="brain-mode">Mode</label><select id="brain-mode"><option value="current">Current only</option><option value="shadow">Shadow</option></select></div><div><label for="brain-sample">Shadow sample %</label><input id="brain-sample" type="number" min="0" max="100" value="'+esc(s.shadow_sample_percent||0)+'"></div><div><label for="brain-cap">Strategic calls/day</label><input id="brain-cap" type="number" min="0" value="'+esc(s.max_strategic_calls_per_day||100)+'"></div></div><div style="margin-top:12px"><button class="btn" data-action="save-brain-settings">Save and apply</button> <span id="brain-result"></span></div></section>';
+  var experimentRows=(experiments&&experiments.experiments)||[];h+='<section class="block"><h3>Fan brain context</h3><p class="block-copy">Inspect source-backed memory, episode ranges, current state, and decision strategy for one fan. Generated message drafts are excluded.</p><div class="g2"><input id="brain-fan-id" maxlength="128" placeholder="Fan ID"><div><button class="btn-ghost" data-action="load-brain-fan">Load fan context</button></div></div><div id="brain-fan-context" style="margin-top:14px"></div></section>';
+  h+='<section class="block"><h3>Durable experiments</h3><p class="block-copy">Sticky fan assignments, sample counts, outcomes, and audit events. Experiments never promote automatically.</p><div class="table-wrap"><table><thead><tr><th>Name</th><th>Status</th><th>Minimum sample</th><th>Assignments</th><th>Action</th></tr></thead><tbody>'+(experimentRows.length?experimentRows.map(function(e){var samples=Object.keys(e.sample_counts||{}).map(function(k){return k+': '+e.sample_counts[k]}).join(', ')||'0';return'<tr><td>'+esc(e.name)+'</td><td>'+esc(e.status)+'</td><td>'+esc(e.minimum_sample_size)+'</td><td>'+esc(samples)+'</td><td>'+(e.status==='active'?'<button class="btn-ghost" data-action="pause-brain-experiment" data-id="'+esc(e.id)+'">Pause</button>':'—')+'</td></tr>'}).join(''):'<tr><td colspan="5" class="muted-note">No experiments configured.</td></tr>')+'</tbody></table></div></section>';
+  var rows=(runs&&runs.runs)||[];h+='<section class="block"><h3>Recent shadow audit</h3><p class="block-copy">Structured routes, gate codes, latency, and model-call counts only. Hidden prompts and chain-of-thought are never shown.</p><div class="table-wrap"><table><thead><tr><th>Status</th><th>Route</th><th>Version</th><th>Gate</th><th>Calls</th><th>Latency</th></tr></thead><tbody>'+(rows.length?rows.map(function(r){return'<tr><td>'+esc(r.status)+'</td><td>'+esc(r.route)+'</td><td>'+esc(r.brain_version)+'</td><td>'+esc(((r.gate||{}).reason_codes||[]).join(', ')||((r.gate||{}).approved?'passed':'—'))+'</td><td>'+esc(r.model_calls)+'</td><td>'+esc(r.latency_ms)+' ms</td></tr>'}).join(''):'<tr><td colspan="6" class="muted-note">No shadow runs yet.</td></tr>')+'</tbody></table></div></section>';
+  c.innerHTML=h;document.getElementById('brain-mode').value=s.mode==='shadow'?'shadow':'current';loadBotStatus();
+}
+function saveBrainSettings(){
+  var result=document.getElementById('brain-result'),payload={mode:document.getElementById('brain-mode').value,shadow_sample_percent:Number(document.getElementById('brain-sample').value),max_strategic_calls_per_day:Number(document.getElementById('brain-cap').value)};if(result)result.textContent='Saving…';
+  M('/api/brain/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d}})}).then(function(x){if(!x.ok){if(result)result.textContent=x.data.error||'Save failed';return}loadBrain()});
+}
+async function loadBrainFan(){
+  var input=document.getElementById('brain-fan-id'),target=document.getElementById('brain-fan-context'),fanId=(input&&input.value||'').trim();if(!target||!fanId)return;target.innerHTML='<p class="muted-note">Loading fan context…</p>';var data=await F('/api/brain/context?fan_id='+encodeURIComponent(fanId));if(!data){target.innerHTML='<p class="muted-note">Unable to load fan context.</p>';return}var state=data.state||{},memories=data.memories||[],episodes=data.episodes||[],decisions=data.decisions||[];target.innerHTML='<div class="g3"><div><span class="muted-note">Objective</span><strong>'+esc(state.current_objective||'—')+'</strong></div><div><span class="muted-note">Tactic</span><strong>'+esc(state.current_tactic||'—')+'</strong></div><div><span class="muted-note">Open thread</span><strong>'+esc(state.active_thread||'—')+'</strong></div></div><h4>Evidence memories</h4>'+(memories.length?'<div class="table-wrap"><table><thead><tr><th>Type</th><th>Memory</th><th>Confidence</th><th>Status</th><th>Source</th></tr></thead><tbody>'+memories.map(function(m){return'<tr><td>'+esc(m.memory_type)+'</td><td>'+esc(m.display_value)+'</td><td>'+esc(Math.round(Number(m.confidence||0)*100))+'%</td><td>'+esc(m.status)+'</td><td>'+esc(m.source_message_id)+'</td></tr>'}).join('')+'</tbody></table></div>':'<p class="muted-note">No Memory V2 records.</p>')+'<p class="muted-note">'+esc(episodes.length)+' older-history episodes · '+esc(decisions.length)+' recent strategy decisions</p>';
+}
+async function pauseBrainExperiment(id){var r=await M('/api/brain/experiments',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'pause',experiment_id:Number(id)})});if(r.ok)loadBrain()}
+
 function loadSettings(){
   var c=document.getElementById('content');
   var h=pageHead('Workspace','Settings','Manage the live provider, creator persona, chatting instructions, and brand bible.',botControlMarkup());
@@ -770,6 +795,9 @@ document.addEventListener('click',function(event){
   else if(action==='load-persona')loadPersona();
   else if(action==='save-persona')savePersona();
   else if(action==='save-chat-instructions')saveChatInstructions();
+  else if(action==='save-brain-settings')saveBrainSettings();
+  else if(action==='load-brain-fan')loadBrainFan();
+  else if(action==='pause-brain-experiment')pauseBrainExperiment(control.dataset.id);
   else if(action==='save-brand-bible')saveBible();
   else if(action==='new-script')newScript();
   else if(action==='load-scripts')loadScripts();

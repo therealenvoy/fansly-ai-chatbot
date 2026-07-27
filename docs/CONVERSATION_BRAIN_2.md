@@ -12,12 +12,12 @@ enabled state remain unchanged.
 
 ## Data model
 
-Revision `20260728_10` is additive and creates:
+Revisions `20260728_10` through `20260728_12` are additive and create:
 
 - `conversation_outcomes`: one row per sent conversation decision, linked to
   inbound, outbox, creator, fan, brain/model version, trigger, experiment, and
   deterministic reply/continuation/return/recovery/negative outcomes.
-- `fan_memories`: evidence-backed typed memories with source message,
+- `fan_memories_v2`: evidence-backed typed memories with source message,
   confidence, importance, expiry, and supersession.
 - `conversation_episodes`: idempotent structured summaries retaining exact
   source message ranges.
@@ -25,9 +25,10 @@ Revision `20260728_10` is additive and creates:
   mood, energy, engagement, objective/tactic/thread, and repetition counters.
 - `brain_shadow_runs`: router, candidate, judge, gate, timing, and failure
   records. This table deliberately has no outbox foreign key.
-- `brain_experiments`, `brain_experiment_variants`, and
-  `brain_experiment_assignments`: durable audited experiments with sticky
-  per-fan assignment and no automatic promotion.
+- `brain_experiments`, `brain_experiment_assignments`, and
+  `brain_experiment_events`: durable experiments, sticky per-fan assignment,
+  and append-only create/pause audit events with no automatic promotion.
+- `brain_usage_buckets`: atomic creator-scoped hourly and daily call budgets.
 
 Existing flat fan notes and conversation decisions remain readable. Backfill to
 Memory V2 is explicit, idempotent, and never deletes or rewrites legacy notes.
@@ -55,7 +56,7 @@ claimed by multiple outcomes.
 
 An auditable deterministic router selects fast or strategic analysis using
 message length, vulnerability/boundary markers, stalled trigger, contradictory
-memory, recent failed tactics, low context confidence, and engagement shifts.
+memory, recent failed tactics, and low context confidence.
 
 Strategic shadow analysis uses bounded contracts:
 
@@ -88,8 +89,8 @@ Results include deterministic violations and pairwise rubric scores; an LLM
 judge alone cannot establish superiority.
 
 Authenticated Brain operations expose configuration, privacy-safe aggregate
-outcomes, recent structured decisions, gate results, memories, open threads,
-and experiment summaries. They never expose keys, hidden prompts, chain of
+outcomes, recent structured decisions without generated message drafts, gate
+results, memories, open threads, and experiment summaries. They never expose keys, hidden prompts, chain of
 thought, or raw conversation contents.
 
 ## Rollout gates
