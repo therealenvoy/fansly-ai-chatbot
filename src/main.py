@@ -37,6 +37,7 @@ from .settings.ai import (
     DeepSeekSettingsService,
     EncryptedCredentialStore,
 )
+from .settings.chat_guidance import ChatGuidanceService
 from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
@@ -186,6 +187,10 @@ settings_store = SettingsStore(
     engine=database_engine,
     creator_id=CREATOR_ID,
 )
+chat_guidance = ChatGuidanceService(
+    settings_store,
+    legacy_brand_bible_path=BRAND_BIBLE_CONFIG_PATH,
+)
 credential_store = EncryptedCredentialStore(
     settings_store,
     os.getenv("CREDENTIAL_ENCRYPTION_KEY", ""),
@@ -294,6 +299,7 @@ if api_ok:
             require_fan_allowlist=CONTROLLED_LAUNCH,
             bot_mode=BOT_MODE,
             chat_responder=chat_responder,
+            chat_guidance=chat_guidance,
             enable_unread_replies=ENABLE_UNREAD_REPLIES,
             enable_online_outreach=ENABLE_ONLINE_OUTREACH,
             outreach_existing_online=OUTREACH_EXISTING_ONLINE,
@@ -410,6 +416,7 @@ dashboard = DashboardServer(
     runtime_monitor=runtime_monitor,
     crm_sync=crm_sync,
     ai_settings=ai_settings,
+    chat_guidance=chat_guidance,
 )
 
 

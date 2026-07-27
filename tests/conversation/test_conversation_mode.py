@@ -17,6 +17,7 @@ def _persona():
         sentence_style="short",
         pet_names=["babe"],
         content_boundaries=["No meetups"],
+        sample_winning_messages=["hey, how was ur night?"],
         response_length_target=35,
     )
 
@@ -56,11 +57,29 @@ def test_deepseek_responder_uses_context_and_returns_message(monkeypatch):
         fan_message="finally home",
         known_facts=["works nights"],
         display_name="Sam",
+        chat_instructions="Answer directly, then ask one question.",
+        brand_bible="Sunny is playful, attentive, and never formal.",
     )
 
     assert result == "hey babe, how was work?"
     payload = post.call_args.kwargs["json"]
     assert payload["model"] == "deepseek-v4-flash"
     assert payload["thinking"] == {"type": "disabled"}
-    assert "conversation-only" in payload["messages"][0]["content"]
+    system = payload["messages"][0]["content"]
+    user = payload["messages"][1]["content"]
+    assert "conversation-only" in system
+    assert "Sunny is playful, attentive, and never formal." in system
+    assert "Answer directly, then ask one question." in system
+    assert "hey, how was ur night?" in system
+    assert system.index("NON-NEGOTIABLE RUNTIME RULES") < system.index(
+        "CREATOR CHATTING INSTRUCTIONS"
+    )
+    assert system.index("CREATOR CHATTING INSTRUCTIONS") < system.index(
+        "CREATOR BRAND BIBLE"
+    )
+    assert system.index("CREATOR BRAND BIBLE") < system.index(
+        "CREATOR PERSONA"
+    )
     assert "finally home" in payload["messages"][1]["content"]
+    assert "Known fact: works nights" not in user
+    assert "- works nights" in user

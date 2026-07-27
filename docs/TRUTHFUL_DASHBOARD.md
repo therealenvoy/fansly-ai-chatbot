@@ -86,5 +86,8 @@ Creator script changes are stored as durable overrides. Built-in scripts remain
 the fallback; an active override with the same name replaces the built-in at
 runtime, and deleting the override restores the built-in.
 
-The brand-bible file is an operator reference only. Saving it is atomic, but
-the bot does not consume it at runtime and the dashboard says so explicitly.
+Chatting instructions and the brand bible are creator-scoped database
+settings. Saving either document updates the live prompt service immediately.
+Conversation generation applies hard runtime policy first, followed by
+chatting instructions, the brand bible, structured persona, compact durable fan
+memory, bounded recent history, and the newest inbound message.

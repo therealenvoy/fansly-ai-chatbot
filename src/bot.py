@@ -56,6 +56,7 @@ from .persistence.presence import PresenceRepository
 
 if TYPE_CHECKING:
     from .persistence.state import ConversationStateRepository
+    from .settings.chat_guidance import ChatGuidanceService
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class FanslyBot:
         require_fan_allowlist: bool = False,
         bot_mode: BotMode | str = BotMode.FULL_PPV,
         chat_responder: DeepSeekChatResponder | None = None,
+        chat_guidance: "ChatGuidanceService | None" = None,
         enable_unread_replies: bool = True,
         enable_online_outreach: bool = False,
         outreach_existing_online: bool = False,
@@ -124,6 +126,7 @@ class FanslyBot:
         self.require_fan_allowlist = bool(require_fan_allowlist)
         self.bot_mode = BotMode.parse(bot_mode)
         self.chat_responder = chat_responder
+        self.chat_guidance = chat_guidance
         self.enable_unread_replies = bool(enable_unread_replies)
         self.enable_online_outreach = bool(enable_online_outreach)
         self.outreach_existing_online = bool(outreach_existing_online)
@@ -235,6 +238,42 @@ class FanslyBot:
                 )
             ]
         )
+
+    @staticmethod
+    def _fan_memory(note: FanNote | None) -> list[str]:
+        """Render compact, durable fan context without dumping full history."""
+        if note is None:
+            return []
+        memory: list[str] = []
+        if note.relationship_stage and note.relationship_stage != "new":
+            memory.append(
+                f"Relationship stage: {note.relationship_stage}"
+            )
+        if note.occupation:
+            memory.append(f"Occupation: {note.occupation}")
+        memory.extend(
+            f"Preference: {item}"
+            for item in note.preferences
+            if str(item).strip()
+        )
+        memory.extend(
+            f"Emotional cue: {item}"
+            for item in note.emotional_triggers
+            if str(item).strip()
+        )
+        memory.extend(
+            f"Hard limit: {item}"
+            for item in note.hard_limits
+            if str(item).strip()
+        )
+        memory.extend(
+            f"Known fact: {item}"
+            for item in note.facts
+            if str(item).strip()
+        )
+        if note.notes.strip():
+            memory.append(f"Operator note: {note.notes.strip()}")
+        return memory
 
     def poll_and_process(self, filter_type: str = "all", max_chats: int = 50) -> bool:
         """Main loop: fetch chats, process chats with unread messages, send replies.
@@ -1124,18 +1163,27 @@ class FanslyBot:
             self.message_store.get_recent_context(
                 inbound.fan_id,
                 self.creator_id,
-                limit=12,
+                limit=20,
             )
             if self.message_store
             else ""
+        )
+        guidance = (
+            self.chat_guidance.snapshot()
+            if self.chat_guidance is not None
+            else None
         )
         generated = self.chat_responder.respond(
             persona=self.persona,
             history=history,
             fan_message=None,
-            known_facts=list(note.facts) if note else [],
+            known_facts=self._fan_memory(note),
             display_name=note.display_name if note else None,
             proactive=True,
+            chat_instructions=(
+                guidance.chat_instructions if guidance else ""
+            ),
+            brand_bible=guidance.brand_bible if guidance else "",
         )
         approved = self._approve_conversation_text(
             inbound.fan_id,
@@ -1230,22 +1278,31 @@ class FanslyBot:
                 self.message_store.get_recent_context(
                     fan_id,
                     self.creator_id,
-                    limit=12,
+                    limit=20,
                 )
                 if self.message_store
                 else ""
+            )
+            guidance = (
+                self.chat_guidance.snapshot()
+                if self.chat_guidance is not None
+                else None
             )
             generated = self.chat_responder.respond(
                 persona=self.persona,
                 history=history,
                 fan_message=latest.content,
-                known_facts=list(note.facts) if note else [],
+                known_facts=self._fan_memory(note),
                 display_name=(
                     note.display_name
                     if note and note.display_name
                     else chat.partner_display_name
                 ),
                 proactive=False,
+                chat_instructions=(
+                    guidance.chat_instructions if guidance else ""
+                ),
+                brand_bible=guidance.brand_bible if guidance else "",
             )
             approved = self._approve_conversation_text(
                 fan_id,

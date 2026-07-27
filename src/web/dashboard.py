@@ -31,6 +31,7 @@ from ..scripts.loader import BUILTIN_SCRIPTS
 from ..scripts.models import ScriptCategory, ScriptTemplate, ScriptVariable
 from ..scripts.repository import ScriptTemplateRepository
 from ..sequences.models import Sequence, SequenceTrigger, SequenceStep, FanSequenceProgress, StepStatus
+from ..settings.chat_guidance import ChatGuidanceError
 
 logger = logging.getLogger("fansly-bot.dashboard")
 if TYPE_CHECKING:
@@ -937,6 +938,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/scripts": return self._scrs()
         if p=="/api/connection": return self._conn(False)
         if p=="/api/ai/settings": return self._ai_settings_get()
+        if p=="/api/chat-instructions": return self._chat_instructions_get()
         if p=="/api/persona": return self._pers_get(q)
         if p=="/api/brand-bible": return self._bible_get()
         if p=="/api/sequences": return self._seq_list()
@@ -966,6 +968,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/connection/test": return self._conn(True)
         if p=="/api/ai/settings": return self._ai_settings_save(b)
         if p=="/api/ai/connection/test": return self._ai_connection_test()
+        if p=="/api/chat-instructions": return self._chat_instructions_post(b)
         if p=="/api/scripts": return self._script_save(b)
         if p.startswith("/api/scripts/") and len(p.split("/"))==4: return self._script_save(b,p.rsplit("/",1)[-1])
         if p=="/api/media-assets": return self._media_asset_save(b)
@@ -2103,30 +2106,72 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "runtime_applied":applied,
         })
 
-    def _bible_get(self):
-        p = Path(self.server.brand_bible_path)
+    def _chat_guidance(self):
+        service = self.server.chat_guidance
+        if service is None:
+            self.j(
+                {"error": "chat guidance settings are unavailable"},
+                503,
+            )
+            return None
+        return service
+
+    def _chat_instructions_get(self):
+        service = self._chat_guidance()
+        if service is None:
+            return
+        content = service.snapshot().chat_instructions
         return self.j({
-            "content":p.read_text(encoding="utf-8") if p.exists() else "",
-            "path":str(p),
-            "runtime_applied":False,
-            "purpose":"operator reference only",
+            "content":content,
+            "creator_id":self.creator_id,
+            "storage":"database",
+            "runtime_applied":True,
+            "purpose":"live conversation instructions",
         })
 
-    def _bible_post(self,b):
-        p = Path(self.server.brand_bible_path)
-        p.parent.mkdir(parents=True,exist_ok=True)
-        temporary=p.with_name(f".{p.name}.tmp")
+    def _chat_instructions_post(self,b):
+        service = self._chat_guidance()
+        if service is None:
+            return
         try:
-            temporary.write_text(b,encoding="utf-8")
-            os.replace(temporary,p)
-        finally:
-            if temporary.exists():
-                temporary.unlink()
+            snapshot = service.save_chat_instructions(b)
+        except ChatGuidanceError as error:
+            return self.j({"error":str(error)},400)
         return self.j({
             "status":"ok",
             "saved":True,
-            "runtime_applied":False,
-            "purpose":"operator reference only",
+            "runtime_applied":True,
+            "storage":"database",
+            "characters":len(snapshot.chat_instructions),
+        })
+
+    def _bible_get(self):
+        service = self._chat_guidance()
+        if service is None:
+            return
+        content = service.snapshot().brand_bible
+        return self.j({
+            "content":content,
+            "creator_id":self.creator_id,
+            "storage":"database",
+            "runtime_applied":True,
+            "purpose":"live brand instructions",
+        })
+
+    def _bible_post(self,b):
+        service = self._chat_guidance()
+        if service is None:
+            return
+        try:
+            snapshot = service.save_brand_bible(b)
+        except ChatGuidanceError as error:
+            return self.j({"error":str(error)},400)
+        return self.j({
+            "status":"ok",
+            "saved":True,
+            "runtime_applied":True,
+            "storage":"database",
+            "characters":len(snapshot.brand_bible),
         })
 
     # ─── PPV SEQUENCES ──────────────────────────────────
@@ -2583,6 +2628,7 @@ class DashboardServer:
         runtime_monitor=None,
         crm_sync=None,
         ai_settings=None,
+        chat_guidance=None,
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
         if allowed_hosts is None:
@@ -2622,6 +2668,7 @@ class DashboardServer:
         self.server.runtime_monitor = runtime_monitor
         self.server.crm_sync = crm_sync
         self.server.ai_settings = ai_settings
+        self.server.chat_guidance = chat_guidance
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
             if bot is not None and hasattr(bot, "persona_loader")

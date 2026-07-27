@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from src.bot import FanslyBot, LaunchGuardError
 from src.conversation.mode import BotMode
 from src.notes.repository import FanNoteRepository
+from src.notes.models import FanNote
 from src.persona.loader import PersonaLoader
 from src.fansly_client import (
     FanslyApiClient,
@@ -14,6 +15,32 @@ from src.fansly_client import (
 from src.persistence.database import create_database_engine
 from src.persistence.schema import metadata
 from src.persistence.state import ConversationStateRepository
+
+
+def test_fan_memory_includes_durable_profile_without_purchase_labels():
+    note = FanNote(
+        fan_id="fan-a",
+        creator_id="creator-a",
+        occupation="nurse",
+        preferences=["likes late-night chats"],
+        emotional_triggers=["responds well to humor"],
+        hard_limits=["no pet names"],
+        facts=["has a dog named Max"],
+        notes="Keep replies calm.",
+        relationship_stage="regular",
+        total_spent=900,
+    )
+
+    memory = FanslyBot._fan_memory(note)
+
+    assert "Relationship stage: regular" in memory
+    assert "Occupation: nurse" in memory
+    assert "Preference: likes late-night chats" in memory
+    assert "Emotional cue: responds well to humor" in memory
+    assert "Hard limit: no pet names" in memory
+    assert "Known fact: has a dog named Max" in memory
+    assert "Operator note: Keep replies calm." in memory
+    assert all("spent" not in item.lower() for item in memory)
 
 
 @pytest.fixture

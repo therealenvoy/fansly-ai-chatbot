@@ -18,6 +18,7 @@ from src.bot import LaunchGuardError
 from src.notes.repository import FAN_NOTES_TABLE
 from src.memory.store import MessageStore
 from src.persistence.crm import CrmSyncRepository
+from src.settings.chat_guidance import ChatGuidanceService
 from src.settings.store import SettingsStore
 from src.persistence.database import create_database_engine
 from src.persistence.schema import metadata
@@ -133,6 +134,9 @@ class TestDashboardShell:
         assert 'autocomplete="new-password"' in DASHBOARD_HTML
         assert "/api/ai/settings" in DASHBOARD_HTML
         assert "/api/ai/connection/test" in DASHBOARD_HTML
+        assert 'id="chat-instructions"' in DASHBOARD_HTML
+        assert "/api/chat-instructions" in DASHBOARD_HTML
+        assert "stored in the database" in DASHBOARD_HTML
         assert "function pickMedia(idx)" in DASHBOARD_HTML
 
 
@@ -167,6 +171,23 @@ def _post(host, path, payload=None, *, authenticated=True, csrf=True, origin=Non
         headers["X-CSRF-Token"] = TEST_CSRF_TOKEN
     headers["Origin"] = origin or f"http://{host}"
     status, data, _ = _request(host, "POST", path, body=body, headers=headers)
+    return status, data
+
+
+def _post_text(host, path, value, *, content_type="text/plain; charset=utf-8"):
+    headers = {
+        "Authorization": _authorization(),
+        "X-CSRF-Token": TEST_CSRF_TOKEN,
+        "Origin": f"http://{host}",
+        "Content-Type": content_type,
+    }
+    status, data, _ = _request(
+        host,
+        "POST",
+        path,
+        body=value,
+        headers=headers,
+    )
     return status, data
 
 
@@ -268,6 +289,13 @@ def running_server(db_url, tmp_path):
         db_url=db_url,
         creator_id=bot.creator_id,
     ).create_table()
+    guidance = ChatGuidanceService(
+        SettingsStore(
+            engine=bot.note_repo.engine,
+            creator_id=bot.creator_id,
+        ),
+        legacy_brand_bible_path=tmp_path / "brand_bible.md",
+    )
     server = DashboardServer(
         bot,
         port=0,
@@ -278,6 +306,7 @@ def running_server(db_url, tmp_path):
         persona_dir=str(tmp_path / "personas"),
         brand_bible_path=str(tmp_path / "brand_bible.md"),
         ai_settings=bot.ai_settings,
+        chat_guidance=guidance,
     )
     port = server.server.server_address[1]
 
@@ -1429,19 +1458,55 @@ class TestTruthfulDashboardControls:
         ).exists()
         bot.reload_persona.assert_not_called()
 
-    def test_brand_bible_is_explicitly_reference_only(
+    def test_chat_instructions_and_brand_bible_are_live_database_settings(
         self,
         running_server,
     ):
-        host, _, _ = running_server
+        host, _, db_url = running_server
 
-        status, body = _post(
+        status, chat_body = _post_text(
+            host,
+            "/api/chat-instructions",
+            "Reply directly and ask one natural question.",
+        )
+        bible_status, bible_body = _post_text(
             host,
             "/api/brand-bible",
-            {"reference": "voice"},
+            "Sunny is playful and warm.",
+            content_type="text/markdown; charset=utf-8",
         )
 
         assert status == 200
-        assert body["saved"] is True
-        assert body["runtime_applied"] is False
-        assert body["purpose"] == "operator reference only"
+        assert bible_status == 200
+        assert chat_body["saved"] is True
+        assert chat_body["runtime_applied"] is True
+        assert chat_body["storage"] == "database"
+        assert bible_body["saved"] is True
+        assert bible_body["runtime_applied"] is True
+        assert bible_body["storage"] == "database"
+
+        chat_get_status, chat_get = _get(
+            host,
+            "/api/chat-instructions",
+        )
+        bible_get_status, bible_get = _get(
+            host,
+            "/api/brand-bible",
+        )
+        assert chat_get_status == 200
+        assert bible_get_status == 200
+        assert chat_get["content"] == (
+            "Reply directly and ask one natural question."
+        )
+        assert bible_get["content"] == "Sunny is playful and warm."
+
+        stored = SettingsStore(
+            db_url=db_url,
+            creator_id="test_creator",
+        )
+        assert stored.get_scoped(
+            "conversation.chat_instructions"
+        ) == "Reply directly and ask one natural question."
+        assert stored.get_scoped(
+            "conversation.brand_bible"
+        ) == "Sunny is playful and warm."
