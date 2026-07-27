@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 
@@ -24,6 +25,22 @@ from src.conversation.brain2_repository import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json_object(raw: str) -> dict:
+    normalized = str(raw or "").strip()
+    fenced = re.fullmatch(
+        r"```(?:json)?\s*(.*?)\s*```",
+        normalized,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if fenced:
+        normalized = fenced.group(1).strip()
+
+    parsed = json.loads(normalized)
+    if not isinstance(parsed, dict):
+        raise ValueError("invalid_json_contract")
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -207,10 +224,7 @@ class DeepSeekStrategicAnalyzer:
         )
         response.raise_for_status()
         content = response.json()["choices"][0]["message"]["content"]
-        parsed = json.loads(str(content).strip())
-        if not isinstance(parsed, dict):
-            raise ValueError("invalid_json_contract")
-        return parsed
+        return _parse_json_object(content)
 
 
 class ShadowBrainService:

@@ -255,7 +255,8 @@ def test_fast_analyzer_serializes_durable_datetime_state(monkeypatch):
         "choices": [
             {
                 "message": {
-                    "content": json.dumps(
+                    "content": "```json\n"
+                    + json.dumps(
                         {
                             "fan_state": "engaged",
                             "objective": "maintain",
@@ -265,6 +266,7 @@ def test_fast_analyzer_serializes_durable_datetime_state(monkeypatch):
                             "message": "hey, how are you?",
                         }
                     )
+                    + "\n```"
                 }
             }
         ]
