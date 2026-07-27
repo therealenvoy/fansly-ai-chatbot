@@ -685,7 +685,7 @@ class FanslyBot:
             ),
             limit=self.stalled_scan_batch_size,
         )
-        queued = 0
+        work = []
         for candidate in candidates:
             digest = hashlib.sha256(
                 (
@@ -693,16 +693,18 @@ class FanslyBot:
                     f"{candidate.episode_key}"
                 ).encode("utf-8")
             ).hexdigest()[:48]
-            _, created = self.processing_repo.insert_inbound(
-                creator_id=self.creator_id,
-                platform_message_id=f"stalled:{digest}",
-                fan_id=candidate.fan_id,
-                chat_id=candidate.chat_id,
-                content=candidate.episode_key,
-                provider_created_at=now,
-                trigger_kind="stalled",
+            work.append(
+                {
+                    "creator_id": self.creator_id,
+                    "platform_message_id": f"stalled:{digest}",
+                    "fan_id": candidate.fan_id,
+                    "chat_id": candidate.chat_id,
+                    "content": candidate.episode_key,
+                    "provider_created_at": now,
+                    "trigger_kind": "stalled",
+                }
             )
-            queued += int(created)
+        queued = self.processing_repo.insert_inbound_many(work)
         if queued:
             logger.info(
                 "Queued %s stalled conversation follow-up(s)",

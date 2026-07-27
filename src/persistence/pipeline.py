@@ -120,6 +120,46 @@ class MessageProcessingRepository:
             ).mappings().one()
         return self._inbound(row), created
 
+    def insert_inbound_many(self, messages: list[dict]) -> int:
+        """Bulk-insert durable inbound work and return the created row count."""
+        if not messages:
+            return 0
+        observed_at = utcnow()
+        values = [
+            {
+                "creator_id": str(message["creator_id"]),
+                "platform_message_id": str(
+                    message["platform_message_id"]
+                ),
+                "fan_id": str(message["fan_id"]),
+                "chat_id": str(message["chat_id"]),
+                "content": str(message.get("content") or ""),
+                "trigger_kind": str(
+                    message.get("trigger_kind") or "unread"
+                ),
+                "provider_created_at": message["provider_created_at"],
+                "observed_at": observed_at,
+                "status": INBOUND_PENDING,
+                "attempt_count": 0,
+            }
+            for message in messages
+        ]
+        created = 0
+        with self.engine.begin() as conn:
+            for offset in range(0, len(values), 500):
+                statement = self._insert(INBOUND_MESSAGES).values(
+                    values[offset : offset + 500]
+                )
+                statement = statement.on_conflict_do_nothing(
+                    index_elements=[
+                        "creator_id",
+                        "platform_message_id",
+                    ]
+                )
+                result = conn.execute(statement)
+                created += max(int(result.rowcount or 0), 0)
+        return created
+
     def claim_next_inbound(
         self,
         creator_id: str,

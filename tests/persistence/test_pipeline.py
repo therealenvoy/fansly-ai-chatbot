@@ -81,6 +81,36 @@ def test_inbound_insert_is_idempotent_and_claims_oldest_first():
     assert claimed_ids == ["message-1", "message-2", "message-3"]
 
 
+def test_bulk_inbound_insert_is_conflict_safe_and_counts_created_rows():
+    engine, repository = _repository()
+    now = datetime.now(timezone.utc)
+    rows = [
+        {
+            "creator_id": "creator-a",
+            "platform_message_id": f"stalled-{number}",
+            "fan_id": f"fan-{number}",
+            "chat_id": f"chat-{number}",
+            "content": f"episode-{number}",
+            "provider_created_at": now,
+            "trigger_kind": "stalled",
+        }
+        for number in range(3)
+    ]
+
+    assert repository.insert_inbound_many(rows) == 3
+    assert repository.insert_inbound_many(rows) == 0
+
+    with engine.connect() as connection:
+        stored = connection.execute(
+            select(INBOUND_MESSAGES).order_by(INBOUND_MESSAGES.c.id)
+        ).mappings().all()
+    assert [row["trigger_kind"] for row in stored] == [
+        "stalled",
+        "stalled",
+        "stalled",
+    ]
+
+
 def test_postgres_claim_uses_row_lock_and_skip_locked():
     statement = MessageProcessingRepository.inbound_claim_statement(
         "creator-a",
