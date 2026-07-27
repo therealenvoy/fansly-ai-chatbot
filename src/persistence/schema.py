@@ -521,3 +521,7 @@ Index(
     FAN_PRESENCE.c.status,
     FAN_PRESENCE.c.last_outreach_at,
 )
+
+
+# Register additive Brain 2.0 tables in the shared Alembic metadata.
+import src.conversation.brain2_schema  # noqa: E402,F401

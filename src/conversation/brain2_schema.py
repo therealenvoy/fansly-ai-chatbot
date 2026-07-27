@@ -1,0 +1,226 @@
+"""Additive durable schema for Conversation Brain 2.0."""
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Table,
+    Text,
+    UniqueConstraint,
+)
+
+from src.persistence.schema import metadata, utcnow
+
+
+ID = BigInteger().with_variant(Integer, "sqlite")
+
+CONVERSATION_OUTCOMES = Table(
+    "conversation_outcomes",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("conversation_decision_id", ID, ForeignKey("conversation_decisions.id")),
+    Column("inbound_message_id", ID, ForeignKey("inbound_messages.id"), nullable=False),
+    Column(
+        "outbox_message_id",
+        ID,
+        ForeignKey("outbox_messages.id"),
+        nullable=False,
+        unique=True,
+    ),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column("brain_version", String(64), nullable=False),
+    Column("model", String(128), nullable=False),
+    Column("experiment_id", String(128)),
+    Column("variant", String(64)),
+    Column("trigger_kind", String(32), nullable=False),
+    Column("sent_at", DateTime(timezone=True), nullable=False),
+    Column("fan_replied", Boolean, nullable=False, default=False),
+    Column("reply_inbound_message_id", BigInteger),
+    Column("reply_latency_seconds", Integer),
+    Column("meaningful_reply", Boolean),
+    Column("continued_three_turns", Boolean, nullable=False, default=False),
+    Column("returned_within_24h", Boolean, nullable=False, default=False),
+    Column("stalled_recovered", Boolean, nullable=False, default=False),
+    Column("negative_signal", Boolean, nullable=False, default=False),
+    Column("additional_turns", Integer, nullable=False, default=0),
+    Column("attribution_closed_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+FAN_MEMORIES_V2 = Table(
+    "fan_memories_v2",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column("memory_type", String(64), nullable=False),
+    Column("memory_key", String(128)),
+    Column("normalized_value", Text, nullable=False),
+    Column("display_value", Text, nullable=False),
+    Column("confidence", Float, nullable=False),
+    Column("importance", Float, nullable=False),
+    Column("source_message_id", String(128), nullable=False),
+    Column("source_timestamp", DateTime(timezone=True), nullable=False),
+    Column("first_seen_at", DateTime(timezone=True), nullable=False),
+    Column("last_confirmed_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True)),
+    Column("status", String(32), nullable=False, default="active"),
+    Column("superseded_by_id", ID, ForeignKey("fan_memories_v2.id")),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "creator_id",
+        "fan_id",
+        "memory_type",
+        "normalized_value",
+        name="uq_fan_memory_v2_value",
+    ),
+)
+
+CONVERSATION_EPISODES = Table(
+    "conversation_episodes",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column("episode_key", String(160), nullable=False),
+    Column("main_topics", JSON, nullable=False, default=list),
+    Column("emotional_tone", String(64)),
+    Column("fan_disclosures", JSON, nullable=False, default=list),
+    Column("creator_statements", JSON, nullable=False, default=list),
+    Column("boundaries", JSON, nullable=False, default=list),
+    Column("resolved_threads", JSON, nullable=False, default=list),
+    Column("unresolved_threads", JSON, nullable=False, default=list),
+    Column("future_callback", Text),
+    Column("source_start_message_id", String(128), nullable=False),
+    Column("source_end_message_id", String(128), nullable=False),
+    Column("episode_started_at", DateTime(timezone=True), nullable=False),
+    Column("episode_ended_at", DateTime(timezone=True), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "creator_id",
+        "fan_id",
+        "episode_key",
+        name="uq_conversation_episode_key",
+    ),
+)
+
+FAN_CONVERSATION_STATES = Table(
+    "fan_conversation_states",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("fan_id", String(128), primary_key=True),
+    Column("relationship_stage", String(64), nullable=False, default="unknown"),
+    Column("current_mood", String(64), nullable=False, default="unknown"),
+    Column("current_energy", String(64), nullable=False, default="unknown"),
+    Column("engagement_estimate", Float, nullable=False, default=0.5),
+    Column("current_objective", String(64)),
+    Column("current_tactic", String(64)),
+    Column("active_thread", Text),
+    Column("recent_objectives", JSON, nullable=False, default=list),
+    Column("recent_tactics", JSON, nullable=False, default=list),
+    Column("question_streak", Integer, nullable=False, default=0),
+    Column("pet_name_streak", Integer, nullable=False, default=0),
+    Column("last_fan_energy", String(64)),
+    Column("last_creator_energy", String(64)),
+    Column("state_version", Integer, nullable=False, default=1),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+BRAIN_SHADOW_RUNS = Table(
+    "brain_shadow_runs",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("inbound_message_id", ID, ForeignKey("inbound_messages.id"), nullable=False),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column("brain_version", String(64), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("route", String(32), nullable=False),
+    Column("router", JSON, nullable=False, default=dict),
+    Column("planner", JSON),
+    Column("candidates", JSON),
+    Column("judge", JSON),
+    Column("gate", JSON, nullable=False, default=dict),
+    Column("selected_candidate", Text),
+    Column("model_calls", Integer, nullable=False, default=0),
+    Column("latency_ms", Integer, nullable=False, default=0),
+    Column("error_code", String(128)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("completed_at", DateTime(timezone=True)),
+    UniqueConstraint(
+        "inbound_message_id",
+        "brain_version",
+        name="uq_brain_shadow_run_version",
+    ),
+)
+
+BRAIN_EXPERIMENTS = Table(
+    "brain_experiments",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("name", String(128), nullable=False),
+    Column("status", String(32), nullable=False, default="active"),
+    Column("variants", JSON, nullable=False),
+    Column("minimum_sample_size", Integer, nullable=False, default=100),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("ended_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint("creator_id", "name", name="uq_brain_experiment_name"),
+)
+
+BRAIN_EXPERIMENT_ASSIGNMENTS = Table(
+    "brain_experiment_assignments",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("experiment_id", ID, ForeignKey("brain_experiments.id"), nullable=False),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column("variant", String(64), nullable=False),
+    Column("assigned_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "experiment_id",
+        "creator_id",
+        "fan_id",
+        name="uq_brain_experiment_assignment",
+    ),
+)
+
+Index(
+    "ix_conversation_outcome_fan_sent",
+    CONVERSATION_OUTCOMES.c.creator_id,
+    CONVERSATION_OUTCOMES.c.fan_id,
+    CONVERSATION_OUTCOMES.c.sent_at,
+)
+Index(
+    "ix_fan_memory_v2_retrieval",
+    FAN_MEMORIES_V2.c.creator_id,
+    FAN_MEMORIES_V2.c.fan_id,
+    FAN_MEMORIES_V2.c.status,
+    FAN_MEMORIES_V2.c.importance,
+)
+Index(
+    "ix_conversation_episode_fan_time",
+    CONVERSATION_EPISODES.c.creator_id,
+    CONVERSATION_EPISODES.c.fan_id,
+    CONVERSATION_EPISODES.c.episode_ended_at,
+)
+Index(
+    "ix_brain_shadow_run_status",
+    BRAIN_SHADOW_RUNS.c.creator_id,
+    BRAIN_SHADOW_RUNS.c.status,
+    BRAIN_SHADOW_RUNS.c.created_at,
+)

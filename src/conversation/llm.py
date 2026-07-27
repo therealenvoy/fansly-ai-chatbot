@@ -56,12 +56,16 @@ class DeepSeekChatResponder:
         model: str = DEFAULT_DEEPSEEK_MODEL,
         base_url: str = "https://api.deepseek.com",
         timeout: float = 30.0,
+        max_output_tokens: int = 800,
+        json_repair_attempts: int = 1,
     ):
         self._lock = threading.RLock()
         self.api_key = (api_key or "").strip()
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.max_output_tokens = min(max(int(max_output_tokens), 256), 4_096)
+        self.json_repair_attempts = min(max(int(json_repair_attempts), 0), 1)
 
     @property
     def enabled(self) -> bool:
@@ -112,12 +116,17 @@ class DeepSeekChatResponder:
         proactive_kind: str | None = None,
         chat_instructions: str = "",
         brand_bible: str = "",
+        previous_decision: dict | None = None,
+        recent_objectives: list[str] | None = None,
+        recent_tactics: list[str] | None = None,
     ) -> ConversationDecision | None:
         with self._lock:
             api_key = self.api_key
             model = self.model
             base_url = self.base_url
             timeout = self.timeout
+            max_output_tokens = self.max_output_tokens
+            repair_attempts = self.json_repair_attempts
         if not api_key:
             return None
 
@@ -196,35 +205,72 @@ class DeepSeekChatResponder:
             "history consistency, repetition, persona fit, and reply likelihood, "
             "then revise it into final_message.\n"
             f"Fan name: {display_name or 'unknown'}\n"
+            f"Previous objective: {(previous_decision or {}).get('objective') or 'none'}\n"
+            f"Previous tactic: {(previous_decision or {}).get('tactic') or 'none'}\n"
+            f"Unresolved open thread: {(previous_decision or {}).get('open_thread') or 'none'}\n"
+            f"Recent objectives: {', '.join(recent_objectives or []) or 'none'}\n"
+            f"Recent tactics: {', '.join(recent_tactics or []) or 'none'}\n"
             f"Saved fan memory:\n{_memory_lines(known_facts)}\n"
             f"Recent conversation:\n"
             f"{_recent_history(history) or '(no prior messages)'}\n"
             f"Newest unread fan message:\n{fan_message or '(none)'}"
         )
-        try:
+        def request(payload: dict):
             response = httpx.post(
                 f"{base_url}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "thinking": {"type": "disabled"},
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    "temperature": 0.75,
-                    "max_tokens": 180,
-                },
+                json=payload,
                 timeout=timeout,
             )
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-            normalized = str(content or "").strip()
-            return ConversationDecision.from_model_output(
+            return str(
+                response.json()["choices"][0]["message"]["content"] or ""
+            ).strip()
+
+        payload = {
+            "model": model,
+            "thinking": {"type": "disabled"},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.75,
+            "max_tokens": max_output_tokens,
+        }
+        try:
+            normalized = request(payload)
+            decision = ConversationDecision.from_model_output(
                 normalized,
+                proactive_kind=proactive_kind,
+            )
+            if decision is not None or repair_attempts == 0:
+                return decision
+            repair_payload = {
+                "model": model,
+                "thinking": {"type": "disabled"},
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Repair the malformed JSON into exactly the required "
+                            "conversation-decision object. Preserve meaning, add no "
+                            "new facts, output JSON only, and never include reasoning."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": _bounded_text(normalized, 8_000),
+                    },
+                ],
+                "temperature": 0,
+                "max_tokens": max_output_tokens,
+            }
+            repaired = request(repair_payload)
+            return ConversationDecision.from_model_output(
+                repaired,
                 proactive_kind=proactive_kind,
             )
         except Exception as exc:

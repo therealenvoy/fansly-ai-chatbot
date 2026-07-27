@@ -115,6 +115,50 @@ class ConversationDecisionRepository:
             model=str(row["model"]),
         )
 
+    def latest_for_fan(
+        self,
+        *,
+        creator_id: str,
+        fan_id: str,
+        limit: int = 5,
+    ) -> list[StoredConversationDecision]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(CONVERSATION_DECISIONS)
+                .where(
+                    and_(
+                        CONVERSATION_DECISIONS.c.creator_id == creator_id,
+                        CONVERSATION_DECISIONS.c.fan_id == fan_id,
+                    )
+                )
+                .order_by(
+                    CONVERSATION_DECISIONS.c.created_at.desc(),
+                    CONVERSATION_DECISIONS.c.id.desc(),
+                )
+                .limit(max(1, min(int(limit), 20)))
+            ).mappings().all()
+        return [
+            StoredConversationDecision(
+                inbound_message_id=int(row["inbound_message_id"]),
+                creator_id=str(row["creator_id"]),
+                fan_id=str(row["fan_id"]),
+                trigger_kind=str(row["trigger_kind"]),
+                decision=ConversationDecision(
+                    fan_state=str(row["fan_state"]),
+                    state_summary=str(row["state_summary"]),
+                    objective=str(row["objective"]),
+                    tactic=str(row["tactic"]),
+                    open_thread=row["open_thread"],
+                    draft=str(row["draft"]),
+                    critique=tuple(row["critique"] or ()),
+                    final_message=str(row["final_message"]),
+                    confidence=float(row["confidence"]),
+                ),
+                model=str(row["model"]),
+            )
+            for row in rows
+        ]
+
     def _insert(self):
         if self.engine.dialect.name == "postgresql":
             return pg_insert(CONVERSATION_DECISIONS)
