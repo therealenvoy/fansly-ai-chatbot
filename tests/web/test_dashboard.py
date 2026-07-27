@@ -70,6 +70,14 @@ class TestDashboardShell:
         assert 'aria-label="Toggle bot"' in DASHBOARD_HTML
         assert "button.setAttribute('aria-pressed'" in DASHBOARD_HTML
 
+    def test_start_stop_control_is_visible_inside_inbox_and_settings(self):
+        assert DASHBOARD_HTML.count('data-bot-control') >= 2
+        assert DASHBOARD_HTML.count("botControlMarkup()") >= 3
+        assert 'data-off-label="Start bot"' in DASHBOARD_HTML
+        assert 'data-on-label="Stop bot"' in DASHBOARD_HTML
+        assert 'data-bot-reason' in DASHBOARD_HTML
+        assert "document.querySelectorAll('[data-bot-control]')" in DASHBOARD_HTML
+
     def test_inline_event_handlers_are_not_used(self):
         assert " onclick=" not in DASHBOARD_HTML
         assert " onchange=" not in DASHBOARD_HTML
@@ -95,6 +103,20 @@ class TestDashboardShell:
         assert "history_complete" in DASHBOARD_HTML
         assert "load-more-conversations" in DASHBOARD_HTML
         assert "Loading latest messages from Fansly" in DASHBOARD_HTML
+
+    def test_inbox_conversation_list_owns_its_vertical_scroll(self):
+        assert (
+            ".conversation-rail{display:flex;flex-direction:column;"
+            "min-height:0;overflow:hidden;"
+        ) in DASHBOARD_HTML
+        assert (
+            ".conversation-list{flex:1;min-height:0;overflow-y:auto;"
+        ) in DASHBOARD_HTML
+
+    def test_inbox_distinguishes_local_preview_from_live_sync(self):
+        assert "conversationLiveSyncAvailable" in DASHBOARD_HTML
+        assert "Stored preview" in DASHBOARD_HTML
+        assert "Live sync is not connected" in DASHBOARD_HTML
 
     def test_content_editors_and_media_picker_are_present(self):
         assert "Script Studio" in DASHBOARD_HTML
@@ -585,6 +607,7 @@ class TestCrmConversationHistory:
         assert body["total"] == 1
         assert body["has_more"] is False
         assert body["provider_primed"] is True
+        assert body["live_sync_available"] is True
         assert body["fans"][0]["username"] == "live_fan"
         sync.refresh_chat_index.assert_called_once_with()
         sync.hydrate_recent.assert_not_called()
@@ -651,6 +674,7 @@ class TestCrmConversationHistory:
 
         assert status == 200
         assert body["live_hydrated"] is True
+        assert body["live_sync_available"] is True
         assert body["live_refresh_error"] is None
         assert body["messages"][0]["content"] == "loaded when opened"
         sync.hydrate_recent.assert_called_once_with("fan-live")

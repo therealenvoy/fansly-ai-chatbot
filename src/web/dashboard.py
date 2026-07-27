@@ -1129,6 +1129,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "offset":0,
                 "limit":200,
                 "has_more":False,
+                "live_sync_available":False,
                 "source":"durable_state_unavailable",
             })
         query=query or {}
@@ -1217,6 +1218,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "provider_primed":provider_primed,
             "provider_refresh_error":provider_refresh_error,
             "discovery_complete":discovery_complete,
+            "live_sync_available":self.crm_sync is not None,
             "source":"durable_state_with_live_overlay",
         })
 
@@ -1411,6 +1413,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
             "live_hydrated":live_hydrated,
             "live_refresh_error":live_refresh_error,
+            "live_sync_available":self.crm_sync is not None,
             "messages": history,
         })
 

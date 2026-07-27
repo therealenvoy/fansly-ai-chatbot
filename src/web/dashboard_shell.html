@@ -120,8 +120,10 @@ svg{display:block}
 }
 .toggle-pill:hover{border-color:var(--line-strong)}
 .toggle-pill:active{transform:scale(.97)}
-.toggle-pill .dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(68,215,146,.1)}
-.toggle-pill .dot.off{background:var(--red);box-shadow:0 0 0 4px rgba(255,107,125,.09)}
+[data-bot-dot]{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 4px rgba(68,215,146,.1)}
+[data-bot-dot].off{background:var(--red);box-shadow:0 0 0 4px rgba(255,107,125,.09)}
+.bot-control-group{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.bot-control-reason{max-width:420px;color:var(--amber);font-size:10px;line-height:1.45;text-align:right}
 .content{flex:1;overflow-y:auto;padding:24px;scrollbar-gutter:stable}
 .content>*{width:min(1380px,100%);margin-inline:auto}
 .content::-webkit-scrollbar,.sidebar nav::-webkit-scrollbar,.drawer-body::-webkit-scrollbar{width:9px}
@@ -208,7 +210,7 @@ tr.clickable{cursor:pointer}
 .empty-inner{max-width:390px}.empty .ico{width:50px;height:50px;margin:0 auto 16px;border-radius:15px;display:grid;place-items:center;background:rgba(161,124,255,.11);color:#bda6ff;font-size:20px}
 .empty h3{font-size:16px}.empty p{font-size:10px;line-height:1.55;color:var(--muted);margin-top:7px}
 .messages-layout{height:calc(100vh - 156px);height:calc(100dvh - 156px);min-height:500px;display:grid;grid-template-columns:330px minmax(0,1fr);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;background:#101019}
-.conversation-rail{display:flex;flex-direction:column;border-right:1px solid var(--line);min-width:0;background:#12121c}
+.conversation-rail{display:flex;flex-direction:column;min-height:0;overflow:hidden;border-right:1px solid var(--line);min-width:0;background:#12121c}
 .conversation-toolbar{padding:14px;border-bottom:1px solid var(--line)}
 .search-field{position:relative}
 .search-field input{padding-left:34px}
@@ -216,7 +218,7 @@ tr.clickable{cursor:pointer}
 .conversation-filters{display:flex;gap:6px;margin-top:10px}
 .filter-pill{border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--muted);padding:5px 9px;font-size:8px}
 .filter-pill.active{color:#ddceff;background:rgba(161,124,255,.12);border-color:rgba(161,124,255,.2)}
-.conversation-list{overflow-y:auto;padding:8px}
+.conversation-list{flex:1;min-height:0;overflow-y:auto;padding:8px;overscroll-behavior:contain;scrollbar-gutter:stable}
 .conversation-item{appearance:none;border:0;width:100%;display:grid;grid-template-columns:36px minmax(0,1fr) auto;gap:9px;align-items:center;text-align:left;padding:10px;border-radius:12px;background:transparent;color:var(--text);cursor:pointer}
 .conversation-item:hover,.conversation-item.active{background:rgba(161,124,255,.09)}
 .avatar{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:740;background:linear-gradient(145deg,#ce5de7,#7058e4);position:relative}
@@ -224,7 +226,7 @@ tr.clickable{cursor:pointer}
 .conversation-copy{min-width:0}.conversation-name{display:block;font-size:10px;font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .conversation-preview{display:block;font-size:9px;color:var(--faint);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .conversation-time{font-size:8px;color:var(--faint)}
-.conversation-pane{min-width:0;display:flex;flex-direction:column;background:linear-gradient(145deg,#0d0d15,#101019)}
+.conversation-pane{min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;background:linear-gradient(145deg,#0d0d15,#101019)}
 .conversation-empty{margin:auto;text-align:center;max-width:340px;padding:30px}
 .conversation-empty .bubble-icon{width:56px;height:56px;margin:0 auto 17px;border-radius:50%;display:grid;place-items:center;background:radial-gradient(circle at 35% 35%,rgba(161,124,255,.35),rgba(161,124,255,.08));color:#cab7ff}
 .conversation-empty svg{width:23px;height:23px;stroke:currentColor;fill:none;stroke-width:1.6}
@@ -342,8 +344,8 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
         <button type="button" class="icon-button" aria-label="Refresh current view" data-action="refresh-view">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M6.1 9A7 7 0 0 1 18 6l2 5M18 15a7 7 0 0 1-12 3l-2-5"/></svg>
         </button>
-        <button type="button" class="toggle-pill" id="bot-toggle" data-action="toggle-bot" aria-label="Toggle bot">
-          <span class="dot off" id="dot"></span><span id="toggle-label">Checking…</span>
+        <button type="button" class="toggle-pill" id="bot-toggle" data-action="toggle-bot" data-bot-control data-off-label="Bot off" data-on-label="Bot on" data-blocked-label="Start blocked" aria-label="Toggle bot">
+          <span class="dot off" id="dot" data-bot-dot></span><span id="toggle-label" data-bot-label>Checking…</span>
         </button>
         <div class="operator-avatar" aria-label="Operator">SC</div>
       </div>
@@ -365,6 +367,7 @@ var conversationPageSize=200;
 var conversationSearch='';
 var conversationSearchTimer=null;
 var conversationDiscoveryComplete=true;
+var conversationLiveSyncAvailable=false;
 var activeConversationId='';
 var activeConversationMessages=[];
 var activeConversationDetail=null;
@@ -391,6 +394,7 @@ function ft(t){if(!t)return'—';var d=new Date(String(t).endsWith('Z')?t:t+'Z')
 function emptyState(icon,title,description){return'<div class="empty"><div class="empty-inner"><div class="ico" aria-hidden="true">'+icon+'</div><h3>'+esc(title)+'</h3><p>'+esc(description)+'</p></div></div>'}
 function pageHead(kicker,title,description,actions){return'<div class="page-head"><div><div class="eyebrow">'+esc(kicker)+'</div><h1>'+esc(title)+'</h1><p>'+esc(description)+'</p></div><div class="page-actions">'+(actions||'')+'</div></div>'}
 function sectionIntro(title,description,action){return'<div class="section-intro"><div><h2>'+esc(title)+'</h2><p>'+esc(description)+'</p></div>'+(action||'')+'</div>'}
+function botControlMarkup(){return'<div class="bot-control-group"><button type="button" class="btn" data-action="toggle-bot" data-bot-control data-off-label="Start bot" data-on-label="Stop bot" data-blocked-label="Start blocked" aria-label="Toggle bot"><span class="dot off" data-bot-dot></span><span data-bot-label>Checking…</span></button><span class="bot-control-reason" data-bot-reason aria-live="polite"></span></div>'}
 async function F(u){try{var r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return null;return await r.json()}catch(e){return null}}
 async function M(u,options){options=options||{};options.credentials='same-origin';options.cache='no-store';options.headers=Object.assign({},options.headers||{}, {'X-CSRF-Token':CSRF_TOKEN});return fetch(u,options)}
 
@@ -448,7 +452,7 @@ function loadDashboard(){
 function renderConversationList(fans){
   if(!fans.length)return'<div style="padding:12px">'+emptyState('◇','No conversations','New fan messages will appear here automatically.')+'</div>';
   var rows=fans.map(function(f){
-    var fid=String(f.fan_id||''),name=f.display_name||f.username||fid.slice(0,12),handle=f.username?'@'+String(f.username).replace(/^@/,''):'',preview=(f.history_complete?'':'Syncing history · ')+(handle?handle+' · ':'')+Number(f.message_count||0)+' messages';
+    var fid=String(f.fan_id||''),name=f.display_name||f.username||fid.slice(0,12),handle=f.username?'@'+String(f.username).replace(/^@/,''):'',pending=f.history_complete?'':conversationLiveSyncAvailable?'Syncing history · ':'Stored preview · ',preview=pending+(handle?handle+' · ':'')+Number(f.message_count||0)+' messages';
     return'<button type="button" class="conversation-item'+(activeConversationId===fid?' active':'')+'" data-action="select-conversation" data-fan-id="'+attr(fid)+'"><span class="avatar">'+esc(initial(name))+'</span><span class="conversation-copy"><span class="conversation-name">'+esc(name)+'</span><span class="conversation-preview">'+esc(preview)+'</span></span><span class="conversation-time">'+esc(ft(f.last_activity))+'</span></button>';
   }).join('');
   if(fans.length<conversationTotal)rows+='<div style="padding:12px;text-align:center"><button class="btn-ghost" data-action="load-more-conversations">Load more conversations</button></div>';
@@ -460,9 +464,9 @@ function loadFunnel(){
   activeConversationMessages=[];
   activeConversationDetail=null;
   conversationSearch='';
-  c.innerHTML=pageHead('Messages','Inbox','Review live conversations and buying stages without losing durable fan context.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>')+
+  c.innerHTML=pageHead('Messages','Inbox','Review live conversations and buying stages without losing durable fan context.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>'+botControlMarkup())+
     '<div class="messages-layout" id="messages-layout"><section class="conversation-rail"><div class="conversation-toolbar"><div class="search-field"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><input id="conversation-search" type="search" placeholder="Search conversations…" aria-label="Search conversations"></div><div class="conversation-filters"><span class="filter-pill active">All</span><span class="filter-pill">Recent</span><span class="filter-pill">Controlled launch</span></div></div><div class="conversation-list" id="conversation-list"><p style="padding:15px;color:var(--faint);font-size:10px">Loading…</p></div></section><section class="conversation-pane" id="conversation-pane"><div class="conversation-empty"><div class="bubble-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v12H8l-4 3z"/></svg></div><h3>Select a conversation</h3><p>Choose a fan from the list to inspect messages, memory, purchase context, and funnel progress.</p></div></section></div>';
-  loadConversationList(true);
+  loadConversationList(true);loadBotStatus();
 }
 function loadConversationList(reset){
   if(reset)conversationOffset=0;
@@ -479,6 +483,7 @@ function loadConversationList(reset){
     conversationTotal=Number(d.total||conversationData.length);
     conversationOffset=conversationData.length;
     conversationDiscoveryComplete=d.discovery_complete!==false;
+    conversationLiveSyncAvailable=d.live_sync_available===true;
     list.innerHTML=renderConversationList(conversationData);
   });
 }
@@ -508,7 +513,7 @@ function renderActiveConversation(){
   var p=d.profile||{},name=p.display_name||p.username||String(d.fan_id||'').slice(0,12),handle=p.username?'@'+String(p.username).replace(/^@/,''):'';
   var pills='<div class="pill-row"><span class="pill">'+esc(p.spend_tier||'unknown')+'</span><span class="pill">'+money(p.total_spent||0)+' spent</span><span class="pill">'+Number(p.purchase_count||0)+' purchases</span><span class="pill">'+esc(d.funnel_stage||'new')+'</span></div>';
   var messages=activeConversationMessages.map(messageMarkup).join('');
-  var syncState=d.live_refresh_error?'Live refresh unavailable; showing stored messages':d.live_hydrated?'Live messages loaded from Fansly':d.sync_error?'Sync error: '+d.sync_error:d.history_complete?'Full provider history synced':'Older provider history is still syncing';
+  var syncState=d.live_sync_available===false?'Live sync is not connected':d.live_refresh_error?'Live refresh unavailable; showing stored messages':d.live_hydrated?'Live messages loaded from Fansly':d.sync_error?'Sync error: '+d.sync_error:d.history_complete?'Full provider history synced':'Older provider history is still syncing';
   var older=d.has_more_messages?'<div style="text-align:center;margin-bottom:14px"><button class="btn-ghost" data-action="load-older-messages" data-fan-id="'+attr(d.fan_id)+'">Load older messages</button></div>':'';
   pane.innerHTML='<div class="chat-head"><div><h3>'+esc(name)+'</h3><p>'+(handle?esc(handle)+' · ':'')+Number(d.message_count_stored||0)+' stored messages · '+esc(syncState)+'</p></div><button class="btn-ghost" data-action="fan-detail" data-fan-id="'+attr(d.fan_id)+'">View profile</button></div><div class="chat-body">'+pills+'<div style="height:18px"></div>'+older+(messages||'<div class="conversation-empty"><h3>No stored messages</h3><p>The provider history sync has not imported this conversation yet.</p></div>')+'</div>';
 }
@@ -637,11 +642,11 @@ function deleteMediaAsset(id){if(!confirm('Remove this item from the bot registr
 
 function loadSettings(){
   var c=document.getElementById('content');
-  var h=pageHead('Workspace','Settings','Manage the live provider connection, validated persona, and operator reference material.','');
+  var h=pageHead('Workspace','Settings','Manage the live provider connection, validated persona, and operator reference material.',botControlMarkup());
   h+='<section class="block"><h3>Fansly provider connection</h3><p class="block-copy">Credentials remain server-side. This panel exposes connection status only.</p><div class="g3" id="api-status"><p class="muted-note">Loading…</p></div><div style="margin-top:12px"><button class="btn-ghost" data-action="test-connection">Run live verification</button> <span id="conn-result"></span></div></section>';
   h+='<section class="block"><h3>Creator persona</h3><p class="block-copy">Simple controls for the voice the live bot actually uses. Lists accept one item per line.</p><div class="row"><input id="psel" value="" readonly aria-label="Creator ID"><button class="btn-ghost" data-action="load-persona">Reload</button></div><div class="g2"><div><label for="persona-tone">Tone</label><input id="persona-tone" placeholder="warm, playful, confident"></div><div><label for="persona-sentence">Sentence style</label><input id="persona-sentence" placeholder="short, casual, mostly lowercase"></div><div><label for="persona-emoji">Emoji style</label><input id="persona-emoji" placeholder="light and natural"></div><div><label for="persona-response-length">Target response length</label><input id="persona-response-length" type="number" min="5" max="500" value="40"></div><div><label for="persona-pet-names">Pet names</label><textarea id="persona-pet-names" style="min-height:110px" placeholder="babe&#10;cutie"></textarea></div><div><label for="persona-signatures">Signature phrases</label><textarea id="persona-signatures" style="min-height:110px"></textarea></div><div><label for="persona-forbidden">Forbidden phrases</label><textarea id="persona-forbidden" style="min-height:110px"></textarea></div><div><label for="persona-boundaries">Content boundaries</label><textarea id="persona-boundaries" style="min-height:110px"></textarea></div><div><label for="persona-examples">Winning message examples</label><textarea id="persona-examples" style="min-height:130px"></textarea></div><div><label for="persona-voice-notes">Voice-note frequency</label><select id="persona-voice-notes"><option value="never">Never</option><option value="rare">Rare</option><option value="occasional">Occasional</option><option value="frequent">Frequent</option></select></div></div><div style="margin-top:12px"><button class="btn" data-action="save-persona">Validate, save, and apply</button> <span class="done" id="psaved">Applied</span> <span id="perror" style="font-size:9px;color:var(--red)"></span></div></section>';
   h+='<section class="block"><h3>Brand reference</h3><p class="block-copy" style="color:var(--amber)">Operator reference only. The bot does not currently read this document at runtime.</p><label for="bed">Brand bible</label><textarea id="bed" placeholder="# Brand voice"></textarea><div style="margin-top:10px"><button class="btn" data-action="save-brand-bible">Save reference</button> <span class="done" id="bsaved">Saved as reference</span></div></section>';
-  c.innerHTML=h;loadConn();loadPersona();loadBrandBible();
+  c.innerHTML=h;loadConn();loadPersona();loadBrandBible();loadBotStatus();
 }
 function loadConn(){F('/api/connection').then(function(d){var el=document.getElementById('api-status');if(!el)return;if(!d){el.innerHTML='<article class="card"><h3>Connection</h3><div class="v bad">Unavailable</div></article>';return}el.innerHTML='<article class="card"><h3>Account</h3><div class="v" style="font-size:14px">'+esc(d.account_id||'Unavailable')+'</div></article><article class="card"><h3>Status</h3><div class="v '+(d.connected?'up':'bad')+'" style="font-size:17px">'+esc(d.status||'offline')+'</div></article><article class="card"><h3>Provider</h3><div class="v" style="font-size:13px">'+esc(d.provider||'Fansly provider')+'</div></article>'})}
 function testConn(){var el=document.getElementById('conn-result');if(!el)return;el.textContent='Testing…';M('/api/connection/test',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(function(r){return r.json().then(function(d){return{ok:r.ok,data:d}})}).then(function(x){el.textContent=x.ok&&x.data.connected?'Live verification passed':'Failed: '+(x.data.error||'unknown');el.style.color=x.ok&&x.data.connected?'var(--green)':'var(--red)';loadConn()}).catch(function(){el.textContent='Connection test failed';el.style.color='var(--red)'})}
@@ -712,24 +717,30 @@ async function loadBotStatus(){
     var r=await fetch('/api/bot/status',{credentials:'same-origin',cache:'no-store'});
     if(!r.ok)throw new Error('Status request failed');
     var d=await r.json();
-    updateToggleUI(Boolean(d.enabled),Boolean(d.available),d.reason||d.launch_block_reason||'',d.consistent!==false);
+    updateToggleUI(Boolean(d.enabled),Boolean(d.available),d.reason||d.launch_block_reason||'',d.consistent!==false,d.launch_ready!==false);
     var copy=document.getElementById('launch-copy'),dot=document.getElementById('launch-dot');
     if(copy)copy.textContent=d.controlled_launch?(d.allowed_fan_count+' pilot fan'+(d.allowed_fan_count===1?'':'s')+' allowed · bot '+(d.enabled?'running':'paused')):'Controlled launch is not active';
     if(dot)dot.style.background=d.enabled?'var(--green)':'var(--amber)';
   }catch(e){
-    updateToggleUI(false,false,'Status request failed',false);
+    updateToggleUI(false,false,'Status request failed',false,false);
     var copy=document.getElementById('launch-copy');
     if(copy)copy.textContent='Status unavailable';
   }
 }
-function updateToggleUI(enabled,available,reason,consistent){
-  var dot=document.getElementById('dot'),label=document.getElementById('toggle-label'),button=document.getElementById('bot-toggle');if(!dot||!label||!button)return;
-  dot.className='dot'+(enabled&&available?'':' off');label.textContent=!available?'Unavailable':enabled?'Bot on':'Bot off';label.style.color=enabled?'var(--green)':'var(--red)';
-  button.disabled=!available;button.title=reason||(!consistent?'Runtime and persisted state disagree':'');button.setAttribute('aria-pressed',enabled?'true':'false');button.setAttribute('aria-label',!available?'Bot unavailable':enabled?'Turn bot off':'Turn bot on');
+function updateToggleUI(enabled,available,reason,consistent,launchReady){
+  var blocked=available&&!enabled&&!launchReady,detail=reason||(!consistent?'Runtime and persisted state disagree':'');
+  document.querySelectorAll('[data-bot-control]').forEach(function(button){
+    var dot=button.querySelector('[data-bot-dot]'),label=button.querySelector('[data-bot-label]');
+    if(dot)dot.className='dot'+(enabled&&available?'':' off');
+    if(label){label.textContent=!available?'Unavailable':blocked?(button.dataset.blockedLabel||'Start blocked'):enabled?(button.dataset.onLabel||'Bot on'):(button.dataset.offLabel||'Bot off');label.style.color=enabled?'var(--green)':blocked?'var(--amber)':'var(--red)'}
+    button.disabled=!available||blocked;button.title=detail;button.setAttribute('aria-pressed',enabled?'true':'false');button.setAttribute('aria-label',!available?'Bot unavailable':blocked?'Bot start blocked: '+detail:enabled?'Turn bot off':'Turn bot on');
+  });
+  document.querySelectorAll('[data-bot-reason]').forEach(function(el){el.textContent=blocked||!available?detail:''});
 }
-async function toggleBot(){
-  var button=document.getElementById('bot-toggle');if(!button||button.disabled)return;var target=button.getAttribute('aria-pressed')!=='true';button.disabled=true;
-  try{var r=await M('/api/bot/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:target})}),d=await r.json();if(!r.ok)throw new Error(d.error||'Toggle failed');updateToggleUI(Boolean(d.enabled),Boolean(d.available),d.reason||'',d.consistent!==false)}catch(e){button.title=e.message||'Toggle failed';await loadBotStatus()}
+async function toggleBot(button){
+  if(!button||button.disabled)return;var target=button.getAttribute('aria-pressed')!=='true';
+  document.querySelectorAll('[data-bot-control]').forEach(function(control){control.disabled=true});
+  try{var r=await M('/api/bot/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:target})}),d=await r.json();if(!r.ok)throw new Error(d.error||'Toggle failed');await loadBotStatus()}catch(e){button.title=e.message||'Toggle failed';await loadBotStatus()}
 }
 
 document.addEventListener('click',function(event){
@@ -738,7 +749,7 @@ document.addEventListener('click',function(event){
   var action=control.dataset.action,stepIndex=Number(control.dataset.stepIndex),sequenceId=Number(control.dataset.sequenceId),scriptIndex=Number(control.dataset.scriptIndex),scriptId=Number(control.dataset.scriptId),mediaAssetId=Number(control.dataset.mediaAssetId);
   if(action==='refresh-view')refreshCurrent();
   else if(action==='open-messages')navTo('funnel');
-  else if(action==='toggle-bot')toggleBot();
+  else if(action==='toggle-bot')toggleBot(control);
   else if(action==='close-drawer')closeDrawer();
   else if(action==='fan-detail')fanDetail(control.dataset.fanId||'');
   else if(action==='select-conversation')selectConversation(control.dataset.fanId||'');
