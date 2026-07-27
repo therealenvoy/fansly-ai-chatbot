@@ -3,11 +3,12 @@ import os
 from uuid import uuid4
 
 import pytest
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from src.messaging.models import OutboundMessage
 from src.persistence.database import create_database_engine
-from src.persistence.migrations import upgrade_database
+from src.persistence.migrations import alembic_config, upgrade_database
 from src.persistence.pipeline import MessageProcessingRepository
 from src.persistence.state import ConversationStateRepository
 
@@ -53,10 +54,13 @@ def test_postgres_migrations_and_runtime_tables_initialize(
         "ppv_sequence_steps",
         "ppv_fan_progress",
     } <= table_names
+    expected_head = ScriptDirectory.from_config(
+        alembic_config(POSTGRES_URL)
+    ).get_current_head()
     with postgres_engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260726_03"
+        ).scalar_one() == expected_head
 
 
 def test_postgres_pipeline_is_idempotent_ordered_and_durable(
