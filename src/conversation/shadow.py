@@ -373,7 +373,7 @@ class ShadowBrainService:
                 latency_ms=int((time.monotonic() - started) * 1_000),
             )
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "Strategic shadow analysis failed: %s",
                 type(exc).__name__,
             )
