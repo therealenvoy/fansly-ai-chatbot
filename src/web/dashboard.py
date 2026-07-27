@@ -31,7 +31,10 @@ from ..scripts.loader import BUILTIN_SCRIPTS
 from ..scripts.models import ScriptCategory, ScriptTemplate, ScriptVariable
 from ..scripts.repository import ScriptTemplateRepository
 from ..sequences.models import Sequence, SequenceTrigger, SequenceStep, FanSequenceProgress, StepStatus
-from ..settings.chat_guidance import ChatGuidanceError
+from ..settings.chat_guidance import (
+    MAX_CHAT_INSTRUCTIONS_CHARS,
+    ChatGuidanceError,
+)
 
 logger = logging.getLogger("fansly-bot.dashboard")
 if TYPE_CHECKING:
@@ -2127,6 +2130,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "storage":"database",
             "runtime_applied":True,
             "purpose":"live conversation instructions",
+            "max_characters":MAX_CHAT_INSTRUCTIONS_CHARS,
         })
 
     def _chat_instructions_post(self,b):

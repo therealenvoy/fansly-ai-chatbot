@@ -135,6 +135,7 @@ class TestDashboardShell:
         assert "/api/ai/settings" in DASHBOARD_HTML
         assert "/api/ai/connection/test" in DASHBOARD_HTML
         assert 'id="chat-instructions"' in DASHBOARD_HTML
+        assert 'maxlength="50000"' in DASHBOARD_HTML
         assert "/api/chat-instructions" in DASHBOARD_HTML
         assert "stored in the database" in DASHBOARD_HTML
         assert "function pickMedia(idx)" in DASHBOARD_HTML
@@ -1495,6 +1496,7 @@ class TestTruthfulDashboardControls:
         )
         assert chat_get_status == 200
         assert bible_get_status == 200
+        assert chat_get["max_characters"] == 50_000
         assert chat_get["content"] == (
             "Reply directly and ask one natural question."
         )

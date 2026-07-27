@@ -69,6 +69,12 @@ def test_legacy_brand_bible_is_migrated_once(tmp_path):
 def test_chat_instructions_reject_oversized_documents(tmp_path):
     service = ChatGuidanceService(_store(tmp_path))
 
+    at_limit = "x" * MAX_CHAT_INSTRUCTIONS_CHARS
+    assert (
+        service.save_chat_instructions(at_limit).chat_instructions
+        == at_limit
+    )
+
     try:
         service.save_chat_instructions(
             "x" * (MAX_CHAT_INSTRUCTIONS_CHARS + 1)
