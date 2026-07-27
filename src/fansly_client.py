@@ -36,6 +36,7 @@ class ProviderCapabilities:
     supports_attributed_purchases: bool = False
     supports_wallet_transactions: bool = False
     supports_vault_albums: bool = False
+    supports_user_presence: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,17 @@ class SentMessage:
     created_at: float
     success: bool
     purchase_reference_id: str | None = None
+
+
+@dataclass(frozen=True)
+class UserPresence:
+    """Provider observation used to derive recent online activity."""
+
+    fan_id: str
+    username: str
+    display_name: str | None
+    last_seen_at: float | None
+    status_id: int | None = None
 
 
 class FanslyApiClient(ABC):
@@ -144,6 +156,14 @@ class FanslyApiClient(ABC):
         price: float,
         preview_id: str | None = None,
     ) -> SentMessage: ...
+
+    def get_user_presence(
+        self,
+        fan_ids: list[str],
+    ) -> list[UserPresence]:
+        raise UnsupportedProviderFeature(
+            "configured provider does not expose user presence"
+        )
 
     def list_wallet_transactions_page(
         self,

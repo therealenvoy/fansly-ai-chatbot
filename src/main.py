@@ -39,6 +39,8 @@ from .operations import RuntimeMonitor
 from .credit_budget import BASIC_MONTHLY_CREDITS, estimate_minimum_monthly_requests
 from .crm.sync import CrmSyncService
 from .persistence.crm import CrmSyncRepository
+from .conversation.llm import DeepSeekChatResponder
+from .conversation.mode import BotMode
 
 load_dotenv()
 
@@ -64,6 +66,7 @@ API_KEY = (
     else os.getenv("FANSLY_API_KEY", "")
 )
 CREATOR_ID = os.getenv("CREATOR_ID", "sunny_charm")
+BOT_MODE = BotMode.parse(os.getenv("BOT_MODE", "full_ppv"))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))  # seconds, fast/active interval
 IDLE_BACKOFF_MAX = int(os.getenv("IDLE_BACKOFF_MAX", "600"))  # cap for idle backoff
 MAX_BACKOFF = int(os.getenv("MAX_BACKOFF", "600"))      # max seconds between polls on error
@@ -74,6 +77,40 @@ BOT_ENABLED_DEFAULT = _env_bool("BOT_ENABLED_DEFAULT", False)
 MAX_MESSAGES_PER_POLL = max(
     1,
     int(os.getenv("MAX_MESSAGES_PER_POLL", "5")),
+)
+ENABLE_UNREAD_REPLIES = _env_bool("ENABLE_UNREAD_REPLIES", True)
+ENABLE_ONLINE_OUTREACH = _env_bool("ENABLE_ONLINE_OUTREACH", False)
+OUTREACH_EXISTING_ONLINE = _env_bool(
+    "OUTREACH_EXISTING_ONLINE",
+    False,
+)
+ONLINE_WINDOW_SECONDS = max(
+    60,
+    int(os.getenv("ONLINE_WINDOW_SECONDS", "600")),
+)
+PROACTIVE_COOLDOWN_HOURS = max(
+    1,
+    int(os.getenv("PROACTIVE_COOLDOWN_HOURS", "48")),
+)
+MAX_PROACTIVE_PER_HOUR = max(
+    0,
+    int(os.getenv("MAX_PROACTIVE_PER_HOUR", "3")),
+)
+MAX_PROACTIVE_PER_DAY = max(
+    0,
+    int(os.getenv("MAX_PROACTIVE_PER_DAY", "15")),
+)
+MAX_PROACTIVE_PER_FAN_PER_DAY = max(
+    0,
+    int(os.getenv("MAX_PROACTIVE_PER_FAN_PER_DAY", "1")),
+)
+PRESENCE_BATCH_SIZE = min(
+    max(1, int(os.getenv("PRESENCE_BATCH_SIZE", "100"))),
+    100,
+)
+PRESENCE_POLL_INTERVAL = max(
+    60,
+    int(os.getenv("PRESENCE_POLL_INTERVAL", "300")),
 )
 CRM_SYNC_ENABLED = _env_bool("CRM_SYNC_ENABLED", True)
 CRM_SYNC_MESSAGE_PAGES_PER_CYCLE = min(
@@ -142,6 +179,9 @@ note_repo = FanNoteRepository(engine=database_engine)
 # Long-term memory: persistent message history + LLM fact extraction
 message_store = MessageStore(engine=database_engine)
 fact_extractor = LLMFactExtractor(api_key=os.getenv("DEEPSEEK_API_KEY", ""))
+chat_responder = DeepSeekChatResponder(
+    api_key=os.getenv("DEEPSEEK_API_KEY", "")
+)
 if fact_extractor.enabled:
     logger.info("LLM fact extraction enabled (DeepSeek)")
 else:
@@ -217,6 +257,20 @@ if api_ok:
             state_repo=state_repo,
             allowed_fan_ids=FAN_ALLOWLIST,
             require_fan_allowlist=CONTROLLED_LAUNCH,
+            bot_mode=BOT_MODE,
+            chat_responder=chat_responder,
+            enable_unread_replies=ENABLE_UNREAD_REPLIES,
+            enable_online_outreach=ENABLE_ONLINE_OUTREACH,
+            outreach_existing_online=OUTREACH_EXISTING_ONLINE,
+            online_window_seconds=ONLINE_WINDOW_SECONDS,
+            proactive_cooldown_hours=PROACTIVE_COOLDOWN_HOURS,
+            max_proactive_per_hour=MAX_PROACTIVE_PER_HOUR,
+            max_proactive_per_day=MAX_PROACTIVE_PER_DAY,
+            max_proactive_per_fan_per_day=(
+                MAX_PROACTIVE_PER_FAN_PER_DAY
+            ),
+            presence_batch_size=PRESENCE_BATCH_SIZE,
+            presence_poll_interval_seconds=PRESENCE_POLL_INTERVAL,
         )
         bot_enabled_str = settings_store.get(
             "bot_enabled",
@@ -339,9 +393,10 @@ if bot is None:
 else:
     logger.info(f"Starting Fansly Bot for creator '{CREATOR_ID}'")
     logger.info(
-        "Provider: %s, account: %s, poll interval: %ss",
+        "Provider: %s, account: %s, mode: %s, poll interval: %ss",
         FANSLY_PROVIDER,
         client.account_id,
+        BOT_MODE.value,
         POLL_INTERVAL,
     )
 logger.info(f"Max failure backoff: {MAX_BACKOFF}s, max idle backoff: {IDLE_BACKOFF_MAX}s")

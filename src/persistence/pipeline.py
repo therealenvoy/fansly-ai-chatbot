@@ -41,6 +41,7 @@ class InboundMessageRecord:
     fan_id: str
     chat_id: str
     content: str
+    trigger_kind: str
     provider_created_at: datetime
     status: str
     attempt_count: int
@@ -86,6 +87,7 @@ class MessageProcessingRepository:
         chat_id: str,
         content: str,
         provider_created_at: datetime,
+        trigger_kind: str = "unread",
     ) -> tuple[InboundMessageRecord, bool]:
         """Insert once by provider message ID and return ``(row, created)``."""
         values = {
@@ -94,6 +96,7 @@ class MessageProcessingRepository:
             "fan_id": fan_id,
             "chat_id": chat_id,
             "content": content,
+            "trigger_kind": trigger_kind,
             "provider_created_at": provider_created_at,
             "observed_at": utcnow(),
             "status": INBOUND_PENDING,
@@ -570,6 +573,53 @@ class MessageProcessingRepository:
                     counts["delivery_unknown"] += 1
         return counts
 
+    def block_pending_non_text(
+        self,
+        creator_id: str,
+        reason: str,
+    ) -> int:
+        """Quarantine stale media/PPV work before conversation-mode launch."""
+        now = utcnow()
+        blocked = 0
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                select(OUTBOX_MESSAGES).where(
+                    and_(
+                        OUTBOX_MESSAGES.c.creator_id == creator_id,
+                        OUTBOX_MESSAGES.c.status == OUTBOX_PENDING,
+                        OUTBOX_MESSAGES.c.message_kind != "text",
+                    )
+                )
+            ).mappings().all()
+            for outbox in rows:
+                conn.execute(
+                    update(OUTBOX_MESSAGES)
+                    .where(OUTBOX_MESSAGES.c.id == outbox["id"])
+                    .values(
+                        status=OUTBOX_BLOCKED_UNSUPPORTED,
+                        last_error=self._error(reason),
+                    )
+                )
+                inbound = conn.execute(
+                    select(INBOUND_MESSAGES).where(
+                        INBOUND_MESSAGES.c.id
+                        == outbox["inbound_message_id"]
+                    )
+                ).mappings().one()
+                conn.execute(
+                    update(INBOUND_MESSAGES)
+                    .where(INBOUND_MESSAGES.c.id == inbound["id"])
+                    .values(
+                        status=INBOUND_COMPLETED,
+                        completed_at=now,
+                        locked_at=None,
+                        last_error=None,
+                    )
+                )
+                self._insert_processed(conn, inbound, now)
+                blocked += 1
+        return blocked
+
     def counts(self, creator_id: str) -> dict[str, int]:
         """Return status counts for tests and operational diagnostics."""
         result: dict[str, int] = {}
@@ -752,6 +802,7 @@ class MessageProcessingRepository:
             fan_id=row["fan_id"],
             chat_id=row["chat_id"],
             content=row["content"],
+            trigger_kind=row["trigger_kind"],
             provider_created_at=row["provider_created_at"],
             status=row["status"],
             attempt_count=row["attempt_count"],

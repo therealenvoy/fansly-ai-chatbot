@@ -1,10 +1,17 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
 from src.bot import FanslyBot
-from src.fansly_client import ChatInfo, FanslyApiClient, MessageInfo
+from src.conversation.mode import BotMode
+from src.fansly_client import (
+    ChatInfo,
+    FanslyApiClient,
+    MessageInfo,
+    UserPresence,
+)
 from src.fansly_client import ProviderCapabilities, WalletTransaction
 from src.messaging.models import OutboundMessage
 from src.notes.repository import FanNoteRepository
@@ -23,7 +30,7 @@ from src.sequences.models import (
 )
 
 
-def _bot():
+def _bot(**bot_kwargs):
     engine = create_database_engine(
         "sqlite:///:memory:",
         environment={"APP_ENV": "test"},
@@ -46,6 +53,7 @@ def _bot():
         note_repo=note_repo,
         creator_id="creator-a",
         state_repo=state_repo,
+        **bot_kwargs,
     )
     bot._persist_runtime_state = MagicMock()
     return engine, bot
@@ -132,6 +140,59 @@ def test_pipeline_sorts_oldest_first_and_sends_every_message_once():
     assert bot.poll_and_process() is False
     bot._prepare_message.assert_not_called()
     assert bot.client.send_message.call_count == 3
+
+
+def test_conversation_mode_combines_unread_window_into_one_reply():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    chat = _chat(unread_count=3, last_message_id="message-3")
+    bot.client.list_chats_page.return_value = ([chat], None)
+    bot.client.list_messages.return_value = (
+        [_message(3), _message(2), _message(1)],
+        None,
+    )
+    bot._prepare_message = MagicMock(return_value="one reply")
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="provider-reply-1",
+    )
+
+    assert bot.poll_and_process() is True
+
+    bot._prepare_message.assert_called_once()
+    prepared_message = bot._prepare_message.call_args.args[1]
+    assert prepared_message.message_id == "message-3"
+    assert prepared_message.content == (
+        "inbound-1\ninbound-2\ninbound-3"
+    )
+    assert bot.client.send_message.call_args_list == [
+        call("chat-a", "one reply")
+    ]
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+
+
+def test_conversation_mode_never_ingests_changed_read_chat():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    chat = _chat(unread_count=0, last_message_id="message-2")
+    bot.client.list_chats_page.return_value = ([chat], None)
+
+    assert bot.poll_and_process() is False
+
+    bot.client.list_messages.assert_not_called()
+    assert _rows(engine, INBOUND_MESSAGES) == []
+
+
+def test_conversation_mode_skips_when_creator_already_replied():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    chat = _chat(unread_count=1, last_message_id="message-2")
+    bot.client.list_chats_page.return_value = ([chat], None)
+    bot.client.list_messages.return_value = (
+        [_message(2, fan=False), _message(1)],
+        None,
+    )
+
+    assert bot.poll_and_process() is False
+
+    assert _rows(engine, INBOUND_MESSAGES) == []
 
 
 def test_controlled_launch_ingests_only_allowlisted_fans():
@@ -329,6 +390,131 @@ def test_unsupported_ppv_intent_is_preserved_but_never_sent():
     assert outbox["message_kind"] == "ppv"
     assert outbox["media_ids"] == ["fansly_media_1"]
     assert outbox["price_millis"] == 10_000
+
+
+def test_conversation_mode_blocks_ppv_even_when_provider_supports_it():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    bot.client.capabilities = ProviderCapabilities(
+        supports_paid_messages=True,
+        supports_vault_albums=True,
+        supports_attributed_purchases=True,
+    )
+    chat = _chat(unread_count=1, last_message_id="message-1")
+    bot.client.list_chats_page.return_value = ([chat], None)
+    bot.client.list_messages.return_value = ([_message(1)], None)
+    bot._prepare_message = MagicMock(
+        return_value=OutboundMessage.ppv(
+            content="special",
+            media_ids=("fansly_media_1",),
+            price_millis=10_000,
+            sequence_id=1,
+            sequence_step_id=1,
+        )
+    )
+
+    assert bot.poll_and_process() is True
+
+    bot.client.send_ppv.assert_not_called()
+    outbox = _rows(engine, OUTBOX_MESSAGES)[0]
+    assert outbox["status"] == "blocked_unsupported"
+    assert "text messages only" in outbox["last_error"]
+
+
+def test_conversation_mode_quarantines_stale_pending_media():
+    engine, bot = _bot()
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="message-old",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="old",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+    bot.processing_repo.enqueue_outbox(
+        inbound=inbound,
+        message=OutboundMessage.media(
+            "old media",
+            ("fansly_media_1",),
+        ),
+    )
+
+    count = bot.processing_repo.block_pending_non_text(
+        "creator-a",
+        "conversation mode permits text messages only",
+    )
+
+    assert count == 1
+    assert _rows(engine, INBOUND_MESSAGES)[0]["status"] == "completed"
+    outbox = _rows(engine, OUTBOX_MESSAGES)[0]
+    assert outbox["status"] == "blocked_unsupported"
+
+
+def test_online_presence_baselines_then_queues_one_transition():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        enable_online_outreach=True,
+        online_window_seconds=600,
+        presence_poll_interval_seconds=0,
+    )
+    bot.client.capabilities = ProviderCapabilities(
+        supports_user_presence=True,
+    )
+    bot.state_repo.ensure_conversation(
+        "creator-a",
+        "fan-a",
+        "chat-a",
+        display_name="Fan",
+        username="fan",
+    )
+    now = datetime.now(timezone.utc)
+    bot.client.get_user_presence.side_effect = [
+        [
+            UserPresence(
+                "fan-a",
+                "fan",
+                "Fan",
+                now.timestamp() * 1000,
+                1,
+            )
+        ],
+        [
+            UserPresence(
+                "fan-a",
+                "fan",
+                "Fan",
+                (now - timedelta(hours=2)).timestamp() * 1000,
+                0,
+            )
+        ],
+        [
+            UserPresence(
+                "fan-a",
+                "fan",
+                "Fan",
+                (now + timedelta(seconds=2)).timestamp() * 1000,
+                1,
+            )
+        ],
+        [
+            UserPresence(
+                "fan-a",
+                "fan",
+                "Fan",
+                (now + timedelta(seconds=3)).timestamp() * 1000,
+                1,
+            )
+        ],
+    ]
+
+    assert bot._poll_presence() is True
+    assert _rows(engine, INBOUND_MESSAGES) == []
+    assert bot._poll_presence() is False
+    assert bot._poll_presence() is True
+    rows = _rows(engine, INBOUND_MESSAGES)
+    assert len(rows) == 1
+    assert rows[0]["trigger_kind"] == "online"
+    assert bot._poll_presence() is True
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 1
 
 
 def test_documented_free_media_delivery_uses_the_same_outbox():

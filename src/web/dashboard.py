@@ -24,6 +24,7 @@ from sqlalchemy import text
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
 from ..persistence.pipeline import MessageProcessingRepository
+from ..persistence.presence import PresenceRepository
 from ..media.repository import MediaAsset, MediaAssetRepository
 from ..persona.models import PersonaDocument
 from ..scripts.loader import BUILTIN_SCRIPTS
@@ -1197,6 +1198,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     else 0.0
                 )
                 fans.append({"fan_id":fid,"display_name":n.display_name if n else None,"spend_tier":_spend_tier(total_spent),"funnel_stage":sess.funnel.current_stage.value,"spiral_level":sess.funnel.level.number,"cooldown":sess.funnel.cooldown,"message_count":sess.message_count,"last_activity":sess.last_activity.isoformat() if sess.last_activity else None,"fact_count":len(n.facts) if n else 0})
+        presence=PresenceRepository(self.engine).for_fans(
+            self.creator_id,
+            [str(fan["fan_id"]) for fan in fans],
+        )
+        for fan in fans:
+            fan.update(presence.get(str(fan["fan_id"]),{
+                "presence":"unknown",
+                "last_seen_at":None,
+                "last_outreach_at":None,
+            }))
         fans.sort(key=lambda f:f.get("last_activity")or"",reverse=True)
         discovery_complete=None
         if self.crm_sync is not None:
@@ -1853,6 +1864,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "controlled_launch":False,
                 "launch_ready":False,
                 "allowed_fan_count":0,
+                "mode":"unavailable",
+                "unread_replies":False,
+                "online_outreach":False,
             })
         enabled=bool(self.bot.enabled)
         persisted=None
@@ -1883,6 +1897,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
             "allowed_fan_count":len(
                 getattr(self.bot, "allowed_fan_ids", ())
+            ),
+            "mode":getattr(
+                getattr(self.bot, "bot_mode", None),
+                "value",
+                "full_ppv",
+            ),
+            "unread_replies":bool(
+                getattr(self.bot, "enable_unread_replies", True)
+            ),
+            "online_outreach":bool(
+                getattr(self.bot, "enable_online_outreach", False)
             ),
             "launch_block_reason":getattr(
                 self.bot,

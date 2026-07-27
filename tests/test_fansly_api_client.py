@@ -141,6 +141,18 @@ WALLET_TRANSACTIONS_BODY = {
     }
 }
 
+USER_DETAILS_BODY = {
+    "data": [
+        {
+            "id": "300000000000000001",
+            "username": "partner",
+            "displayName": "Partner",
+            "statusId": 1,
+            "lastSeenAt": 1785123456000,
+        }
+    ]
+}
+
 
 class TestFanslyApiClientImplIsAFanslyApiClient:
     def test_is_instance_of_abc(self):
@@ -156,6 +168,7 @@ class TestFanslyApiClientImplIsAFanslyApiClient:
         assert capabilities.supports_paid_messages is False
         assert capabilities.supports_attributed_purchases is False
         assert capabilities.supports_wallet_transactions is True
+        assert capabilities.supports_user_presence is True
 
 
 class TestAccountIdResolution:
@@ -242,6 +255,25 @@ class TestGetAllChats:
             "limit": 100,
             "offset": 1,
             "order": "newest",
+        }
+
+
+class TestUserPresence:
+    def test_bulk_user_details_exposes_last_seen(self):
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock(
+            return_value=_resp(USER_DETAILS_BODY)
+        )
+
+        rows = client.get_user_presence(["300000000000000001"])
+
+        assert len(rows) == 1
+        assert rows[0].fan_id == "300000000000000001"
+        assert rows[0].last_seen_at == 1785123456000
+        assert rows[0].status_id == 1
+        assert client.client.request.call_args.kwargs["params"] == {
+            "ids": "300000000000000001"
         }
 
 

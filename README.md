@@ -6,6 +6,28 @@
 
 ---
 
+## Production conversation mode
+
+`BOT_MODE=conversation` runs an autonomous text-only conversation agent:
+
+- replies once to each unread fan conversation, combining consecutive unread
+  messages into one contextual turn;
+- observes bounded batches of known Fansly users and can queue one opener on a
+  durable offline-to-online transition;
+- uses recent stored history, creator persona, and learned facts through
+  DeepSeek Chat;
+- applies per-fan cooldowns plus hourly and daily proactive-message caps;
+- rejects media, PPV, prices, tips, unlock language, and sales delivery at the
+  generation, outbox, and provider-delivery boundaries.
+
+Production startup remains fail-closed. Conversation mode requires a configured
+`DEEPSEEK_API_KEY`; online outreach additionally requires a provider that
+exposes Fansly `lastSeenAt`. Keep `CONTROLLED_LAUNCH=true`,
+`BOT_ENABLED_DEFAULT=false`, and a small `FAN_ALLOWLIST` until presence has been
+validated with a fan account you control.
+
+See [`.env.example`](.env.example) for the complete configuration.
+
 ## 📚 Quick Navigation
 
 ### **👉 START HERE:**

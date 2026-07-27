@@ -1,7 +1,9 @@
 """Tests for FanslyBot on/off toggle."""
 import pytest
 from unittest.mock import MagicMock
+from types import SimpleNamespace
 from src.bot import FanslyBot, LaunchGuardError
+from src.conversation.mode import BotMode
 from src.notes.repository import FanNoteRepository
 from src.persona.loader import PersonaLoader
 from src.fansly_client import (
@@ -85,6 +87,18 @@ def test_poll_skips_when_disabled(bot):
     bot.client.list_chats_page.assert_not_called()
 
 
+def test_disabled_conversation_bot_observes_presence_without_queueing(bot):
+    bot.bot_mode = BotMode.CONVERSATION
+    bot.enable_online_outreach = True
+    bot.enabled = False
+    bot._poll_presence = MagicMock(return_value=True)
+
+    assert bot.poll_and_process() is False
+
+    bot._poll_presence.assert_called_once_with(queue_outreach=False)
+    bot.client.list_chats_page.assert_not_called()
+
+
 def test_poll_calls_api_when_enabled(bot):
     """poll_and_process should call API when bot is enabled."""
     bot.enabled = True
@@ -140,6 +154,38 @@ def test_controlled_launch_rejects_enable_without_allowlist(bot):
         bot.toggle(force=True)
 
     assert bot.enabled is False
+
+
+def test_conversation_mode_launch_requires_llm_but_not_ppv(bot):
+    bot.bot_mode = BotMode.CONVERSATION
+    bot.chat_responder = SimpleNamespace(enabled=True)
+    bot.enable_unread_replies = True
+    bot.enable_online_outreach = False
+    bot.client.capabilities = ProviderCapabilities()
+    bot.enabled = False
+
+    assert bot.launch_ready is True
+    assert bot.toggle(force=True) is True
+
+
+def test_conversation_mode_online_launch_requires_presence(bot):
+    bot.bot_mode = BotMode.CONVERSATION
+    bot.chat_responder = SimpleNamespace(enabled=True)
+    bot.enable_unread_replies = True
+    bot.enable_online_outreach = True
+    bot.client.capabilities = ProviderCapabilities()
+
+    assert bot.launch_ready is False
+    assert "recent fan activity" in bot.launch_block_reason
+
+
+def test_conversation_mode_launch_requires_llm(bot):
+    bot.bot_mode = BotMode.CONVERSATION
+    bot.chat_responder = SimpleNamespace(enabled=False)
+    bot.enable_online_outreach = False
+
+    assert bot.launch_ready is False
+    assert "DEEPSEEK_API_KEY" in bot.launch_block_reason
 
 
 def test_controlled_launch_filters_durable_chats(bot):

@@ -223,6 +223,8 @@ tr.clickable{cursor:pointer}
 .conversation-item:hover,.conversation-item.active{background:rgba(161,124,255,.09)}
 .avatar{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:740;background:linear-gradient(145deg,#ce5de7,#7058e4);position:relative}
 .avatar::after{content:"";position:absolute;width:7px;height:7px;border-radius:50%;background:var(--green);border:2px solid #12121c;right:-1px;top:-1px}
+.avatar.offline::after{background:var(--faint)}
+.avatar.unknown::after{display:none}
 .conversation-copy{min-width:0}.conversation-name{display:block;font-size:10px;font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .conversation-preview{display:block;font-size:9px;color:var(--faint);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .conversation-time{font-size:8px;color:var(--faint)}
@@ -452,8 +454,8 @@ function loadDashboard(){
 function renderConversationList(fans){
   if(!fans.length)return'<div style="padding:12px">'+emptyState('◇','No conversations','New fan messages will appear here automatically.')+'</div>';
   var rows=fans.map(function(f){
-    var fid=String(f.fan_id||''),name=f.display_name||f.username||fid.slice(0,12),handle=f.username?'@'+String(f.username).replace(/^@/,''):'',pending=f.history_complete?'':conversationLiveSyncAvailable?'Syncing history · ':'Stored preview · ',preview=pending+(handle?handle+' · ':'')+Number(f.message_count||0)+' messages';
-    return'<button type="button" class="conversation-item'+(activeConversationId===fid?' active':'')+'" data-action="select-conversation" data-fan-id="'+attr(fid)+'"><span class="avatar">'+esc(initial(name))+'</span><span class="conversation-copy"><span class="conversation-name">'+esc(name)+'</span><span class="conversation-preview">'+esc(preview)+'</span></span><span class="conversation-time">'+esc(ft(f.last_activity))+'</span></button>';
+    var fid=String(f.fan_id||''),name=f.display_name||f.username||fid.slice(0,12),handle=f.username?'@'+String(f.username).replace(/^@/,''):'',presence=['online','offline'].includes(f.presence)?f.presence:'unknown',pending=f.history_complete?'':conversationLiveSyncAvailable?'Syncing history · ':'Stored preview · ',preview=(presence==='online'?'Online now · ':presence==='offline'&&f.last_seen_at?'Last seen '+ft(f.last_seen_at)+' · ':'')+pending+(handle?handle+' · ':'')+Number(f.message_count||0)+' messages';
+    return'<button type="button" class="conversation-item'+(activeConversationId===fid?' active':'')+'" data-action="select-conversation" data-fan-id="'+attr(fid)+'"><span class="avatar '+presence+'">'+esc(initial(name))+'</span><span class="conversation-copy"><span class="conversation-name">'+esc(name)+'</span><span class="conversation-preview">'+esc(preview)+'</span></span><span class="conversation-time">'+esc(ft(f.last_activity))+'</span></button>';
   }).join('');
   if(fans.length<conversationTotal)rows+='<div style="padding:12px;text-align:center"><button class="btn-ghost" data-action="load-more-conversations">Load more conversations</button></div>';
   return rows;
@@ -719,7 +721,7 @@ async function loadBotStatus(){
     var d=await r.json();
     updateToggleUI(Boolean(d.enabled),Boolean(d.available),d.reason||d.launch_block_reason||'',d.consistent!==false,d.launch_ready!==false);
     var copy=document.getElementById('launch-copy'),dot=document.getElementById('launch-dot');
-    if(copy)copy.textContent=d.controlled_launch?(d.allowed_fan_count+' pilot fan'+(d.allowed_fan_count===1?'':'s')+' allowed · bot '+(d.enabled?'running':'paused')):'Controlled launch is not active';
+    if(copy)copy.textContent=(d.mode==='conversation'?'Conversation mode · PPV disabled · ':'')+(d.controlled_launch?(d.allowed_fan_count+' pilot fan'+(d.allowed_fan_count===1?'':'s')+' allowed · bot '+(d.enabled?'running':'paused')):'Controlled launch is not active');
     if(dot)dot.style.background=d.enabled?'var(--green)':'var(--amber)';
   }catch(e){
     updateToggleUI(false,false,'Status request failed',false,false);

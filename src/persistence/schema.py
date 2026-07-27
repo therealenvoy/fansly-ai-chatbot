@@ -135,6 +135,27 @@ FANS = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
 
+FAN_PRESENCE = Table(
+    "fan_presence",
+    metadata,
+    Column(
+        "creator_id",
+        String(64),
+        ForeignKey("creators.id"),
+        primary_key=True,
+    ),
+    Column("fan_id", String(128), primary_key=True),
+    Column("status", String(32), nullable=False, default="unknown"),
+    Column("provider_status_id", Integer, nullable=True),
+    Column("last_seen_at", DateTime(timezone=True), nullable=True),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("online_since", DateTime(timezone=True), nullable=True),
+    Column("last_transition_at", DateTime(timezone=True), nullable=True),
+    Column("last_outreach_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
 CONVERSATIONS = Table(
     "conversations",
     metadata,
@@ -237,6 +258,7 @@ INBOUND_MESSAGES = Table(
     Column("fan_id", String(128), nullable=False),
     Column("chat_id", String(128), nullable=False),
     Column("content", Text, nullable=False),
+    Column("trigger_kind", String(32), nullable=False, default="unread"),
     Column("provider_created_at", DateTime(timezone=True), nullable=False),
     Column("observed_at", DateTime(timezone=True), nullable=False, default=utcnow),
     Column("status", String(32), nullable=False, default="pending"),
@@ -447,4 +469,10 @@ Index(
     CRM_CHAT_SYNC.c.creator_id,
     CRM_CHAT_SYNC.c.history_complete,
     CRM_CHAT_SYNC.c.updated_at,
+)
+Index(
+    "ix_fan_presence_status",
+    FAN_PRESENCE.c.creator_id,
+    FAN_PRESENCE.c.status,
+    FAN_PRESENCE.c.last_outreach_at,
 )

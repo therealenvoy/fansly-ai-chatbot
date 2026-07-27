@@ -24,6 +24,7 @@ from .fansly_client import (
     NotFoundError,
     ProviderCapabilities,
     UnsupportedProviderFeature,
+    UserPresence,
     WalletTransaction,
 )
 
@@ -61,6 +62,7 @@ class FanslyApiClientImpl(FanslyApiClient):
             supports_attributed_purchases=False,
             supports_wallet_transactions=True,
             supports_vault_albums=False,
+            supports_user_presence=True,
         )
 
     @property
@@ -195,6 +197,52 @@ class FanslyApiClientImpl(FanslyApiClient):
             )
             all_chats.extend(chats)
         return all_chats
+
+    def get_user_presence(
+        self,
+        fan_ids: list[str],
+    ) -> list[UserPresence]:
+        """Fetch documented bulk Fansly user details by numeric account ID."""
+        normalized = list(
+            dict.fromkeys(
+                str(fan_id).strip()
+                for fan_id in fan_ids
+                if str(fan_id).strip()
+            )
+        )
+        if not normalized:
+            return []
+        if len(normalized) > 100:
+            raise ValueError("user presence lookup supports at most 100 IDs")
+        data = self._request(
+            "GET",
+            f"/api/fansly/{self.account_id}/users/",
+            params={"ids": ",".join(normalized)},
+        )
+        rows = data.get("data", []) if isinstance(data, dict) else []
+        return [
+            UserPresence(
+                fan_id=str(row["id"]),
+                username=str(row.get("username") or ""),
+                display_name=(
+                    str(row["displayName"])
+                    if row.get("displayName")
+                    else None
+                ),
+                last_seen_at=(
+                    float(row["lastSeenAt"])
+                    if row.get("lastSeenAt") is not None
+                    else None
+                ),
+                status_id=(
+                    int(row["statusId"])
+                    if row.get("statusId") is not None
+                    else None
+                ),
+            )
+            for row in rows
+            if isinstance(row, dict) and row.get("id") is not None
+        ]
 
     def list_messages(
         self, chat_id: str, limit: int = 10, cursor: Optional[str] = None

@@ -14,6 +14,17 @@ REQUIRED_VARS = [
     "FANSLY_ACCOUNT_ID",
     "FANSLY_PROVIDER",
     "CREATOR_ID",
+    "BOT_MODE",
+    "ENABLE_UNREAD_REPLIES",
+    "ENABLE_ONLINE_OUTREACH",
+    "OUTREACH_EXISTING_ONLINE",
+    "ONLINE_WINDOW_SECONDS",
+    "PROACTIVE_COOLDOWN_HOURS",
+    "MAX_PROACTIVE_PER_HOUR",
+    "MAX_PROACTIVE_PER_DAY",
+    "MAX_PROACTIVE_PER_FAN_PER_DAY",
+    "PRESENCE_BATCH_SIZE",
+    "PRESENCE_POLL_INTERVAL",
     "POLL_INTERVAL",
     "CRM_SYNC_ENABLED",
     "CRM_SYNC_MESSAGE_PAGES_PER_CYCLE",
@@ -83,11 +94,13 @@ class TestEnvExampleContent:
         )
         assert database_line.startswith("DATABASE_URL=postgresql://")
 
-    def test_paid_ppv_provider_is_the_default(self):
+    def test_conversation_provider_and_mode_are_the_defaults(self):
         with open(ENV_PATH) as f:
             content = f.read()
 
-        assert "FANSLY_PROVIDER=apifansly" in content
+        assert "FANSLY_PROVIDER=fanslyapi" in content
+        assert "BOT_MODE=conversation" in content
+        assert "ENABLE_ONLINE_OUTREACH=true" in content
 
     def test_env_file_structure(self):
         """.env.example should have standard env file structure (comments + key=value)."""

@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from typing import Optional, TYPE_CHECKING
 
 from .fansly_client import FanslyApiClient, ChatInfo, MessageInfo
+from .conversation.llm import DeepSeekChatResponder
+from .conversation.mode import BotMode, ConversationPolicy
 from .persona.loader import PersonaLoader
 from .persona.validator import PersonaValidator
 from .funnel.spiral import SpiralStateMachine, SpiralPhase
@@ -50,6 +52,7 @@ from .persistence.pipeline import (
     OUTBOX_SENDING,
 )
 from .persistence.purchases import PurchaseRepository
+from .persistence.presence import PresenceRepository
 
 if TYPE_CHECKING:
     from .persistence.state import ConversationStateRepository
@@ -75,6 +78,18 @@ class FanslyBot:
         fact_extractor: Optional[LLMFactExtractor] = None,
         allowed_fan_ids: Optional[set[str]] = None,
         require_fan_allowlist: bool = False,
+        bot_mode: BotMode | str = BotMode.FULL_PPV,
+        chat_responder: DeepSeekChatResponder | None = None,
+        enable_unread_replies: bool = True,
+        enable_online_outreach: bool = False,
+        outreach_existing_online: bool = False,
+        online_window_seconds: int = 600,
+        proactive_cooldown_hours: int = 48,
+        max_proactive_per_hour: int = 3,
+        max_proactive_per_day: int = 15,
+        max_proactive_per_fan_per_day: int = 1,
+        presence_batch_size: int = 100,
+        presence_poll_interval_seconds: int = 300,
     ):
         self.client = client
         self.persona_loader = persona_loader
@@ -107,11 +122,41 @@ class FanslyBot:
             if str(fan_id).strip()
         )
         self.require_fan_allowlist = bool(require_fan_allowlist)
+        self.bot_mode = BotMode.parse(bot_mode)
+        self.chat_responder = chat_responder
+        self.enable_unread_replies = bool(enable_unread_replies)
+        self.enable_online_outreach = bool(enable_online_outreach)
+        self.outreach_existing_online = bool(outreach_existing_online)
+        self.online_window_seconds = max(60, int(online_window_seconds))
+        self.proactive_cooldown_hours = max(
+            1, int(proactive_cooldown_hours)
+        )
+        self.max_proactive_per_hour = max(
+            0, int(max_proactive_per_hour)
+        )
+        self.max_proactive_per_day = max(
+            0, int(max_proactive_per_day)
+        )
+        self.max_proactive_per_fan_per_day = max(
+            0, int(max_proactive_per_fan_per_day)
+        )
+        self.presence_batch_size = min(
+            max(1, int(presence_batch_size)),
+            100,
+        )
+        self.presence_poll_interval_seconds = max(
+            0,
+            int(presence_poll_interval_seconds),
+        )
+        self._presence_offset = 0
+        self._last_presence_poll_at: datetime | None = None
         self.processing_repo = MessageProcessingRepository(
             self.state_repo.engine
         )
         self.purchase_repo = PurchaseRepository(self.state_repo.engine)
+        self.presence_repo = PresenceRepository(self.state_repo.engine)
         self.content_policy = MessageContentPolicy()
+        self.conversation_policy = ConversationPolicy()
         self._runtime_state_versions: dict[str, int] = {}
         self.note_extractor = NoteExtractor(llm_client=None)  # merge() only
         self._extract_counters: dict[str, int] = {}
@@ -159,6 +204,16 @@ class FanslyBot:
                 "Recovered interrupted message work: %s",
                 recovered,
             )
+        if self.bot_mode == BotMode.CONVERSATION:
+            quarantined = self.processing_repo.block_pending_non_text(
+                self.creator_id,
+                "conversation mode permits text messages only",
+            )
+            if quarantined:
+                logger.warning(
+                    "Quarantined %s pending non-text outbox message(s)",
+                    quarantined,
+                )
 
     # ─── MAIN LOOP ──────────────────────────────────────
 
@@ -188,7 +243,14 @@ class FanslyBot:
         the caller uses this to drive idle-adaptive polling.
         """
         if not self.enabled:
-            logger.debug("Bot disabled — skipping poll cycle")
+            if self.enable_online_outreach:
+                try:
+                    self._poll_presence(queue_outreach=False)
+                except Exception:
+                    logger.exception(
+                        "Presence observation failed while bot is disabled"
+                    )
+            logger.debug("Bot disabled — skipping send cycle")
             return False
 
         return self._poll_and_process_durable(
@@ -197,13 +259,21 @@ class FanslyBot:
 
     def _poll_and_process_durable(self, *, max_messages: int) -> bool:
         """Ingest changed chats, then drain the durable inbox oldest-first."""
-        ledger_updates = self._sync_wallet_transactions()
+        ledger_updates = (
+            0
+            if self.bot_mode == BotMode.CONVERSATION
+            else self._sync_wallet_transactions()
+        )
         cursor_scope = self._chat_cursor_scope()
         checkpoint = self.state_repo.get_poll_cursor(
             self.creator_id,
             cursor_scope,
         )
-        chats, next_checkpoint = self._fetch_incremental_chats(checkpoint)
+        chats, next_checkpoint = (
+            self._fetch_incremental_chats(checkpoint)
+            if self.enable_unread_replies
+            else ([], checkpoint)
+        )
         ingested = 0
         scan_complete = True
         for chat in chats:
@@ -222,6 +292,15 @@ class FanslyBot:
                 next_checkpoint,
             )
 
+        presence_activity = False
+        if self.enable_online_outreach:
+            try:
+                presence_activity = self._poll_presence()
+            except Exception:
+                logger.exception(
+                    "Presence polling failed; unread work will continue"
+                )
+
         processed = 0
         for _ in range(max(0, max_messages)):
             inbound = self.processing_repo.claim_next_inbound(
@@ -238,7 +317,9 @@ class FanslyBot:
             processed += 1
             if not terminal:
                 break
-        return bool(ledger_updates or ingested or processed)
+        return bool(
+            ledger_updates or ingested or processed or presence_activity
+        )
 
     def _chat_cursor_scope(self) -> str:
         if not self.require_fan_allowlist:
@@ -260,6 +341,21 @@ class FanslyBot:
             and not self.allowed_fan_ids
         ):
             return False
+        if self.bot_mode == BotMode.CONVERSATION:
+            if not bool(
+                self.chat_responder
+                and self.chat_responder.enabled
+            ):
+                return False
+            if (
+                self.enable_online_outreach
+                and self.client.capabilities.supports_user_presence is not True
+            ):
+                return False
+            return bool(
+                self.enable_unread_replies
+                or self.enable_online_outreach
+            )
         capabilities = self.client.capabilities
         return (
             capabilities.supports_paid_messages is True
@@ -274,6 +370,28 @@ class FanslyBot:
             and not self.allowed_fan_ids
         ):
             return "controlled launch requires at least one FAN_ALLOWLIST entry"
+        if self.bot_mode == BotMode.CONVERSATION:
+            if not bool(
+                self.chat_responder
+                and self.chat_responder.enabled
+            ):
+                return (
+                    "conversation mode requires DEEPSEEK_API_KEY for "
+                    "contextual replies"
+                )
+            if (
+                self.enable_online_outreach
+                and self.client.capabilities.supports_user_presence is not True
+            ):
+                return (
+                    "configured provider cannot observe recent fan activity"
+                )
+            if not (
+                self.enable_unread_replies
+                or self.enable_online_outreach
+            ):
+                return "conversation mode has no enabled conversation triggers"
+            return None
         capabilities = self.client.capabilities
         if capabilities.supports_paid_messages is not True:
             return (
@@ -362,11 +480,137 @@ class FanslyBot:
             logger.exception("Failed to synchronize provider wallet ledger")
             return 0
 
+    def _poll_presence(self, *, queue_outreach: bool = True) -> bool:
+        """Observe one bounded fan batch and queue eligible online transitions."""
+        if (
+            self.bot_mode != BotMode.CONVERSATION
+            or not self.enable_online_outreach
+        ):
+            return False
+        if self.client.capabilities.supports_user_presence is not True:
+            return False
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_presence_poll_at is not None
+            and (
+                now - self._last_presence_poll_at
+            ).total_seconds() < self.presence_poll_interval_seconds
+        ):
+            return False
+        self._last_presence_poll_at = now
+        candidates = self.presence_repo.candidates(
+            self.creator_id,
+            allowed_fan_ids=(
+                set(self.allowed_fan_ids)
+                if self.require_fan_allowlist
+                else None
+            ),
+            limit=5000,
+        )
+        if not candidates:
+            self._presence_offset = 0
+            return False
+        if self._presence_offset >= len(candidates):
+            self._presence_offset = 0
+        batch = candidates[
+            self._presence_offset:
+            self._presence_offset + self.presence_batch_size
+        ]
+        if not batch:
+            self._presence_offset = 0
+            batch = candidates[: self.presence_batch_size]
+        self._presence_offset = (
+            self._presence_offset + len(batch)
+        ) % len(candidates)
+
+        by_id = {candidate.fan_id: candidate for candidate in batch}
+        observations = self.client.get_user_presence(list(by_id))
+        queued = 0
+        any_online = False
+        for provider_presence in observations:
+            candidate = by_id.get(provider_presence.fan_id)
+            if candidate is None:
+                continue
+            last_seen = (
+                self._provider_datetime(provider_presence.last_seen_at)
+                if provider_presence.last_seen_at is not None
+                else None
+            )
+            observation = self.presence_repo.observe(
+                creator_id=self.creator_id,
+                fan_id=candidate.fan_id,
+                last_seen_at=last_seen,
+                provider_status_id=provider_presence.status_id,
+                observed_at=now,
+                online_window_seconds=self.online_window_seconds,
+            )
+            any_online = any_online or observation.status == "online"
+            should_consider = observation.transitioned_online or (
+                observation.first_observation
+                and observation.status == "online"
+                and self.outreach_existing_online
+            )
+            should_consider = should_consider and queue_outreach
+            if not should_consider:
+                continue
+            eligible, reason = self.presence_repo.eligible_for_outreach(
+                creator_id=self.creator_id,
+                fan_id=candidate.fan_id,
+                now=now,
+                cooldown_hours=self.proactive_cooldown_hours,
+                max_per_hour=self.max_proactive_per_hour,
+                max_per_day=self.max_proactive_per_day,
+                max_per_fan_per_day=(
+                    self.max_proactive_per_fan_per_day
+                ),
+            )
+            if not eligible:
+                logger.info(
+                    "Online outreach skipped for %s: %s",
+                    candidate.fan_id,
+                    reason,
+                )
+                continue
+            transition_at = observation.last_seen_at or now
+            synthetic_id = (
+                f"online:{candidate.fan_id}:"
+                f"{int(transition_at.timestamp() * 1000)}"
+            )
+            _, created = self.processing_repo.insert_inbound(
+                creator_id=self.creator_id,
+                platform_message_id=synthetic_id,
+                fan_id=candidate.fan_id,
+                chat_id=candidate.chat_id,
+                content="fan recently became active",
+                provider_created_at=transition_at,
+                trigger_kind="online",
+            )
+            queued += int(created)
+        if queued:
+            logger.info("Queued %s online conversation opener(s)", queued)
+        return bool(queued or any_online)
+
     def _fetch_incremental_chats(
         self,
         checkpoint: str | None,
     ) -> tuple[list[ChatInfo], str | None]:
         """Fetch newest pages only until the previous durable chat head."""
+        if self.bot_mode == BotMode.CONVERSATION:
+            unread: list[ChatInfo] = []
+            offset: int | str | None = 0
+            while offset is not None:
+                page, offset = self.client.list_chats_page(
+                    limit=100,
+                    offset=offset,
+                    order="unread",
+                )
+                unread.extend(
+                    chat
+                    for chat in page
+                    if chat.unread_count > 0
+                    and self._fan_allowed(chat.partner_account_id)
+                )
+            return unread, checkpoint
         changed: list[ChatInfo] = []
         offset: int | None = 0
         next_checkpoint: str | None = None
@@ -421,6 +665,17 @@ class FanslyBot:
             self.creator_id,
             chat.chat_id,
         )
+
+        if (
+            self.bot_mode == BotMode.CONVERSATION
+            and chat.unread_count <= 0
+        ):
+            self.state_repo.update_conversation_checkpoint(
+                self.creator_id,
+                chat.chat_id,
+                last_platform_message_id=chat.last_message_id,
+            )
+            return 0
 
         # First observation of an already-read chat establishes a baseline;
         # it must not trigger replies to historical messages.
@@ -482,7 +737,49 @@ class FanslyBot:
             inbound_messages = inbound_messages[-chat.unread_count :]
 
         inserted = 0
-        for message in inbound_messages:
+        messages_to_insert = inbound_messages
+        if (
+            self.bot_mode == BotMode.CONVERSATION
+            and inbound_messages
+        ):
+            # A creator response newer than the unread fan window means the
+            # conversation has already been handled outside this bot.
+            newest_unseen = unseen[-1] if unseen else None
+            if newest_unseen is not None and not newest_unseen.is_from_fan:
+                messages_to_insert = []
+            else:
+                latest = inbound_messages[-1]
+                combined = "\n".join(
+                    (
+                        message.content.strip()
+                        if message.content.strip()
+                        else "[sent an attachment]"
+                    )
+                    for message in inbound_messages
+                )
+                messages_to_insert = [
+                    MessageInfo(
+                        message_id=latest.message_id,
+                        content=combined,
+                        sender_id=latest.sender_id,
+                        created_at=latest.created_at,
+                        is_from_fan=True,
+                        has_attachments=any(
+                            message.has_attachments
+                            for message in inbound_messages
+                        ),
+                        total_tip=sum(
+                            message.total_tip
+                            for message in inbound_messages
+                        ),
+                        attachments=[
+                            attachment
+                            for message in inbound_messages
+                            for attachment in message.attachments
+                        ],
+                    )
+                ]
+        for message in messages_to_insert:
             _, created = self.processing_repo.insert_inbound(
                 creator_id=self.creator_id,
                 platform_message_id=message.message_id,
@@ -492,6 +789,7 @@ class FanslyBot:
                 provider_created_at=self._provider_datetime(
                     message.created_at
                 ),
+                trigger_kind="unread",
             )
             inserted += int(created)
 
@@ -540,41 +838,44 @@ class FanslyBot:
         try:
             outbox = self.processing_repo.get_outbox_for_inbound(inbound.id)
             if outbox is None:
-                policy = self.content_policy.validate_inbound(
-                    inbound.content
-                )
-                if not policy.approved:
-                    logger.info(
-                        "Skipping inbound %s: %s",
-                        inbound.platform_message_id,
-                        policy.reason,
+                if inbound.trigger_kind == "online":
+                    prepared = self._prepare_online_opener(inbound)
+                else:
+                    policy = self.content_policy.validate_inbound(
+                        inbound.content
                     )
-                    self.processing_repo.complete_without_response(
-                        inbound.id
+                    if not policy.approved:
+                        logger.info(
+                            "Skipping inbound %s: %s",
+                            inbound.platform_message_id,
+                            policy.reason,
+                        )
+                        self.processing_repo.complete_without_response(
+                            inbound.id
+                        )
+                        return True
+                    chat = ChatInfo(
+                        chat_id=inbound.chat_id,
+                        partner_account_id=inbound.fan_id,
+                        partner_username="",
+                        partner_display_name="",
+                        unread_count=1,
+                        last_message_id=inbound.platform_message_id,
                     )
-                    return True
-                chat = ChatInfo(
-                    chat_id=inbound.chat_id,
-                    partner_account_id=inbound.fan_id,
-                    partner_username="",
-                    partner_display_name="",
-                    unread_count=1,
-                    last_message_id=inbound.platform_message_id,
-                )
-                message = MessageInfo(
-                    message_id=inbound.platform_message_id,
-                    content=policy.content,
-                    sender_id=inbound.fan_id,
-                    created_at=self._provider_timestamp(
-                        inbound.provider_created_at
-                    ),
-                    is_from_fan=True,
-                )
-                prepared = self._prepare_message(
-                    chat,
-                    message,
-                    [message],
-                )
+                    message = MessageInfo(
+                        message_id=inbound.platform_message_id,
+                        content=policy.content,
+                        sender_id=inbound.fan_id,
+                        created_at=self._provider_timestamp(
+                            inbound.provider_created_at
+                        ),
+                        is_from_fan=True,
+                    )
+                    prepared = self._prepare_message(
+                        chat,
+                        message,
+                        [message],
+                    )
                 self._persist_runtime_state(inbound.fan_id)
                 if not prepared:
                     self.processing_repo.complete_without_response(
@@ -650,6 +951,11 @@ class FanslyBot:
                 sending.content,
                 sent.message_id,
             )
+            if inbound.trigger_kind == "online":
+                self.presence_repo.mark_outreach_sent(
+                    self.creator_id,
+                    sending.fan_id,
+                )
             self._persist_runtime_state(sending.fan_id)
             return True
         except Exception as exc:
@@ -690,6 +996,17 @@ class FanslyBot:
         self,
         message: OutboundMessage,
     ) -> str | None:
+        if (
+            self.bot_mode == BotMode.CONVERSATION
+            and message.kind != OutboundKind.TEXT
+        ):
+            return "conversation mode permits text messages only"
+        if self.bot_mode == BotMode.CONVERSATION:
+            sales_reason = self.conversation_policy.sales_reason(
+                message.content
+            )
+            if sales_reason:
+                return sales_reason
         capabilities = self.client.capabilities
         if (
             message.kind == OutboundKind.MEDIA
@@ -712,6 +1029,19 @@ class FanslyBot:
         *,
         preview_id: str | None = None,
     ):
+        if (
+            self.bot_mode == BotMode.CONVERSATION
+            and message.kind != OutboundKind.TEXT
+        ):
+            raise RuntimeError(
+                "conversation mode blocked non-text delivery"
+            )
+        if self.bot_mode == BotMode.CONVERSATION:
+            sales_reason = self.conversation_policy.sales_reason(
+                message.content
+            )
+            if sales_reason:
+                raise RuntimeError(sales_reason)
         if message.kind == OutboundKind.TEXT:
             return self.client.send_message(chat_id, message.content)
         if message.kind == OutboundKind.MEDIA:
@@ -777,6 +1107,41 @@ class FanslyBot:
         self.enabled = target
         logger.info(f"Bot {'enabled' if self.enabled else 'disabled'}")
         return self.enabled
+
+    def _prepare_online_opener(
+        self,
+        inbound: InboundMessageRecord,
+    ) -> OutboundMessage | None:
+        """Generate one contextual, non-sales opener for an online transition."""
+        if (
+            self.bot_mode != BotMode.CONVERSATION
+            or not self.chat_responder
+            or not self.chat_responder.enabled
+        ):
+            return None
+        note = self.note_repo.get(inbound.fan_id, self.creator_id)
+        history = (
+            self.message_store.get_recent_context(
+                inbound.fan_id,
+                self.creator_id,
+                limit=12,
+            )
+            if self.message_store
+            else ""
+        )
+        generated = self.chat_responder.respond(
+            persona=self.persona,
+            history=history,
+            fan_message=None,
+            known_facts=list(note.facts) if note else [],
+            display_name=note.display_name if note else None,
+            proactive=True,
+        )
+        approved = self._approve_conversation_text(
+            inbound.fan_id,
+            generated,
+        )
+        return OutboundMessage.text(approved) if approved else None
 
     def _prepare_message(
         self,
@@ -857,6 +1222,36 @@ class FanslyBot:
                         logger.info(f"Learned about {fan_id}: {list(extracted.keys())}")
                 except Exception as e:
                     logger.error(f"Fact extraction error for {fan_id}: {e}")
+
+        if self.bot_mode == BotMode.CONVERSATION:
+            if not self.chat_responder or not self.chat_responder.enabled:
+                return None
+            history = (
+                self.message_store.get_recent_context(
+                    fan_id,
+                    self.creator_id,
+                    limit=12,
+                )
+                if self.message_store
+                else ""
+            )
+            generated = self.chat_responder.respond(
+                persona=self.persona,
+                history=history,
+                fan_message=latest.content,
+                known_facts=list(note.facts) if note else [],
+                display_name=(
+                    note.display_name
+                    if note and note.display_name
+                    else chat.partner_display_name
+                ),
+                proactive=False,
+            )
+            approved = self._approve_conversation_text(
+                fan_id,
+                generated,
+            )
+            return OutboundMessage.text(approved) if approved else None
 
         # ─── DECISION PIPELINE ───────────────────────────
 
@@ -1110,6 +1505,34 @@ class FanslyBot:
             )
             return None
         return policy.content
+
+    def _approve_conversation_text(
+        self,
+        fan_id: str,
+        text: str | None,
+    ) -> str | None:
+        if not text:
+            return None
+        sales_reason = self.conversation_policy.sales_reason(text)
+        if sales_reason:
+            logger.warning(
+                "Conversation response rejected for %s: %s",
+                fan_id,
+                sales_reason,
+            )
+            return None
+        approved = self._style_and_approve(fan_id, text)
+        if not approved:
+            return None
+        sales_reason = self.conversation_policy.sales_reason(approved)
+        if sales_reason:
+            logger.warning(
+                "Styled conversation response rejected for %s: %s",
+                fan_id,
+                sales_reason,
+            )
+            return None
+        return approved
 
     def _record_sent_reply(
         self,
