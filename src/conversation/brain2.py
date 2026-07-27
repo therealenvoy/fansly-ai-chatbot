@@ -158,6 +158,17 @@ class ConversationQualityGate:
         r"(?:video|photo|pic|content).{0,24}(?:for you|to you)\b",
         re.IGNORECASE,
     )
+    _INJECTION_ECHO = re.compile(
+        r"(?:ignore|disregard).{0,32}(?:instructions|system|developer)|"
+        r"(?:system|developer)\s+(?:prompt|message)|jailbreak",
+        re.IGNORECASE,
+    )
+    _REAL_WORLD_ACTIVITY = re.compile(
+        r"\bi\s+(?:just\s+)?(?:got home|woke up|finished work|"
+        r"went out|came back|am at (?:the )?(?:gym|store|office)|"
+        r"recorded|filmed)\b",
+        re.IGNORECASE,
+    )
 
     def evaluate(
         self,
@@ -167,6 +178,7 @@ class ConversationQualityGate:
         question_streak: int = 0,
         pet_name_streak: int = 0,
         pet_names: tuple[str, ...] = ("babe", "baby", "hun", "honey"),
+        hard_boundaries: list[str] | tuple[str, ...] = (),
         max_length: int = 500,
     ) -> GateResult:
         normalized = unicodedata.normalize("NFKC", str(text or "")).strip()
@@ -181,6 +193,30 @@ class ConversationQualityGate:
             codes.append("online_tracking")
         if self._MEDIA_PROMISE.search(normalized):
             codes.append("media_promise")
+        if self._INJECTION_ECHO.search(normalized):
+            codes.append("prompt_injection_echo")
+        if self._REAL_WORLD_ACTIVITY.search(normalized):
+            codes.append("invented_real_world_activity")
+        boundary_text = " ".join(
+            str(boundary).casefold() for boundary in hard_boundaries
+        )
+        if (
+            "pet name" in boundary_text
+            and any(
+                re.search(
+                    rf"\b{re.escape(name.casefold())}\b",
+                    normalized.casefold(),
+                )
+                for name in pet_names
+            )
+        ) or (
+            any(marker in boundary_text for marker in ("no question", "don't ask", "do not ask"))
+            and "?" in normalized
+        ) or (
+            any(marker in boundary_text for marker in ("no meetup", "no meet up", "no meeting"))
+            and re.search(r"\b(?:meet|meetup|meet up)\b", normalized, re.IGNORECASE)
+        ):
+            codes.append("hard_boundary_conflict")
         if question_streak >= 2 and "?" in normalized:
             codes.append("question_streak")
         lower = normalized.casefold()

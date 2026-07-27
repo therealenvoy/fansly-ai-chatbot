@@ -14,6 +14,7 @@ from src.persistence.schema import CONVERSATION_DECISIONS, utcnow
 
 @dataclass(frozen=True)
 class StoredConversationDecision:
+    id: int
     inbound_message_id: int
     creator_id: str
     fan_id: str
@@ -97,6 +98,7 @@ class ConversationDecisionRepository:
         if row is None:
             return None
         return StoredConversationDecision(
+            id=int(row["id"]),
             inbound_message_id=int(row["inbound_message_id"]),
             creator_id=str(row["creator_id"]),
             fan_id=str(row["fan_id"]),
@@ -139,6 +141,7 @@ class ConversationDecisionRepository:
             ).mappings().all()
         return [
             StoredConversationDecision(
+                id=int(row["id"]),
                 inbound_message_id=int(row["inbound_message_id"]),
                 creator_id=str(row["creator_id"]),
                 fan_id=str(row["fan_id"]),

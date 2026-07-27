@@ -89,6 +89,76 @@ def test_outcome_attributes_reply_to_newest_eligible_sent_turn_once():
     assert stored["fan_replied"] is True
     assert stored["reply_latency_seconds"] == 45
     assert stored["reply_inbound_message_id"] == 999
+    assert stored["returned_within_24h"] is True
+
+
+def test_outcome_progress_is_recomputed_from_durable_inbound_rows():
+    engine = _engine()
+    inbound_id, outbox_id, sent_at = _sent_turn(engine)
+    repository = ConversationOutcomeRepository(engine)
+    outcome_id = repository.create_for_delivery(
+        decision_id=None,
+        inbound_message_id=inbound_id,
+        outbox_message_id=outbox_id,
+        creator_id="creator-a",
+        fan_id="fan-a",
+        brain_version="current",
+        model="deepseek-v4-flash",
+        trigger_kind="stalled",
+        sent_at=sent_at,
+    )
+    pipeline = MessageProcessingRepository(engine)
+    for index in range(3):
+        inbound, created = pipeline.insert_inbound(
+            creator_id="creator-a",
+            platform_message_id=f"reply-{index}",
+            fan_id="fan-a",
+            chat_id="chat-a",
+            content="stop" if index == 2 else "yes",
+            provider_created_at=sent_at + timedelta(minutes=index + 1),
+        )
+        assert created is True
+        repository.attribute_inbound_reply(
+            creator_id="creator-a",
+            fan_id="fan-a",
+            inbound_message_id=inbound.id,
+            received_at=sent_at + timedelta(minutes=index + 1),
+            meaningful=True,
+            negative_signal=index == 2,
+        )
+
+    stored = repository.get(outcome_id)
+    assert stored["additional_turns"] == 3
+    assert stored["continued_three_turns"] is True
+    assert stored["stalled_recovered"] is True
+    assert stored["negative_signal"] is True
+
+
+def test_outcome_window_closes_expired_rows():
+    engine = _engine()
+    inbound_id, outbox_id, sent_at = _sent_turn(engine)
+    repository = ConversationOutcomeRepository(engine)
+    outcome_id = repository.create_for_delivery(
+        decision_id=None,
+        inbound_message_id=inbound_id,
+        outbox_message_id=outbox_id,
+        creator_id="creator-a",
+        fan_id="fan-a",
+        brain_version="current",
+        model="deepseek-v4-flash",
+        trigger_kind="unread",
+        sent_at=sent_at - timedelta(hours=25),
+    )
+
+    assert repository.close_expired(
+        creator_id="creator-a",
+        now=sent_at,
+        window_hours=24,
+    ) == 1
+    closed_at = repository.get(outcome_id)["attribution_closed_at"]
+    if closed_at.tzinfo is None:
+        closed_at = closed_at.replace(tzinfo=timezone.utc)
+    assert closed_at == sent_at
 
 
 def test_memory_supersedes_conflict_and_keeps_source_provenance():
@@ -181,3 +251,8 @@ def test_experiment_assignment_is_sticky_and_pause_safe():
         creator_id="creator-a",
         fan_id="fan-b",
     ) is None
+    events = repository.events(
+        experiment_id=experiment_id,
+        creator_id="creator-a",
+    )
+    assert [event["event_type"] for event in events] == ["created", "paused"]

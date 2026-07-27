@@ -14,8 +14,21 @@ from typing import Optional, TYPE_CHECKING
 
 from .fansly_client import FanslyApiClient, ChatInfo, MessageInfo
 from .conversation.llm import DeepSeekChatResponder
+from .conversation.brain import ConversationDecision
 from .conversation.mode import BotMode, ConversationPolicy
 from .conversation.repository import ConversationDecisionRepository
+from .conversation.brain2 import ConversationQualityGate
+from .conversation.brain2_repository import (
+    ConversationEpisodeRepository,
+    ConversationOutcomeRepository,
+    FanConversationStateRepository,
+    FanMemoryV2Repository,
+)
+from .conversation.brain2_memory_async import MemoryExtractionService
+from .conversation.brain2_memory import (
+    ExtractedMemoryWriter,
+    LegacyMemoryBackfill,
+)
 from .persona.loader import PersonaLoader
 from .persona.validator import PersonaValidator
 from .funnel.spiral import SpiralStateMachine, SpiralPhase
@@ -83,6 +96,10 @@ class FanslyBot:
         require_fan_allowlist: bool = False,
         bot_mode: BotMode | str = BotMode.FULL_PPV,
         chat_responder: DeepSeekChatResponder | None = None,
+        shadow_brain_service=None,
+        brain_settings_service=None,
+        episode_service=None,
+        memory_extraction_service=None,
         chat_guidance: "ChatGuidanceService | None" = None,
         enable_unread_replies: bool = True,
         enable_online_outreach: bool = False,
@@ -136,6 +153,9 @@ class FanslyBot:
         self.require_fan_allowlist = bool(require_fan_allowlist)
         self.bot_mode = BotMode.parse(bot_mode)
         self.chat_responder = chat_responder
+        self.shadow_brain_service = shadow_brain_service
+        self.brain_settings_service = brain_settings_service
+        self.episode_service = episode_service
         self.chat_guidance = chat_guidance
         self.enable_unread_replies = bool(enable_unread_replies)
         self.enable_online_outreach = bool(enable_online_outreach)
@@ -198,10 +218,35 @@ class FanslyBot:
         self.conversation_decision_repo = ConversationDecisionRepository(
             self.state_repo.engine
         )
+        self.conversation_outcome_repo = ConversationOutcomeRepository(
+            self.state_repo.engine
+        )
+        self.brain_state_repo = FanConversationStateRepository(
+            self.state_repo.engine
+        )
+        self.memory_v2_repo = FanMemoryV2Repository(self.state_repo.engine)
+        self.episode_repo = ConversationEpisodeRepository(self.state_repo.engine)
+        self.memory_v2_backfill = LegacyMemoryBackfill(self.memory_v2_repo)
+        self.extracted_memory_writer = ExtractedMemoryWriter(
+            self.memory_v2_repo
+        )
+        self.note_extractor = NoteExtractor(llm_client=None)  # merge() only
+        self.memory_extraction_service = memory_extraction_service
+        if (
+            self.memory_extraction_service is None
+            and self.fact_extractor is not None
+            and self.fact_extractor.enabled
+        ):
+            self.memory_extraction_service = MemoryExtractionService(
+                fact_extractor=self.fact_extractor,
+                memory_writer=self.extracted_memory_writer,
+                note_repository=self.note_repo,
+                note_extractor=self.note_extractor,
+            )
+        self.brain_quality_gate = ConversationQualityGate()
         self.content_policy = MessageContentPolicy()
         self.conversation_policy = ConversationPolicy()
         self._runtime_state_versions: dict[str, int] = {}
-        self.note_extractor = NoteExtractor(llm_client=None)  # merge() only
         self._extract_counters: dict[str, int] = {}
 
         # 17-system components
@@ -314,6 +359,17 @@ class FanslyBot:
         if note.notes.strip():
             memory.append(f"Operator note: {note.notes.strip()}")
         return memory
+
+    def _backfill_memory_v2(self, note: FanNote | None) -> None:
+        if note is None:
+            return
+        try:
+            self.memory_v2_backfill.run(note)
+        except Exception:
+            logger.exception(
+                "Legacy Memory V2 backfill failed for %s",
+                note.fan_id,
+            )
 
     def poll_and_process(
         self,
@@ -476,7 +532,7 @@ class FanslyBot:
                 attachments=list(event.attachments),
                 created_at=event.provider_created_at,
             )
-        _, created = self.processing_repo.insert_inbound(
+        inbound_record, created = self.processing_repo.insert_inbound(
             creator_id=self.creator_id,
             platform_message_id=event.platform_message_id,
             fan_id=event.fan_id,
@@ -488,7 +544,57 @@ class FanslyBot:
                 event.platform_message_id
             ),
         )
+        if created:
+            self._attribute_inbound_outcome(
+                inbound_record,
+                event.provider_created_at,
+            )
         return created
+
+    def _attribute_inbound_outcome(
+        self,
+        inbound: InboundMessageRecord,
+        received_at: datetime,
+    ) -> None:
+        try:
+            meaningful = sum(
+                character.isalnum() for character in inbound.content
+            ) >= 3
+            lowered = inbound.content.casefold()
+            negative_signal = any(
+                marker in lowered
+                for marker in (
+                    "stop messaging",
+                    "don't message",
+                    "do not message",
+                    "leave me alone",
+                    "no more",
+                    "unsubscribe",
+                )
+            )
+            window_hours = 24
+            if self.brain_settings_service is not None:
+                window_hours = int(
+                    self.brain_settings_service.snapshot().outcome_window_hours
+                )
+            self.conversation_outcome_repo.close_expired(
+                creator_id=self.creator_id,
+                now=received_at,
+                window_hours=window_hours,
+            )
+            self.conversation_outcome_repo.attribute_inbound_reply(
+                creator_id=self.creator_id,
+                fan_id=inbound.fan_id,
+                inbound_message_id=inbound.id,
+                received_at=received_at,
+                meaningful=meaningful,
+                negative_signal=negative_signal,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to attribute inbound conversation outcome %s",
+                inbound.id,
+            )
 
     def _reply_available_at(self, platform_message_id: str) -> datetime:
         delay_range = (
@@ -762,7 +868,7 @@ class FanslyBot:
                 f"online:{candidate.fan_id}:"
                 f"{int(transition_at.timestamp() * 1000)}"
             )
-            _, created = self.processing_repo.insert_inbound(
+            inbound_record, created = self.processing_repo.insert_inbound(
                 creator_id=self.creator_id,
                 platform_message_id=synthetic_id,
                 fan_id=candidate.fan_id,
@@ -1020,7 +1126,7 @@ class FanslyBot:
                     )
                 ]
         for message in messages_to_insert:
-            _, created = self.processing_repo.insert_inbound(
+            inbound_record, created = self.processing_repo.insert_inbound(
                 creator_id=self.creator_id,
                 platform_message_id=message.message_id,
                 fan_id=fan_id,
@@ -1034,6 +1140,11 @@ class FanslyBot:
                     message.message_id
                 ),
             )
+            if created:
+                self._attribute_inbound_outcome(
+                    inbound_record,
+                    self._provider_datetime(message.created_at),
+                )
             inserted += int(created)
 
         newest = max(
@@ -1193,11 +1304,37 @@ class FanslyBot:
                 )
                 return True
 
-            self.processing_repo.complete_delivery(
+            delivered_outbox, _ = self.processing_repo.complete_delivery(
                 sending.id,
                 sent.message_id,
                 provider_purchase_ref=purchase_reference_id,
             )
+            if self.bot_mode == BotMode.CONVERSATION:
+                try:
+                    stored_decision = self.conversation_decision_repo.get(
+                        inbound.id,
+                        creator_id=self.creator_id,
+                    )
+                    if stored_decision is not None:
+                        self.conversation_outcome_repo.create_for_delivery(
+                            decision_id=stored_decision.id,
+                            inbound_message_id=inbound.id,
+                            outbox_message_id=delivered_outbox.id,
+                            creator_id=self.creator_id,
+                            fan_id=sending.fan_id,
+                            brain_version="current-hardened-v1",
+                            model=stored_decision.model,
+                            trigger_kind=inbound.trigger_kind,
+                            sent_at=(
+                                delivered_outbox.sent_at
+                                or datetime.now(timezone.utc)
+                            ),
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to schedule conversation outcome for inbound %s",
+                        inbound.id,
+                    )
             self._record_sent_reply(
                 sending.fan_id,
                 sending.content,
@@ -1383,6 +1520,7 @@ class FanslyBot:
         ):
             return None
         note = self.note_repo.get(inbound.fan_id, self.creator_id)
+        self._backfill_memory_v2(note)
         history = (
             self.message_store.get_recent_context(
                 inbound.fan_id,
@@ -1487,6 +1625,7 @@ class FanslyBot:
 
         # Get fan notes
         note = self.note_repo.get(fan_id, self.creator_id)
+        self._backfill_memory_v2(note)
         if note is None:
             note = FanNote(fan_id=fan_id, creator_id=self.creator_id)
 
@@ -1525,15 +1664,31 @@ class FanslyBot:
             if count >= 3:
                 self._extract_counters[fan_id] = 0
                 try:
-                    recent = self.message_store.get_history(fan_id, self.creator_id, limit=8)
-                    fan_texts = [m["content"] for m in recent if m["sender"] == "fan"]
-                    extracted = self.fact_extractor.extract(fan_texts)
-                    if extracted:
-                        note = self.note_extractor.merge(note, extracted)
-                        self.note_repo.save(note)
-                        logger.info(f"Learned about {fan_id}: {list(extracted.keys())}")
-                except Exception as e:
-                    logger.error(f"Fact extraction error for {fan_id}: {e}")
+                    recent = self.message_store.get_history(
+                        fan_id,
+                        self.creator_id,
+                        limit=8,
+                    )
+                    fan_texts = [
+                        message["content"]
+                        for message in recent
+                        if message["sender"] == "fan"
+                    ]
+                    if self.memory_extraction_service is not None:
+                        self.memory_extraction_service.submit(
+                            creator_id=self.creator_id,
+                            fan_id=fan_id,
+                            fan_texts=fan_texts,
+                            source_message_id=latest.message_id,
+                            source_timestamp=self._provider_datetime(
+                                latest.created_at
+                            ),
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to submit memory extraction for fan %s",
+                        fan_id,
+                    )
 
         if self.bot_mode == BotMode.CONVERSATION:
             if not self.chat_responder or not self.chat_responder.enabled:
@@ -1861,11 +2016,145 @@ class FanslyBot:
         fan_id: str,
         **context,
     ) -> OutboundMessage | None:
-        """Plan, draft, critique, approve, and audit one conversation turn."""
+        """Generate the authoritative live turn with durable continuity."""
         if not self.chat_responder:
             return None
+        recent_decisions = self.conversation_decision_repo.latest_for_fan(
+            creator_id=self.creator_id,
+            fan_id=fan_id,
+            limit=5,
+        )
+        previous = recent_decisions[0].decision if recent_decisions else None
+        brain_state = self.brain_state_repo.get_or_create(
+            self.creator_id,
+            fan_id,
+        )
+        memories = self.memory_v2_repo.relevant(
+            creator_id=self.creator_id,
+            fan_id=fan_id,
+            limit=20,
+        )
+        episodes = self.episode_repo.recent(
+            creator_id=self.creator_id,
+            fan_id=fan_id,
+            limit=3,
+        )
+        known_facts = list(context.get("known_facts") or [])
+        for memory in memories:
+            display = str(memory["display_value"])
+            if display in known_facts:
+                continue
+            known_facts.append(
+                display
+                if float(memory["confidence"] or 0) >= 0.8
+                else "Uncertain memory; do not state as fact: " + display
+            )
+        episode_summaries = [
+            json.dumps(
+                {
+                    "topics": episode.get("main_topics") or [],
+                    "tone": episode.get("emotional_tone"),
+                    "resolved": episode.get("resolved_threads") or [],
+                    "unresolved": episode.get("unresolved_threads") or [],
+                    "future_callback": episode.get("future_callback"),
+                    "source_range": [
+                        episode.get("source_start_message_id"),
+                        episode.get("source_end_message_id"),
+                    ],
+                },
+                ensure_ascii=False,
+                default=str,
+            )
+            for episode in episodes
+        ]
+        context["known_facts"] = known_facts
+        context["episode_summaries"] = episode_summaries
+        context["conversation_state"] = {
+            key: brain_state.get(key)
+            for key in (
+                "relationship_stage",
+                "current_mood",
+                "current_energy",
+                "engagement_estimate",
+                "current_objective",
+                "current_tactic",
+                "active_thread",
+                "recent_objectives",
+                "recent_tactics",
+            )
+        }
+        context["question_streak"] = int(brain_state["question_streak"])
+        context["pet_name_streak"] = int(brain_state["pet_name_streak"])
+        context["previous_decision"] = (
+            {
+                "objective": previous.objective,
+                "tactic": previous.tactic,
+                "open_thread": previous.open_thread,
+            }
+            if previous is not None
+            else None
+        )
+        context["recent_objectives"] = [
+            item.decision.objective for item in recent_decisions
+        ]
+        context["recent_tactics"] = [
+            item.decision.tactic for item in recent_decisions
+        ]
         decision = self.chat_responder.decide(**context)
+        recent_creator_messages: list[str] = []
+        if self.message_store is not None:
+            try:
+                recent_creator_messages = [
+                    item["content"]
+                    for item in self.message_store.get_history(
+                        fan_id,
+                        self.creator_id,
+                        limit=12,
+                    )
+                    if item["sender"] == "creator"
+                ]
+            except Exception:
+                logger.exception("Failed to load creator repetition context")
         if decision is None:
+            fallback = self._safe_conversation_fallback(
+                trigger_kind=trigger_kind,
+                fan_message=context.get("fan_message"),
+                question_streak=int(brain_state["question_streak"]),
+            )
+            if fallback:
+                decision = ConversationDecision.from_model_output(
+                    fallback,
+                    proactive_kind=(
+                        trigger_kind
+                        if trigger_kind in {"online", "stalled"}
+                        else None
+                    ),
+                )
+        if decision is None:
+            return None
+        gate = self.brain_quality_gate.evaluate(
+            decision.final_message,
+            recent_creator_messages=recent_creator_messages,
+            question_streak=int(brain_state["question_streak"]),
+            pet_name_streak=int(brain_state["pet_name_streak"]),
+            pet_names=tuple(self.persona.pet_names),
+            hard_boundaries=(
+                list(self.persona.content_boundaries)
+                + [
+                    memory["display_value"]
+                    for memory in memories
+                    if memory["memory_type"] == "boundary"
+                    and memory["status"] == "active"
+                ]
+            ),
+            max_length=500,
+        )
+        if not gate.approved:
+            logger.warning(
+                "Conversation quality gate rejected %s: %s",
+                fan_id,
+                gate.reason_codes,
+            )
             return None
         approved = self._approve_conversation_text(
             fan_id,
@@ -1883,7 +2172,138 @@ class FanslyBot:
                 decision=approved_decision,
                 model=self.chat_responder.model,
             )
+        recent_objectives = (
+            [approved_decision.objective]
+            + list(brain_state["recent_objectives"] or [])
+        )[:5]
+        recent_tactics = (
+            [approved_decision.tactic]
+            + list(brain_state["recent_tactics"] or [])
+        )[:5]
+        fan_text = str(context.get("fan_message") or "")
+        fan_signal_length = sum(character.isalnum() for character in fan_text)
+        fan_energy = (
+            "high"
+            if fan_signal_length >= 120 or fan_text.count("!") >= 2
+            else "low"
+            if fan_signal_length < 12
+            else "medium"
+        )
+        creator_energy = (
+            "high"
+            if len(approved) >= 180 or approved.count("!") >= 2
+            else "low"
+            if len(approved) < 25
+            else "medium"
+        )
+        relationship_stage = (
+            "new"
+            if not recent_decisions
+            else "developing"
+            if len(recent_decisions) < 5
+            else "established"
+        )
+        engagement_estimate = (
+            0.8 if fan_energy == "high" else 0.35 if fan_energy == "low" else 0.6
+        )
+        lower = approved.casefold()
+        used_pet_name = any(
+            name.casefold() in lower for name in self.persona.pet_names
+        )
+        self.brain_state_repo.update(
+            creator_id=self.creator_id,
+            fan_id=fan_id,
+            expected_version=int(brain_state["state_version"]),
+            changes={
+                "relationship_stage": relationship_stage,
+                "current_mood": approved_decision.fan_state,
+                "current_energy": fan_energy,
+                "engagement_estimate": engagement_estimate,
+                "last_fan_energy": fan_energy,
+                "last_creator_energy": creator_energy,
+                "current_objective": approved_decision.objective,
+                "current_tactic": approved_decision.tactic,
+                "active_thread": approved_decision.open_thread,
+                "recent_objectives": recent_objectives,
+                "recent_tactics": recent_tactics,
+                "question_streak": (
+                    int(brain_state["question_streak"]) + 1
+                    if "?" in approved
+                    else 0
+                ),
+                "pet_name_streak": (
+                    int(brain_state["pet_name_streak"]) + 1
+                    if used_pet_name
+                    else 0
+                ),
+            },
+        )
+        if inbound_id is not None and self.shadow_brain_service is not None:
+            try:
+                persona_snapshot = (
+                    self.persona.model_dump()
+                    if hasattr(self.persona, "model_dump")
+                    else {}
+                )
+                self.shadow_brain_service.submit(
+                    inbound_id=inbound_id,
+                    fan_id=fan_id,
+                    trigger_kind=trigger_kind,
+                    context={
+                        "fan_message": context.get("fan_message"),
+                        "history": context.get("history"),
+                        "known_facts": known_facts,
+                        "episode_summaries": episode_summaries,
+                        "previous_decision": context.get("previous_decision"),
+                        "conversation_state": dict(brain_state),
+                        "persona": persona_snapshot,
+                        "chat_instructions": context.get("chat_instructions"),
+                        "brand_bible": context.get("brand_bible"),
+                        "recent_creator_messages": recent_creator_messages,
+                        "question_streak": brain_state["question_streak"],
+                        "pet_name_streak": brain_state["pet_name_streak"],
+                        "hard_boundaries": (
+                            list(self.persona.content_boundaries)
+                            + [
+                                memory["display_value"]
+                                for memory in memories
+                                if memory["memory_type"] == "boundary"
+                                and memory["status"] == "active"
+                            ]
+                        ),
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to submit shadow analysis for inbound %s",
+                    inbound_id,
+                )
+        if self.episode_service is not None:
+            try:
+                self.episode_service.submit(fan_id)
+            except Exception:
+                logger.exception(
+                    "Failed to submit episode generation for fan %s",
+                    fan_id,
+                )
         return OutboundMessage.text(approved)
+
+    @staticmethod
+    def _safe_conversation_fallback(
+        *,
+        trigger_kind: str,
+        fan_message: str | None,
+        question_streak: int,
+    ) -> str | None:
+        if trigger_kind == "online":
+            return "hey, how's your day going?"
+        if trigger_kind == "stalled":
+            return "how's your day going?"
+        if not str(fan_message or "").strip():
+            return None
+        if question_streak >= 2:
+            return "i'm listening"
+        return "tell me a little more?"
 
     def _record_sent_reply(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from typing import TYPE_CHECKING
@@ -119,6 +120,10 @@ class DeepSeekChatResponder:
         previous_decision: dict | None = None,
         recent_objectives: list[str] | None = None,
         recent_tactics: list[str] | None = None,
+        episode_summaries: list[str] | None = None,
+        conversation_state: dict | None = None,
+        question_streak: int = 0,
+        pet_name_streak: int = 0,
     ) -> ConversationDecision | None:
         with self._lock:
             api_key = self.api_key
@@ -210,6 +215,12 @@ class DeepSeekChatResponder:
             f"Unresolved open thread: {(previous_decision or {}).get('open_thread') or 'none'}\n"
             f"Recent objectives: {', '.join(recent_objectives or []) or 'none'}\n"
             f"Recent tactics: {', '.join(recent_tactics or []) or 'none'}\n"
+            f"Question streak: {max(0, int(question_streak))}\n"
+            f"Pet-name streak: {max(0, int(pet_name_streak))}\n"
+            f"Durable conversation state: "
+            f"{json.dumps(conversation_state or {}, ensure_ascii=False, default=str)}\n"
+            f"Older conversation episodes:\n"
+            f"{_memory_lines(episode_summaries or [])}\n"
             f"Saved fan memory:\n{_memory_lines(known_facts)}\n"
             f"Recent conversation:\n"
             f"{_recent_history(history) or '(no prior messages)'}\n"
@@ -245,6 +256,7 @@ class DeepSeekChatResponder:
             decision = ConversationDecision.from_model_output(
                 normalized,
                 proactive_kind=proactive_kind,
+                strict=True,
             )
             if decision is not None or repair_attempts == 0:
                 return decision
@@ -272,6 +284,7 @@ class DeepSeekChatResponder:
             return ConversationDecision.from_model_output(
                 repaired,
                 proactive_kind=proactive_kind,
+                strict=True,
             )
         except Exception as exc:
             logger.warning(

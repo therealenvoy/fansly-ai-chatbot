@@ -199,6 +199,30 @@ BRAIN_EXPERIMENT_ASSIGNMENTS = Table(
     ),
 )
 
+BRAIN_EXPERIMENT_EVENTS = Table(
+    "brain_experiment_events",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("experiment_id", ID, ForeignKey("brain_experiments.id"), nullable=False),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("event_type", String(32), nullable=False),
+    Column("actor", String(64), nullable=False, default="system"),
+    Column("details", JSON, nullable=False, default=dict),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+
+BRAIN_USAGE_BUCKETS = Table(
+    "brain_usage_buckets",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("bucket_kind", String(16), primary_key=True),
+    Column("bucket_start", DateTime(timezone=True), primary_key=True),
+    Column("used_calls", Integer, nullable=False, default=0),
+    Column("limit_snapshot", Integer, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
 Index(
     "ix_conversation_outcome_fan_sent",
     CONVERSATION_OUTCOMES.c.creator_id,

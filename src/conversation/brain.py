@@ -78,8 +78,50 @@ class ConversationDecision:
         raw: str,
         *,
         proactive_kind: str | None,
+        strict: bool = False,
     ) -> "ConversationDecision | None":
         parsed = _json_object(raw)
+        if strict and parsed is not None:
+            required = {
+                "fan_state",
+                "state_summary",
+                "objective",
+                "tactic",
+                "open_thread",
+                "draft",
+                "critique",
+                "final_message",
+                "confidence",
+            }
+            if set(parsed) != required:
+                return None
+            if not all(
+                isinstance(parsed[field], str)
+                for field in (
+                    "fan_state",
+                    "state_summary",
+                    "objective",
+                    "tactic",
+                    "draft",
+                    "final_message",
+                )
+            ):
+                return None
+            if parsed["open_thread"] is not None and not isinstance(
+                parsed["open_thread"], str
+            ):
+                return None
+            if (
+                parsed["objective"] not in OBJECTIVES
+                or parsed["tactic"] not in TACTICS
+                or not isinstance(parsed["critique"], list)
+                or not all(isinstance(item, str) for item in parsed["critique"])
+                or isinstance(parsed["confidence"], bool)
+                or not isinstance(parsed["confidence"], (int, float))
+                or not math.isfinite(float(parsed["confidence"]))
+                or not 0 <= float(parsed["confidence"]) <= 1
+            ):
+                return None
         if parsed is None:
             plain = _text(raw, 2_000)
             if not plain or plain.startswith(("{", "[")):

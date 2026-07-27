@@ -42,6 +42,7 @@ from .settings.ai import (
     EncryptedCredentialStore,
 )
 from .settings.chat_guidance import ChatGuidanceService
+from .settings.brain import BrainSettingsService
 from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
@@ -51,6 +52,13 @@ from .crm.sync import CrmSyncService
 from .persistence.crm import CrmSyncRepository
 from .conversation.llm import DeepSeekChatResponder
 from .conversation.mode import BotMode
+from .conversation.brain2 import BrainRuntimeSettings
+from .conversation.brain2_episodes import ConversationEpisodeService
+from .conversation.brain2_repository import ConversationEpisodeRepository
+from .conversation.shadow import (
+    DeepSeekStrategicAnalyzer,
+    ShadowBrainService,
+)
 
 load_dotenv()
 
@@ -277,6 +285,30 @@ fact_extractor = LLMFactExtractor(
 chat_responder = DeepSeekChatResponder(
     api_key=deepseek_api_key,
     model=ai_settings.model,
+    max_output_tokens=int(os.getenv("BRAIN_MAX_OUTPUT_TOKENS", "800")),
+    json_repair_attempts=int(os.getenv("BRAIN_JSON_REPAIR_ATTEMPTS", "1")),
+)
+brain_runtime_settings = BrainRuntimeSettings.from_mapping(os.environ)
+shadow_brain_service = ShadowBrainService(
+    engine=database_engine,
+    creator_id=CREATOR_ID,
+    settings=brain_runtime_settings,
+    analyzer=DeepSeekStrategicAnalyzer(
+        api_key=deepseek_api_key,
+        model=ai_settings.model,
+        max_output_tokens=brain_runtime_settings.max_output_tokens,
+    ),
+)
+brain_settings_service = BrainSettingsService(
+    settings_store=settings_store,
+    environment=os.environ,
+    shadow_runtime=shadow_brain_service,
+)
+shadow_brain_service.update_settings(brain_settings_service.snapshot())
+episode_service = ConversationEpisodeService(
+    creator_id=CREATOR_ID,
+    message_store=message_store,
+    repository=ConversationEpisodeRepository(database_engine),
 )
 ai_settings.fact_extractor = fact_extractor
 ai_settings.chat_responder = chat_responder
@@ -359,6 +391,9 @@ if api_ok:
             require_fan_allowlist=CONTROLLED_LAUNCH,
             bot_mode=BOT_MODE,
             chat_responder=chat_responder,
+            shadow_brain_service=shadow_brain_service,
+            brain_settings_service=brain_settings_service,
+            episode_service=episode_service,
             chat_guidance=chat_guidance,
             enable_unread_replies=ENABLE_UNREAD_REPLIES,
             enable_online_outreach=ENABLE_ONLINE_OUTREACH,
@@ -691,5 +726,9 @@ else:
     while running:
         sleep_with_interrupt(IDLE_BACKOFF_MAX)
 
+if bot is not None and bot.memory_extraction_service is not None:
+    bot.memory_extraction_service.shutdown()
+episode_service.shutdown()
+shadow_brain_service.shutdown()
 client.close()
 logger.info("Bot stopped.")

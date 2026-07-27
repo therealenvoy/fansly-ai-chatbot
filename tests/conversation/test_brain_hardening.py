@@ -181,3 +181,29 @@ def test_repository_reads_latest_decisions_for_only_requested_fan():
         "reply-3",
         "reply-1",
     ]
+
+
+def test_incomplete_json_contract_gets_one_schema_repair(monkeypatch):
+    incomplete = MagicMock(spec=httpx.Response)
+    incomplete.raise_for_status.return_value = None
+    incomplete.json.return_value = {
+        "choices": [{"message": {"content": json.dumps({"final_message": "hey"})}}]
+    }
+    repaired = MagicMock(spec=httpx.Response)
+    repaired.raise_for_status.return_value = None
+    repaired.json.return_value = {
+        "choices": [{"message": {"content": json.dumps(_decision("hey"))}}]
+    }
+    post = MagicMock(side_effect=[incomplete, repaired])
+    monkeypatch.setattr(httpx, "post", post)
+
+    result = DeepSeekChatResponder("secret", json_repair_attempts=1).decide(
+        persona=_persona(),
+        history="",
+        fan_message="hey",
+        known_facts=[],
+    )
+
+    assert result is not None
+    assert result.final_message == "hey"
+    assert post.call_count == 2
