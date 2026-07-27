@@ -421,8 +421,12 @@ def test_pre_send_failures_retry_then_quarantine():
 
 def test_pre_send_retry_is_scheduled_with_exponential_backoff():
     _, repository = _repository()
-    now = datetime.now(timezone.utc)
-    _insert(repository, "message-1", now)
+    inserted, _ = _insert(
+        repository,
+        "message-1",
+        datetime.now(timezone.utc),
+    )
+    now = inserted.available_at
 
     inbound = repository.claim_next_inbound("creator-a", now=now)
     released = repository.release_inbound(
