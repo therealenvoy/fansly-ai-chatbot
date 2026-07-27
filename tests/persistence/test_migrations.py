@@ -163,6 +163,7 @@ def test_postgresql_offline_upgrade_compiles_without_sqlite_types():
     assert "provider_purchase_ref" in sql
     assert "CREATE TABLE crm_chat_sync" in sql
     assert "CREATE TABLE fan_presence" in sql
+    assert "CREATE TABLE conversation_decisions" in sql
     assert "trigger_kind" in sql
     assert "ALTER TABLE fans ADD COLUMN username" in sql
     assert "ALTER TABLE fan_messages ADD COLUMN attachments" in sql

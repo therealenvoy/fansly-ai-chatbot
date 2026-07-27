@@ -15,6 +15,7 @@ from typing import Optional, TYPE_CHECKING
 from .fansly_client import FanslyApiClient, ChatInfo, MessageInfo
 from .conversation.llm import DeepSeekChatResponder
 from .conversation.mode import BotMode, ConversationPolicy
+from .conversation.repository import ConversationDecisionRepository
 from .persona.loader import PersonaLoader
 from .persona.validator import PersonaValidator
 from .funnel.spiral import SpiralStateMachine, SpiralPhase
@@ -173,6 +174,9 @@ class FanslyBot:
         )
         self.purchase_repo = PurchaseRepository(self.state_repo.engine)
         self.presence_repo = PresenceRepository(self.state_repo.engine)
+        self.conversation_decision_repo = ConversationDecisionRepository(
+            self.state_repo.engine
+        )
         self.content_policy = MessageContentPolicy()
         self.conversation_policy = ConversationPolicy()
         self._runtime_state_versions: dict[str, int] = {}
@@ -997,6 +1001,8 @@ class FanslyBot:
                         chat,
                         message,
                         [message],
+                        inbound_id=inbound.id,
+                        trigger_kind=inbound.trigger_kind,
                     )
                 self._persist_runtime_state(inbound.fan_id)
                 if not prepared:
@@ -1261,7 +1267,10 @@ class FanslyBot:
             if self.chat_guidance is not None
             else None
         )
-        generated = self.chat_responder.respond(
+        return self._conversation_brain_reply(
+            inbound_id=inbound.id,
+            trigger_kind=inbound.trigger_kind,
+            fan_id=inbound.fan_id,
             persona=self.persona,
             history=history,
             fan_message=None,
@@ -1274,11 +1283,6 @@ class FanslyBot:
             ),
             brand_bible=guidance.brand_bible if guidance else "",
         )
-        approved = self._approve_conversation_text(
-            inbound.fan_id,
-            generated,
-        )
-        return OutboundMessage.text(approved) if approved else None
 
     def _stalled_episode_is_current(
         self,
@@ -1323,6 +1327,9 @@ class FanslyBot:
         chat: ChatInfo,
         latest: MessageInfo,
         messages: list[MessageInfo] | None = None,
+        *,
+        inbound_id: int | None = None,
+        trigger_kind: str = "unread",
     ) -> OutboundMessage | None:
         """Load persistent state and produce one policy-approved response."""
         fan_id = chat.partner_account_id
@@ -1415,7 +1422,10 @@ class FanslyBot:
                 if self.chat_guidance is not None
                 else None
             )
-            generated = self.chat_responder.respond(
+            return self._conversation_brain_reply(
+                inbound_id=inbound_id,
+                trigger_kind=trigger_kind,
+                fan_id=fan_id,
                 persona=self.persona,
                 history=history,
                 fan_message=latest.content,
@@ -1431,11 +1441,6 @@ class FanslyBot:
                 ),
                 brand_bible=guidance.brand_bible if guidance else "",
             )
-            approved = self._approve_conversation_text(
-                fan_id,
-                generated,
-            )
-            return OutboundMessage.text(approved) if approved else None
 
         # ─── DECISION PIPELINE ───────────────────────────
 
@@ -1717,6 +1722,38 @@ class FanslyBot:
             )
             return None
         return approved
+
+    def _conversation_brain_reply(
+        self,
+        *,
+        inbound_id: int | None,
+        trigger_kind: str,
+        fan_id: str,
+        **context,
+    ) -> OutboundMessage | None:
+        """Plan, draft, critique, approve, and audit one conversation turn."""
+        if not self.chat_responder:
+            return None
+        decision = self.chat_responder.decide(**context)
+        if decision is None:
+            return None
+        approved = self._approve_conversation_text(
+            fan_id,
+            decision.final_message,
+        )
+        if not approved:
+            return None
+        approved_decision = decision.with_approved_message(approved)
+        if inbound_id is not None:
+            self.conversation_decision_repo.save(
+                inbound_message_id=inbound_id,
+                creator_id=self.creator_id,
+                fan_id=fan_id,
+                trigger_kind=trigger_kind,
+                decision=approved_decision,
+                model=self.chat_responder.model,
+            )
+        return OutboundMessage.text(approved)
 
     def _record_sent_reply(
         self,

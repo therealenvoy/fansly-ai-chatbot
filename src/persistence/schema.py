@@ -273,6 +273,42 @@ INBOUND_MESSAGES = Table(
     ),
 )
 
+CONVERSATION_DECISIONS = Table(
+    "conversation_decisions",
+    metadata,
+    Column(
+        "id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column(
+        "inbound_message_id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("inbound_messages.id"),
+        nullable=False,
+    ),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column("trigger_kind", String(32), nullable=False),
+    Column("fan_state", String(64), nullable=False),
+    Column("state_summary", Text, nullable=False),
+    Column("objective", String(64), nullable=False),
+    Column("tactic", String(64), nullable=False),
+    Column("open_thread", Text, nullable=True),
+    Column("draft", Text, nullable=False),
+    Column("critique", JSON, nullable=False, default=list),
+    Column("final_message", Text, nullable=False),
+    Column("confidence", Float, nullable=False),
+    Column("model", String(128), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "inbound_message_id",
+        name="uq_conversation_decision_inbound",
+    ),
+)
+
 OUTBOX_MESSAGES = Table(
     "outbox_messages",
     metadata,
@@ -429,6 +465,12 @@ Index(
     OUTBOX_MESSAGES.c.status,
     OUTBOX_MESSAGES.c.created_at,
     OUTBOX_MESSAGES.c.id,
+)
+Index(
+    "ix_conversation_decision_fan_time",
+    CONVERSATION_DECISIONS.c.creator_id,
+    CONVERSATION_DECISIONS.c.fan_id,
+    CONVERSATION_DECISIONS.c.created_at,
 )
 Index(
     "ix_wallet_transaction_time",

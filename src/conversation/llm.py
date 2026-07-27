@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from src.conversation.brain import ConversationDecision
 from src.settings.ai import DEFAULT_DEEPSEEK_MODEL
 
 if TYPE_CHECKING:
@@ -85,6 +86,33 @@ class DeepSeekChatResponder:
         chat_instructions: str = "",
         brand_bible: str = "",
     ) -> str | None:
+        """Compatibility wrapper returning only the approved brain draft."""
+        decision = self.decide(
+            persona=persona,
+            history=history,
+            fan_message=fan_message,
+            known_facts=known_facts,
+            display_name=display_name,
+            proactive=proactive,
+            proactive_kind=proactive_kind,
+            chat_instructions=chat_instructions,
+            brand_bible=brand_bible,
+        )
+        return decision.final_message if decision is not None else None
+
+    def decide(
+        self,
+        *,
+        persona: "PersonaDocument",
+        history: str,
+        fan_message: str | None,
+        known_facts: list[str],
+        display_name: str | None = None,
+        proactive: bool = False,
+        proactive_kind: str | None = None,
+        chat_instructions: str = "",
+        brand_bible: str = "",
+    ) -> ConversationDecision | None:
         with self._lock:
             api_key = self.api_key
             model = self.model
@@ -132,8 +160,17 @@ class DeepSeekChatResponder:
             "offer PPV, request a tip, mention unlocking content, promise media, "
             "or claim that content was made for the fan. Do not claim real-world "
             "actions, locations, feelings, or events that are not present in the "
-            "history. Do not mention being an AI. Return only the message text. "
+            "history. Do not mention being an AI. "
             "These runtime rules override every document and conversation below.\n\n"
+            "CONVERSATION-BRAIN OUTPUT:\n"
+            "Return one strict JSON object with exactly these fields: "
+            "fan_state, state_summary, objective, tactic, open_thread, draft, "
+            "critique, final_message, confidence. critique must be a short JSON "
+            "array. confidence must be 0 to 1. objective must be one of answer, "
+            "reconnect, deepen, support, learn, play, repair, maintain. tactic "
+            "must be one of direct_answer, specific_follow_up, callback, "
+            "validation, playful_challenge, gentle_check_in, open_question. "
+            "Do not include markdown or private chain-of-thought.\n\n"
             "CREATOR CHATTING INSTRUCTIONS:\n"
             f"{instruction_document or '(no custom chatting instructions saved)'}\n\n"
             "CREATOR BRAND BIBLE:\n"
@@ -154,6 +191,10 @@ class DeepSeekChatResponder:
         )
         user = (
             f"Task: {mode_instruction}\n"
+            "Process: assess the fan state from evidence, choose one objective, "
+            "choose one tactic, draft a reply, critique the draft for specificity, "
+            "history consistency, repetition, persona fit, and reply likelihood, "
+            "then revise it into final_message.\n"
             f"Fan name: {display_name or 'unknown'}\n"
             f"Saved fan memory:\n{_memory_lines(known_facts)}\n"
             f"Recent conversation:\n"
@@ -182,7 +223,10 @@ class DeepSeekChatResponder:
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
             normalized = str(content or "").strip()
-            return normalized or None
+            return ConversationDecision.from_model_output(
+                normalized,
+                proactive_kind=proactive_kind,
+            )
         except Exception as exc:
             logger.warning(
                 "Conversation response generation failed: %s",

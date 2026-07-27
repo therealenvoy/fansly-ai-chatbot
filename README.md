@@ -18,6 +18,11 @@
   the configured interval and the creator sent the latest message;
 - uses recent stored history, creator persona, and learned facts through
   DeepSeek Chat;
+- runs a structured conversation brain before every conversation-mode reply:
+  assess fan state, choose one turn objective and tactic, draft, critique, and
+  revise the final message in one model request;
+- stores the approved plan, critique, confidence, and final message against the
+  durable inbound row for later quality and outcome evaluation;
 - supports unlimited global proactive volume when the three
   `MAX_PROACTIVE_*` values are zero, while durable episode keys prevent
   repeated stalled follow-ups until that fan replies again;

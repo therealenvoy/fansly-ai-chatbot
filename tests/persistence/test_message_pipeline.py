@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from src.bot import FanslyBot
 from src.conversation.mode import BotMode
+from src.conversation.brain import ConversationDecision
 from src.fansly_client import (
     ChatInfo,
     FanslyApiClient,
@@ -109,7 +110,7 @@ def test_pipeline_sorts_oldest_first_and_sends_every_message_once():
         None,
     )
     bot._prepare_message = MagicMock(
-        side_effect=lambda _chat, message, _messages: (
+        side_effect=lambda _chat, message, _messages, **_kwargs: (
             f"reply-{message.message_id}"
         )
     )
@@ -175,6 +176,48 @@ def test_conversation_mode_combines_unread_window_into_one_reply():
         call("chat-a", "one reply")
     ]
     assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+
+
+def test_conversation_mode_persists_brain_decision_before_delivery():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.return_value = ConversationDecision(
+        fan_state="engaged",
+        state_summary="Fan asked about the creator's day.",
+        objective="answer",
+        tactic="direct_answer",
+        open_thread="today",
+        draft="pretty good, how about you?",
+        critique=("Make the question more specific",),
+        final_message="pretty good babe, what was the best part of ur day?",
+        confidence=0.82,
+    )
+    bot.chat_responder = responder
+    chat = _chat(unread_count=1, last_message_id="message-1")
+    bot.client.list_chats_page.return_value = ([chat], None)
+    bot.client.list_messages.return_value = ([_message(1)], None)
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="provider-reply-1",
+    )
+
+    assert bot.poll_and_process() is True
+
+    inbound = _rows(engine, INBOUND_MESSAGES)[0]
+    stored = bot.conversation_decision_repo.get(
+        inbound["id"],
+        creator_id="creator-a",
+    )
+    assert stored is not None
+    assert stored.decision.objective == "answer"
+    assert stored.decision.tactic == "direct_answer"
+    assert stored.decision.critique == (
+        "Make the question more specific",
+    )
+    assert stored.decision.final_message
+    bot.client.send_message.assert_called_once()
 
 
 def test_conversation_mode_never_ingests_changed_read_chat():
@@ -247,7 +290,7 @@ def test_first_scan_processes_only_the_provider_unread_window():
         None,
     )
     bot._prepare_message = MagicMock(
-        side_effect=lambda _chat, message, _messages: (
+        side_effect=lambda _chat, message, _messages, **_kwargs: (
             f"reply-{message.message_id}"
         )
     )
@@ -642,7 +685,7 @@ def test_stalled_follow_up_is_cancelled_if_fan_replies_before_send():
     claimed = bot.processing_repo.claim_next_inbound("creator-a")
     assert bot._process_claimed_inbound(claimed) is True
 
-    responder.respond.assert_not_called()
+    responder.decide.assert_not_called()
     bot.client.send_message.assert_not_called()
     assert _rows(engine, INBOUND_MESSAGES)[0]["status"] == "completed"
 

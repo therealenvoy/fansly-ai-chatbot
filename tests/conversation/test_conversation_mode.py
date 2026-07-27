@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock
 
 import httpx
@@ -110,3 +111,58 @@ def test_stalled_responder_continues_without_calling_out_inactivity(
     assert "Continue this existing conversation naturally" in task
     assert "Never mention inactivity" in task
     assert "Do not repeat the creator's last message" in task
+
+
+def test_deepseek_decide_returns_plan_draft_critique_and_final(
+    monkeypatch,
+):
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "fan_state": "engaged",
+                            "state_summary": "Fan just finished work.",
+                            "objective": "deepen",
+                            "tactic": "callback",
+                            "open_thread": "night shift",
+                            "draft": "how was work?",
+                            "critique": [
+                                "Use the saved night-shift detail",
+                            ],
+                            "final_message": (
+                                "did the night shift treat u any better today?"
+                            ),
+                            "confidence": 0.86,
+                        }
+                    )
+                }
+            }
+        ]
+    }
+    post = MagicMock(return_value=response)
+    monkeypatch.setattr(httpx, "post", post)
+
+    decision = DeepSeekChatResponder("secret").decide(
+        persona=_persona(),
+        history="Fan: finally home",
+        fan_message="long shift",
+        known_facts=["works nights"],
+    )
+
+    assert decision is not None
+    assert decision.objective == "deepen"
+    assert decision.tactic == "callback"
+    assert decision.final_message == (
+        "did the night shift treat u any better today?"
+    )
+    payload = post.call_args.kwargs["json"]
+    assert "CONVERSATION-BRAIN OUTPUT" in (
+        payload["messages"][0]["content"]
+    )
+    assert "critique the draft for specificity" in (
+        payload["messages"][1]["content"]
+    )
