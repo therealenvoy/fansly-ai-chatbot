@@ -154,6 +154,52 @@ def test_unread_claim_bypasses_older_stalled_follow_up():
     assert claimed.platform_message_id == "unread-new"
 
 
+def test_workers_can_claim_different_fans_concurrently():
+    _, repository = _repository()
+    now = datetime.now(timezone.utc)
+    _insert(
+        repository,
+        "fan-a-message",
+        now,
+        fan_id="fan-a",
+    )
+    _insert(
+        repository,
+        "fan-b-message",
+        now + timedelta(seconds=1),
+        fan_id="fan-b",
+    )
+
+    first = repository.claim_next_inbound("creator-a")
+    second = repository.claim_next_inbound("creator-a")
+
+    assert first.platform_message_id == "fan-a-message"
+    assert second.platform_message_id == "fan-b-message"
+
+
+def test_claim_skips_inbound_until_available_at():
+    _, repository = _repository()
+    now = datetime.now(timezone.utc)
+    repository.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="delayed",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hello",
+        provider_created_at=now,
+        available_at=now + timedelta(minutes=1),
+    )
+
+    assert repository.claim_next_inbound("creator-a", now=now) is None
+    assert (
+        repository.claim_next_inbound(
+            "creator-a",
+            now=now + timedelta(minutes=1),
+        ).platform_message_id
+        == "delayed"
+    )
+
+
 def test_newer_inbound_waits_while_oldest_is_processing():
     _, repository = _repository()
     now = datetime.now(timezone.utc)
@@ -371,6 +417,33 @@ def test_pre_send_failures_retry_then_quarantine():
         assert released.status == expected
 
     assert repository.claim_next_inbound("creator-a") is None
+
+
+def test_pre_send_retry_is_scheduled_with_exponential_backoff():
+    _, repository = _repository()
+    now = datetime.now(timezone.utc)
+    _insert(repository, "message-1", now)
+
+    inbound = repository.claim_next_inbound("creator-a", now=now)
+    released = repository.release_inbound(
+        inbound.id,
+        "generation failed",
+        max_attempts=3,
+        retry_base_seconds=5,
+        retry_max_seconds=60,
+        now=now,
+    )
+
+    assert released.status == INBOUND_PENDING
+    expected_available_at = now + timedelta(seconds=5)
+    if released.available_at.tzinfo is None:
+        expected_available_at = expected_available_at.replace(tzinfo=None)
+    assert released.available_at == expected_available_at
+    assert repository.claim_next_inbound("creator-a", now=now) is None
+    assert repository.claim_next_inbound(
+        "creator-a",
+        now=now + timedelta(seconds=5),
+    ) is not None
 
 
 def test_delivery_unknown_rejects_a_send_that_never_started():

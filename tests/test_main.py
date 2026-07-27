@@ -111,6 +111,12 @@ def cleanup_env():
         "CRM_SYNC_MESSAGE_PAGES_PER_CYCLE",
         "CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE",
         "CRM_SYNC_BACKFILL_INTERVAL",
+        "CRM_SYNC_INTERVAL", "REPLY_WORKER_COUNT",
+        "REPLY_WORKER_IDLE_SECONDS", "RECONCILIATION_INTERVAL",
+        "REPLY_DELAY_MIN_SECONDS", "REPLY_DELAY_MAX_SECONDS",
+        "PROCESSING_RETRY_BASE_SECONDS",
+        "PROCESSING_RETRY_MAX_SECONDS",
+        "ONLYFANSAPI_WEBHOOK_SECRET",
     )}
     yield
     for k, v in saved.items():
@@ -141,6 +147,7 @@ def standard_env():
     os.environ["CRM_SYNC_MESSAGE_PAGES_PER_CYCLE"] = "2"
     os.environ["CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE"] = "1"
     os.environ["CRM_SYNC_BACKFILL_INTERVAL"] = "1"
+    os.environ["REPLY_WORKER_COUNT"] = "1"
 
 
 @pytest.fixture
@@ -279,8 +286,10 @@ class TestStartupAuthValidation:
         importlib.reload(module)
 
         assert module.bot.enabled is False
-        mock_deps["crm_sync"].refresh_chat_index.assert_called()
-        mock_deps["crm_sync"].sync_cycle.assert_called()
+        assert any(
+            thread.name == "crm-sync"
+            for thread in module.background_threads
+        )
 
     def test_empty_pilot_allowlist_blocks_enabled_default(
         self,
@@ -510,6 +519,14 @@ def test_crm_backfill_uses_dedicated_short_interval(
     importlib.reload(module)
 
     assert module.CRM_SYNC_BACKFILL_INTERVAL == 30
+    module.running = True
+
+    def _one_backfill_cycle():
+        module.running = False
+        return result
+
+    mock_deps["crm_sync"].sync_cycle.side_effect = _one_backfill_cycle
+    module.run_crm_worker()
     assert any(
         "CRM history backfill pending; continuing in 30s" in record.message
         for record in caplog.records

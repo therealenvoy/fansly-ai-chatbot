@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import Engine, and_, case, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -43,6 +43,7 @@ class InboundMessageRecord:
     content: str
     trigger_kind: str
     provider_created_at: datetime
+    available_at: datetime
     status: str
     attempt_count: int
     locked_at: datetime | None
@@ -88,8 +89,10 @@ class MessageProcessingRepository:
         content: str,
         provider_created_at: datetime,
         trigger_kind: str = "unread",
+        available_at: datetime | None = None,
     ) -> tuple[InboundMessageRecord, bool]:
         """Insert once by provider message ID and return ``(row, created)``."""
+        observed_at = utcnow()
         values = {
             "creator_id": creator_id,
             "platform_message_id": platform_message_id,
@@ -98,7 +101,8 @@ class MessageProcessingRepository:
             "content": content,
             "trigger_kind": trigger_kind,
             "provider_created_at": provider_created_at,
-            "observed_at": utcnow(),
+            "observed_at": observed_at,
+            "available_at": available_at or observed_at,
             "status": INBOUND_PENDING,
             "attempt_count": 0,
         }
@@ -139,6 +143,9 @@ class MessageProcessingRepository:
                 ),
                 "provider_created_at": message["provider_created_at"],
                 "observed_at": observed_at,
+                "available_at": (
+                    message.get("available_at") or observed_at
+                ),
                 "status": INBOUND_PENDING,
                 "attempt_count": 0,
             }
@@ -165,6 +172,7 @@ class MessageProcessingRepository:
         creator_id: str,
         *,
         allowed_fan_ids: set[str] | None = None,
+        now: datetime | None = None,
     ) -> InboundMessageRecord | None:
         """Atomically claim the oldest pending inbound message.
 
@@ -176,6 +184,7 @@ class MessageProcessingRepository:
                 creator_id,
                 skip_locked=self.engine.dialect.name == "postgresql",
                 allowed_fan_ids=allowed_fan_ids,
+                now=now,
             )
             row = conn.execute(stmt).mappings().first()
             if row is None:
@@ -455,8 +464,12 @@ class MessageProcessingRepository:
         error: str,
         *,
         max_attempts: int = 3,
+        retry_base_seconds: int = 0,
+        retry_max_seconds: int = 0,
+        now: datetime | None = None,
     ) -> InboundMessageRecord:
         """Retry a pre-send processing failure, then quarantine it."""
+        current_time = now or utcnow()
         with self.engine.begin() as conn:
             row = conn.execute(
                 select(INBOUND_MESSAGES)
@@ -468,11 +481,21 @@ class MessageProcessingRepository:
                 if row["attempt_count"] < max_attempts
                 else INBOUND_FAILED
             )
+            retry_delay = 0
+            if next_status == INBOUND_PENDING and retry_base_seconds > 0:
+                retry_delay = retry_base_seconds * (
+                    2 ** max(int(row["attempt_count"]) - 1, 0)
+                )
+                if retry_max_seconds > 0:
+                    retry_delay = min(retry_delay, retry_max_seconds)
             conn.execute(
                 update(INBOUND_MESSAGES)
                 .where(INBOUND_MESSAGES.c.id == inbound_id)
                 .values(
                     status=next_status,
+                    available_at=(
+                        current_time + timedelta(seconds=retry_delay)
+                    ),
                     locked_at=None,
                     last_error=self._error(error),
                 )
@@ -690,6 +713,7 @@ class MessageProcessingRepository:
         *,
         skip_locked: bool,
         allowed_fan_ids: set[str] | None = None,
+        now: datetime | None = None,
     ):
         allowed = (
             tuple(sorted(str(fan_id) for fan_id in allowed_fan_ids))
@@ -709,8 +733,10 @@ class MessageProcessingRepository:
             (earlier.c.trigger_kind == "stalled", 2),
             else_=3,
         )
+        claim_time = now or utcnow()
         earlier_filters = [
             earlier.c.creator_id == INBOUND_MESSAGES.c.creator_id,
+            earlier.c.fan_id == INBOUND_MESSAGES.c.fan_id,
             earlier.c.status.in_(
                 [INBOUND_PENDING, INBOUND_PROCESSING]
             ),
@@ -718,6 +744,7 @@ class MessageProcessingRepository:
         candidate_filters = [
             INBOUND_MESSAGES.c.creator_id == creator_id,
             INBOUND_MESSAGES.c.status == INBOUND_PENDING,
+            INBOUND_MESSAGES.c.available_at <= claim_time,
         ]
         if allowed is not None:
             earlier_filters.append(earlier.c.fan_id.in_(allowed))
@@ -742,10 +769,7 @@ class MessageProcessingRepository:
                                 ),
                             ),
                         ),
-                        and_(
-                            earlier.c.status == INBOUND_PROCESSING,
-                            earlier.c.fan_id == INBOUND_MESSAGES.c.fan_id,
-                        ),
+                        earlier.c.status == INBOUND_PROCESSING,
                     ),
                 )
             )
@@ -867,6 +891,7 @@ class MessageProcessingRepository:
             content=row["content"],
             trigger_kind=row["trigger_kind"],
             provider_created_at=row["provider_created_at"],
+            available_at=row["available_at"],
             status=row["status"],
             attempt_count=row["attempt_count"],
             locked_at=row["locked_at"],

@@ -261,6 +261,7 @@ INBOUND_MESSAGES = Table(
     Column("trigger_kind", String(32), nullable=False, default="unread"),
     Column("provider_created_at", DateTime(timezone=True), nullable=False),
     Column("observed_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("available_at", DateTime(timezone=True), nullable=False, default=utcnow),
     Column("status", String(32), nullable=False, default="pending"),
     Column("attempt_count", Integer, nullable=False, default=0),
     Column("locked_at", DateTime(timezone=True), nullable=True),
@@ -456,6 +457,8 @@ Index(
     "ix_inbound_pending_order",
     INBOUND_MESSAGES.c.creator_id,
     INBOUND_MESSAGES.c.status,
+    INBOUND_MESSAGES.c.available_at,
+    INBOUND_MESSAGES.c.trigger_kind,
     INBOUND_MESSAGES.c.provider_created_at,
     INBOUND_MESSAGES.c.id,
 )

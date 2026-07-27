@@ -35,6 +35,12 @@ from ..settings.chat_guidance import (
     MAX_CHAT_INSTRUCTIONS_CHARS,
     ChatGuidanceError,
 )
+from ..webhooks.onlyfansapi import (
+    FANSLY_MESSAGE_EVENTS,
+    InvalidWebhookEvent,
+    OnlyFansApiFanslyMessage,
+    verify_onlyfansapi_signature,
+)
 
 logger = logging.getLogger("fansly-bot.dashboard")
 if TYPE_CHECKING:
@@ -714,7 +720,7 @@ def _script(s):
         "conditions":dict(getattr(s,"conditions",{})),
     }
 
-def _body(h):
+def _body_bytes(h):
     raw_length = h.headers.get("Content-Length", "0")
     try:
         length = int(raw_length)
@@ -725,7 +731,14 @@ def _body(h):
     if length > MAX_BODY_BYTES:
         raise PayloadTooLargeError("request body too large")
     try:
-        return h.rfile.read(length).decode("utf-8") if length else ""
+        return h.rfile.read(length) if length else b""
+    except OSError as exc:
+        raise ValueError("could not read request body") from exc
+
+
+def _body(h):
+    try:
+        return _body_bytes(h).decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("request body must be UTF-8") from exc
 
@@ -955,6 +968,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         p = self.path.split("?")[0]
+        if p == "/webhooks/onlyfansapi/fansly":
+            return self._onlyfansapi_fansly_webhook()
         if p.startswith("/webhooks/apifansly/"):
             return self._apifansly_webhook(p)
         if not self._authorize(require_csrf=True):
@@ -979,6 +994,78 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_update(p.rsplit("/",1)[-1], b)
         if p=="/api/bot/toggle": return self._bot_toggle(b)
         self.j({"error":"not found"},404)
+
+    def _onlyfansapi_fansly_webhook(self):
+        """Authenticate and enqueue one OnlyFansAPI Fansly message event."""
+        if not self._host_is_allowed():
+            return self.j({"error": "invalid host"}, 400)
+        signing_secret = self.server.onlyfansapi_webhook_secret
+        if len(signing_secret) < 32:
+            return self.j(
+                {"error": "webhook receiver is not configured"},
+                503,
+            )
+        try:
+            raw = _body_bytes(self)
+        except PayloadTooLargeError:
+            return self.j({"error": "request body too large"}, 413)
+        except ValueError:
+            return self.j({"error": "invalid request body"}, 400)
+        if not verify_onlyfansapi_signature(
+            raw,
+            self.headers.get("Signature"),
+            signing_secret,
+        ):
+            return self.j({"error": "invalid signature"}, 401)
+        try:
+            payload = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return self.j({"error": "invalid JSON payload"}, 400)
+        if not isinstance(payload, dict):
+            return self.j({"error": "invalid webhook payload"}, 400)
+        event_name = str(payload.get("event") or "").strip()
+        if event_name not in FANSLY_MESSAGE_EVENTS:
+            return self.j({"accepted": False, "ignored": True}, 202)
+        if self.bot is None:
+            return self.j({"error": "bot is unavailable"}, 503)
+        try:
+            event = OnlyFansApiFanslyMessage.from_payload(
+                payload,
+                expected_account_id=str(
+                    getattr(self.client, "account_id", "")
+                ),
+                creator_fansly_id=str(
+                    getattr(self.client, "creator_fansly_id", "")
+                ),
+            )
+            created = self.bot.ingest_webhook_message(event)
+        except InvalidWebhookEvent as exc:
+            reason = str(exc)
+            if reason == "creator-authored message":
+                return self.j(
+                    {"accepted": False, "ignored": True},
+                    202,
+                )
+            status = 403 if "account mismatch" in reason else 400
+            return self.j({"error": reason}, status)
+        except Exception:
+            logger.exception(
+                "OnlyFansAPI Fansly webhook processing failed"
+            )
+            return self.j({"error": "webhook processing failed"}, 500)
+        if created:
+            wakeup = getattr(self.server, "inbound_wakeup", None)
+            if wakeup is not None:
+                wakeup.set()
+            monitor = getattr(self.server, "runtime_monitor", None)
+            if monitor is not None:
+                monitor.webhook_received()
+        return self.j(
+            {
+                "accepted": True,
+                "duplicate": not created,
+            }
+        )
 
     def _apifansly_webhook(self, path: str):
         """Ingest an exact APIFansly PPV purchase without dashboard auth."""
@@ -2633,6 +2720,8 @@ class DashboardServer:
         allowed_hosts: Optional[set[str]] = None,
         csrf_token: Optional[str] = None,
         apifansly_webhook_token: Optional[str] = None,
+        onlyfansapi_webhook_secret: Optional[str] = None,
+        inbound_wakeup=None,
         runtime_monitor=None,
         crm_sync=None,
         ai_settings=None,
@@ -2702,6 +2791,12 @@ class DashboardServer:
             if apifansly_webhook_token is None
             else apifansly_webhook_token
         ).strip()
+        self.server.onlyfansapi_webhook_secret = (
+            os.getenv("ONLYFANSAPI_WEBHOOK_SECRET", "")
+            if onlyfansapi_webhook_secret is None
+            else onlyfansapi_webhook_secret
+        ).strip()
+        self.server.inbound_wakeup = inbound_wakeup
         self.server.script_repo = (
             ScriptTemplateRepository(
                 self.server.engine,

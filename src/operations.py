@@ -27,6 +27,13 @@ class RuntimeMonitor:
         self._last_error: str | None = None
         self._consecutive_failures = 0
         self._consecutive_idle_cycles = 0
+        self._last_webhook_received_at: datetime | None = None
+        self._webhook_events_received = 0
+
+    def webhook_received(self) -> None:
+        with self._lock:
+            self._last_webhook_received_at = _now()
+            self._webhook_events_received += 1
 
     def poll_started(self) -> None:
         with self._lock:
@@ -79,4 +86,8 @@ class RuntimeMonitor:
                 "last_error": self._last_error,
                 "consecutive_failures": self._consecutive_failures,
                 "consecutive_idle_cycles": self._consecutive_idle_cycles,
+                "last_webhook_received_at": _iso(
+                    self._last_webhook_received_at
+                ),
+                "webhook_events_received": self._webhook_events_received,
             }

@@ -31,6 +31,7 @@ from src.sequences.models import (
     SequenceStep,
     SequenceTrigger,
 )
+from src.webhooks.onlyfansapi import OnlyFansApiFanslyMessage
 
 
 def _bot(**bot_kwargs):
@@ -148,6 +149,68 @@ def test_pipeline_sorts_oldest_first_and_sends_every_message_once():
     assert bot.poll_and_process() is False
     bot._prepare_message.assert_not_called()
     assert bot.client.send_message.call_count == 3
+
+
+def test_signed_webhook_path_bypasses_full_chat_reconciliation():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        reply_delay_min_seconds=0,
+        reply_delay_max_seconds=0,
+    )
+    event = OnlyFansApiFanslyMessage(
+        platform_message_id="webhook-message-1",
+        account_id="account-a",
+        chat_id="chat-a",
+        fan_id="fan-a",
+        content="hey",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+    bot._prepare_message = MagicMock(return_value="fast reply")
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="provider-reply-1",
+    )
+
+    assert bot.ingest_webhook_message(event) is True
+    assert bot.ingest_webhook_message(event) is False
+    assert bot.poll_and_process(
+        reconcile=False,
+        outreach=False,
+    ) is True
+
+    bot.client.list_chats_page.assert_not_called()
+    bot.client.list_messages.assert_not_called()
+    bot.client.send_message.assert_called_once_with(
+        "chat-a",
+        "fast reply",
+    )
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+
+
+def test_conversation_generation_failure_is_retried_not_dropped():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        processing_retry_base_seconds=5,
+        processing_retry_max_seconds=60,
+    )
+    now = datetime.now(timezone.utc)
+    bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="message-1",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hey",
+        provider_created_at=now,
+        available_at=now,
+    )
+    bot._prepare_message = MagicMock(return_value=None)
+
+    assert bot.drain_pending(max_messages=1) == 1
+
+    row = _rows(engine, INBOUND_MESSAGES)[0]
+    assert row["status"] == "pending"
+    assert row["attempt_count"] == 1
+    assert row["available_at"] > row["observed_at"]
 
 
 def test_conversation_mode_combines_unread_window_into_one_reply():

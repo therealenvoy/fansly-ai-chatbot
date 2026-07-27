@@ -23,6 +23,13 @@
   revise the final message in one model request;
 - stores the approved plan, critique, confidence, and final message against the
   durable inbound row for later quality and outcome evaluation;
+- ingests signed OnlyFansAPI Fansly message webhooks into a durable queue and
+  wakes reply workers immediately;
+- runs message delivery independently from provider reconciliation, CRM
+  history backfill, and proactive scans, with per-fan ordering and parallel
+  processing across different fans;
+- retries transient pre-send failures with bounded exponential backoff while
+  quarantining uncertain post-send outcomes against accidental duplicates;
 - supports unlimited global proactive volume when the three
   `MAX_PROACTIVE_*` values are zero, while durable episode keys prevent
   repeated stalled follow-ups until that fan replies again;

@@ -5,6 +5,8 @@ SettingsStore rather than mocked end-to-end, to catch real persistence bugs.
 """
 import json
 import base64
+import hashlib
+import hmac
 import re
 import threading
 from datetime import datetime, timedelta, timezone
@@ -36,6 +38,9 @@ TEST_USER = "test-operator"
 TEST_PASSWORD = "correct-horse-battery-staple"
 TEST_CSRF_TOKEN = "test-csrf-token-with-enough-entropy"
 TEST_WEBHOOK_TOKEN = "test-webhook-token-with-enough-entropy"
+TEST_ONLYFANSAPI_WEBHOOK_SECRET = (
+    "test-onlyfansapi-webhook-secret-with-enough-entropy"
+)
 
 
 def _authorization(user=TEST_USER, password=TEST_PASSWORD):
@@ -203,6 +208,31 @@ def _post_webhook(host, token, payload):
     return status, data
 
 
+def _post_onlyfansapi_webhook(
+    host,
+    payload,
+    *,
+    secret=TEST_ONLYFANSAPI_WEBHOOK_SECRET,
+):
+    raw = json.dumps(payload, separators=(",", ":"))
+    signature = hmac.new(
+        secret.encode(),
+        raw.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    status, data, _ = _request(
+        host,
+        "POST",
+        "/webhooks/onlyfansapi/fansly",
+        body=raw,
+        headers={
+            "Content-Type": "application/json",
+            "Signature": signature,
+        },
+    )
+    return status, data
+
+
 def _delete(host, path, *, authenticated=True, csrf=True, origin=None):
     headers = {}
     if authenticated:
@@ -249,6 +279,7 @@ def _make_bot(db_url):
         MagicMock(),
         True,
     )
+    bot.ingest_webhook_message.return_value = True
     bot.ai_settings = MagicMock()
     bot.ai_settings.status.return_value = {
         "provider": "DeepSeek",
@@ -297,6 +328,7 @@ def running_server(db_url, tmp_path):
         ),
         legacy_brand_bible_path=tmp_path / "brand_bible.md",
     )
+    inbound_wakeup = MagicMock()
     server = DashboardServer(
         bot,
         port=0,
@@ -304,6 +336,10 @@ def running_server(db_url, tmp_path):
         dashboard_password=TEST_PASSWORD,
         csrf_token=TEST_CSRF_TOKEN,
         apifansly_webhook_token=TEST_WEBHOOK_TOKEN,
+        onlyfansapi_webhook_secret=(
+            TEST_ONLYFANSAPI_WEBHOOK_SECRET
+        ),
+        inbound_wakeup=inbound_wakeup,
         persona_dir=str(tmp_path / "personas"),
         brand_bible_path=str(tmp_path / "brand_bible.md"),
         ai_settings=bot.ai_settings,
@@ -391,6 +427,85 @@ class TestApifanslyPurchaseWebhook:
 
         assert status == 403
         bot.record_provider_ppv_purchase.assert_not_called()
+
+
+class TestOnlyFansApiFanslyWebhook:
+    def _payload(self):
+        return {
+            "event": "fansly.messages.received",
+            "account_id": "fansly_acc_test",
+            "payload": {
+                "id": "message-1",
+                "groupId": "chat-1",
+                "senderId": "fan-1",
+                "content": "hey",
+                "createdAt": 1_722_000_000,
+            },
+        }
+
+    def test_signed_message_is_enqueued_without_dashboard_auth(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post_onlyfansapi_webhook(
+            host,
+            self._payload(),
+        )
+
+        assert status == 200
+        assert body == {"accepted": True, "duplicate": False}
+        bot.ingest_webhook_message.assert_called_once()
+        event = bot.ingest_webhook_message.call_args.args[0]
+        assert event.platform_message_id == "message-1"
+        assert event.chat_id == "chat-1"
+        assert event.fan_id == "fan-1"
+
+    def test_invalid_signature_is_rejected_before_ingestion(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post_onlyfansapi_webhook(
+            host,
+            self._payload(),
+            secret="wrong-signing-secret-with-enough-entropy",
+        )
+
+        assert status == 401
+        assert body == {"error": "invalid signature"}
+        bot.ingest_webhook_message.assert_not_called()
+
+    def test_duplicate_event_is_acknowledged_idempotently(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        bot.ingest_webhook_message.return_value = False
+
+        status, body = _post_onlyfansapi_webhook(
+            host,
+            self._payload(),
+        )
+
+        assert status == 200
+        assert body == {"accepted": True, "duplicate": True}
+
+    def test_wrong_fansly_account_is_rejected(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = self._payload()
+        payload["account_id"] = "fansly_acct_other"
+
+        status, body = _post_onlyfansapi_webhook(host, payload)
+
+        assert status == 403
+        assert body == {"error": "webhook account mismatch"}
+        bot.ingest_webhook_message.assert_not_called()
 
 
 class TestBotStatusEndpoints:

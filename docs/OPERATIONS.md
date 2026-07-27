@@ -7,9 +7,18 @@
   Railway deploy health checks and the container health check use this route.
 - `/api/operations` requires dashboard Basic Auth. It reports database
   readiness, provider state, bot/launch state, durable inbox/outbox counts, and
-  polling timestamps/failures. Its `crm_sync` section reports discovered,
+  polling timestamps/failures. It also reports the last accepted message
+  webhook time and total accepted webhook events. Its `crm_sync` section reports discovered,
   complete, pending, and failed histories plus stored message count. It never
   returns credentials or message contents.
+- Fansly inbound messages enter through
+  `/webhooks/onlyfansapi/fansly`. The route verifies the raw request body with
+  HMAC-SHA256 using `ONLYFANSAPI_WEBHOOK_SECRET`, rejects another account or a
+  creator-authored message, and inserts one idempotent durable inbox row.
+- Reply workers drain that queue independently from provider reconciliation,
+  CRM history imports, and proactive scans. Work for one fan remains ordered;
+  different fans can run concurrently. A missed webhook is recovered by the
+  bounded reconciliation worker.
 - Railway deployment health checks run during deployment, not continuously.
   `.github/workflows/production-monitor.yml` checks `/ready` every 15 minutes
   and fails only after two consecutive failed probes. Scheduled workflows run
@@ -53,6 +62,34 @@ not protect Neon, and a Neon restore does not protect `/data`.
    result, and operator.
 
 Never test a restore by overwriting production.
+
+## Webhook-first conversation runtime
+
+Required OnlyFansAPI configuration:
+
+```text
+ONLYFANSAPI_WEBHOOK_SECRET=<at least 32 random bytes>
+REPLY_WORKER_COUNT=2
+REPLY_WORKER_IDLE_SECONDS=1
+RECONCILIATION_INTERVAL=300
+REPLY_DELAY_MIN_SECONDS=5
+REPLY_DELAY_MAX_SECONDS=25
+PROCESSING_RETRY_BASE_SECONDS=5
+PROCESSING_RETRY_MAX_SECONDS=60
+CRM_SYNC_INTERVAL=300
+```
+
+In the OnlyFansAPI console, create an account-scoped webhook for the exact
+Fansly inbound-message event exposed by the event catalog and point it to:
+
+```text
+https://<RAILWAY_PUBLIC_DOMAIN>/webhooks/onlyfansapi/fansly
+```
+
+Use the same secret on both sides. Do not subscribe a global webhook when the
+bot only owns one creator account. Confirm `webhook_events_received` advances
+in `/api/operations`; if it does not, reconciliation still recovers messages
+but latency returns to the configured reconciliation interval.
 
 ## Controlled launch
 
