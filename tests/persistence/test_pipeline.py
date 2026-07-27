@@ -42,6 +42,7 @@ def _insert(
     *,
     content="hello",
     fan_id="fan-a",
+    trigger_kind="unread",
 ):
     return repository.insert_inbound(
         creator_id="creator-a",
@@ -50,6 +51,7 @@ def _insert(
         chat_id="chat-a",
         content=content,
         provider_created_at=created_at,
+        trigger_kind=trigger_kind,
     )
 
 
@@ -93,8 +95,33 @@ def test_postgres_claim_uses_row_lock_and_skip_locked():
 
     assert "NOT (EXISTS" in sql
     assert "EARLIER_INBOUND.STATUS IN ('PENDING', 'PROCESSING')" in sql
-    assert "ORDER BY INBOUND_MESSAGES.PROVIDER_CREATED_AT ASC" in sql
+    assert "CASE WHEN (INBOUND_MESSAGES.TRIGGER_KIND = 'UNREAD')" in sql
+    assert "ORDER BY CASE WHEN" in sql
+    assert "INBOUND_MESSAGES.PROVIDER_CREATED_AT ASC" in sql
     assert "FOR UPDATE SKIP LOCKED" in sql
+
+
+def test_unread_claim_bypasses_older_stalled_follow_up():
+    _, repository = _repository()
+    now = datetime.now(timezone.utc)
+    _insert(
+        repository,
+        "stalled-old",
+        now - timedelta(days=2),
+        fan_id="fan-stalled",
+        trigger_kind="stalled",
+    )
+    _insert(
+        repository,
+        "unread-new",
+        now,
+        fan_id="fan-unread",
+        trigger_kind="unread",
+    )
+
+    claimed = repository.claim_next_inbound("creator-a")
+
+    assert claimed.platform_message_id == "unread-new"
 
 
 def test_newer_inbound_waits_while_oldest_is_processing():

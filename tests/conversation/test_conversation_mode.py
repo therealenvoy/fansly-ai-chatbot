@@ -83,3 +83,30 @@ def test_deepseek_responder_uses_context_and_returns_message(monkeypatch):
     assert "finally home" in payload["messages"][1]["content"]
     assert "Known fact: works nights" not in user
     assert "- works nights" in user
+
+
+def test_stalled_responder_continues_without_calling_out_inactivity(
+    monkeypatch,
+):
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [{"message": {"content": "how did your shift go babe?"}}]
+    }
+    post = MagicMock(return_value=response)
+    monkeypatch.setattr(httpx, "post", post)
+
+    result = DeepSeekChatResponder("secret").respond(
+        persona=_persona(),
+        history="Fan: working late\nCreator: hope it goes smoothly babe",
+        fan_message=None,
+        known_facts=["works nights"],
+        proactive=True,
+        proactive_kind="stalled",
+    )
+
+    assert result == "how did your shift go babe?"
+    task = post.call_args.kwargs["json"]["messages"][1]["content"]
+    assert "Continue this existing conversation naturally" in task
+    assert "Never mention inactivity" in task
+    assert "Do not repeat the creator's last message" in task

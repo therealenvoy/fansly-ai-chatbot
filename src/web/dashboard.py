@@ -1944,6 +1944,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "mode":"unavailable",
                 "unread_replies":False,
                 "online_outreach":False,
+                "stalled_outreach":False,
             })
         enabled=bool(self.bot.enabled)
         persisted=None
@@ -1985,6 +1986,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
             "online_outreach":bool(
                 getattr(self.bot, "enable_online_outreach", False)
+            ),
+            "stalled_outreach":bool(
+                getattr(self.bot, "enable_stalled_outreach", False)
             ),
             "launch_block_reason":getattr(
                 self.bot,

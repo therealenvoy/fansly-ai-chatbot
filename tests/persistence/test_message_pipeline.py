@@ -14,7 +14,9 @@ from src.fansly_client import (
 )
 from src.fansly_client import ProviderCapabilities, WalletTransaction
 from src.messaging.models import OutboundMessage
+from src.memory.store import MessageStore
 from src.notes.repository import FanNoteRepository
+from src.persistence.crm import CrmSyncRepository
 from src.persistence.database import create_database_engine
 from src.persistence.pipeline import MessageProcessingRepository
 from src.persistence.schema import (
@@ -47,12 +49,17 @@ def _bot(**bot_kwargs):
     note_repo = FanNoteRepository(engine=engine)
     note_repo.create_table()
     state_repo = ConversationStateRepository(engine)
+    message_store = bot_kwargs.pop(
+        "message_store",
+        MessageStore(engine=engine),
+    )
     bot = FanslyBot(
         client=client,
         persona_loader=persona_loader,
         note_repo=note_repo,
         creator_id="creator-a",
         state_repo=state_repo,
+        message_store=message_store,
         **bot_kwargs,
     )
     bot._persist_runtime_state = MagicMock()
@@ -515,6 +522,129 @@ def test_online_presence_baselines_then_queues_one_transition():
     assert rows[0]["trigger_kind"] == "online"
     assert bot._poll_presence() is True
     assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+
+
+def test_zero_proactive_limits_mean_unlimited():
+    _, bot = _bot()
+    bot.state_repo.ensure_conversation(
+        "creator-a",
+        "fan-a",
+        "chat-a",
+    )
+    now = datetime.now(timezone.utc)
+    bot.presence_repo.observe(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        last_seen_at=now,
+        provider_status_id=1,
+        observed_at=now,
+        online_window_seconds=600,
+    )
+
+    eligible, reason = bot.presence_repo.eligible_for_outreach(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        now=now,
+        cooldown_hours=48,
+        max_per_hour=0,
+        max_per_day=0,
+        max_per_fan_per_day=0,
+    )
+
+    assert eligible is True
+    assert reason is None
+
+
+def _seed_stalled_conversation(engine, bot):
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(hours=48)
+    bot.state_repo.ensure_conversation(
+        "creator-a",
+        "fan-a",
+        "chat-a",
+    )
+    bot.message_store.save_message(
+        "fan-a",
+        "creator-a",
+        "fan",
+        "working late",
+        "fan-message-1",
+        chat_id="chat-a",
+        created_at=old - timedelta(minutes=5),
+    )
+    bot.message_store.save_message(
+        "fan-a",
+        "creator-a",
+        "creator",
+        "hope it goes smoothly babe",
+        "creator-message-1",
+        chat_id="chat-a",
+        created_at=old,
+    )
+    sync = CrmSyncRepository(engine)
+    sync.discover_chat(
+        creator_id="creator-a",
+        chat_id="chat-a",
+        fan_id="fan-a",
+        provider_head_message_id="creator-message-1",
+    )
+    sync.complete_initial_page(
+        creator_id="creator-a",
+        chat_id="chat-a",
+        provider_head_message_id="creator-message-1",
+        backfill_cursor=None,
+    )
+
+
+def test_stalled_scan_queues_once_per_fan_response_episode():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        enable_stalled_outreach=True,
+        stalled_after_hours=24,
+        stalled_scan_interval_seconds=0,
+    )
+    _seed_stalled_conversation(engine, bot)
+
+    assert bot._poll_stalled_conversations() is True
+    rows = _rows(engine, INBOUND_MESSAGES)
+    assert len(rows) == 1
+    assert rows[0]["trigger_kind"] == "stalled"
+    assert rows[0]["content"] == "fan-message-1"
+
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+    bot.processing_repo.complete_without_response(claimed.id)
+    assert bot._poll_stalled_conversations() is False
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+
+
+def test_stalled_follow_up_is_cancelled_if_fan_replies_before_send():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        enable_stalled_outreach=True,
+        stalled_after_hours=24,
+        stalled_scan_interval_seconds=0,
+    )
+    responder = MagicMock()
+    responder.enabled = True
+    bot.chat_responder = responder
+    _seed_stalled_conversation(engine, bot)
+    assert bot._poll_stalled_conversations() is True
+    bot.message_store.save_message(
+        "fan-a",
+        "creator-a",
+        "fan",
+        "it went well",
+        "fan-message-2",
+        chat_id="chat-a",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+    assert bot._process_claimed_inbound(claimed) is True
+
+    responder.respond.assert_not_called()
+    bot.client.send_message.assert_not_called()
+    assert _rows(engine, INBOUND_MESSAGES)[0]["status"] == "completed"
 
 
 def test_documented_free_media_delivery_uses_the_same_outbox():

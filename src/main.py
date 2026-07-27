@@ -86,6 +86,10 @@ MAX_MESSAGES_PER_POLL = max(
 )
 ENABLE_UNREAD_REPLIES = _env_bool("ENABLE_UNREAD_REPLIES", True)
 ENABLE_ONLINE_OUTREACH = _env_bool("ENABLE_ONLINE_OUTREACH", False)
+ENABLE_STALLED_OUTREACH = _env_bool(
+    "ENABLE_STALLED_OUTREACH",
+    False,
+)
 OUTREACH_EXISTING_ONLINE = _env_bool(
     "OUTREACH_EXISTING_ONLINE",
     False,
@@ -100,15 +104,15 @@ PROACTIVE_COOLDOWN_HOURS = max(
 )
 MAX_PROACTIVE_PER_HOUR = max(
     0,
-    int(os.getenv("MAX_PROACTIVE_PER_HOUR", "3")),
+    int(os.getenv("MAX_PROACTIVE_PER_HOUR", "0")),
 )
 MAX_PROACTIVE_PER_DAY = max(
     0,
-    int(os.getenv("MAX_PROACTIVE_PER_DAY", "15")),
+    int(os.getenv("MAX_PROACTIVE_PER_DAY", "0")),
 )
 MAX_PROACTIVE_PER_FAN_PER_DAY = max(
     0,
-    int(os.getenv("MAX_PROACTIVE_PER_FAN_PER_DAY", "1")),
+    int(os.getenv("MAX_PROACTIVE_PER_FAN_PER_DAY", "0")),
 )
 PRESENCE_BATCH_SIZE = min(
     max(1, int(os.getenv("PRESENCE_BATCH_SIZE", "100"))),
@@ -117,6 +121,18 @@ PRESENCE_BATCH_SIZE = min(
 PRESENCE_POLL_INTERVAL = max(
     60,
     int(os.getenv("PRESENCE_POLL_INTERVAL", "300")),
+)
+STALLED_AFTER_HOURS = max(
+    1,
+    int(os.getenv("STALLED_AFTER_HOURS", "24")),
+)
+STALLED_SCAN_INTERVAL = max(
+    60,
+    int(os.getenv("STALLED_SCAN_INTERVAL", "300")),
+)
+STALLED_SCAN_BATCH_SIZE = min(
+    max(1, int(os.getenv("STALLED_SCAN_BATCH_SIZE", "5000"))),
+    5000,
 )
 CRM_SYNC_ENABLED = _env_bool("CRM_SYNC_ENABLED", True)
 CRM_SYNC_MESSAGE_PAGES_PER_CYCLE = min(
@@ -302,6 +318,7 @@ if api_ok:
             chat_guidance=chat_guidance,
             enable_unread_replies=ENABLE_UNREAD_REPLIES,
             enable_online_outreach=ENABLE_ONLINE_OUTREACH,
+            enable_stalled_outreach=ENABLE_STALLED_OUTREACH,
             outreach_existing_online=OUTREACH_EXISTING_ONLINE,
             online_window_seconds=ONLINE_WINDOW_SECONDS,
             proactive_cooldown_hours=PROACTIVE_COOLDOWN_HOURS,
@@ -312,6 +329,9 @@ if api_ok:
             ),
             presence_batch_size=PRESENCE_BATCH_SIZE,
             presence_poll_interval_seconds=PRESENCE_POLL_INTERVAL,
+            stalled_after_hours=STALLED_AFTER_HOURS,
+            stalled_scan_interval_seconds=STALLED_SCAN_INTERVAL,
+            stalled_scan_batch_size=STALLED_SCAN_BATCH_SIZE,
         )
         bot_enabled_str = settings_store.get(
             "bot_enabled",

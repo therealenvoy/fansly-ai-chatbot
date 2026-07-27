@@ -14,9 +14,13 @@
   messages into one contextual turn;
 - observes bounded batches of known Fansly users and can queue one opener on a
   durable offline-to-online transition;
+- follows up once when a fully synchronized conversation has been quiet for
+  the configured interval and the creator sent the latest message;
 - uses recent stored history, creator persona, and learned facts through
   DeepSeek Chat;
-- applies per-fan cooldowns plus hourly and daily proactive-message caps;
+- supports unlimited global proactive volume when the three
+  `MAX_PROACTIVE_*` values are zero, while durable episode keys prevent
+  repeated stalled follow-ups until that fan replies again;
 - rejects media, PPV, prices, tips, unlock language, and sales delivery at the
   generation, outbox, and provider-delivery boundaries.
 

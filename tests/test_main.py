@@ -100,11 +100,14 @@ def cleanup_env():
         "CONTROLLED_LAUNCH", "BOT_ENABLED_DEFAULT", "FAN_ALLOWLIST",
         "MAX_MESSAGES_PER_POLL", "CRM_SYNC_ENABLED",
         "BOT_MODE", "ENABLE_UNREAD_REPLIES",
-        "ENABLE_ONLINE_OUTREACH", "OUTREACH_EXISTING_ONLINE",
+        "ENABLE_ONLINE_OUTREACH", "ENABLE_STALLED_OUTREACH",
+        "OUTREACH_EXISTING_ONLINE",
         "ONLINE_WINDOW_SECONDS", "PROACTIVE_COOLDOWN_HOURS",
         "MAX_PROACTIVE_PER_HOUR", "MAX_PROACTIVE_PER_DAY",
         "MAX_PROACTIVE_PER_FAN_PER_DAY", "PRESENCE_BATCH_SIZE",
         "PRESENCE_POLL_INTERVAL",
+        "STALLED_AFTER_HOURS", "STALLED_SCAN_INTERVAL",
+        "STALLED_SCAN_BATCH_SIZE",
         "CRM_SYNC_MESSAGE_PAGES_PER_CYCLE",
         "CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE",
         "CRM_SYNC_BACKFILL_INTERVAL",
@@ -262,6 +265,10 @@ class TestStartupAuthValidation:
         kwargs = mock_deps["bot_cls"].call_args.kwargs
         assert kwargs["allowed_fan_ids"] == {"pilot-fan"}
         assert kwargs["require_fan_allowlist"] is True
+        assert kwargs["max_proactive_per_hour"] == 0
+        assert kwargs["max_proactive_per_day"] == 0
+        assert kwargs["max_proactive_per_fan_per_day"] == 0
+        assert kwargs["enable_stalled_outreach"] is False
         assert module.bot.enabled is False
 
     def test_crm_sync_runs_even_while_automated_replies_are_disabled(

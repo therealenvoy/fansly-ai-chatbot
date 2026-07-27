@@ -469,12 +469,14 @@ class TestBotStatusEndpoints:
     def test_bot_status_reflects_enabled_state(self, running_server):
         host, bot, _ = running_server
         bot.enabled = False
+        bot.enable_stalled_outreach = True
         status, body = _get(host, "/api/bot/status")
         assert status == 200
         assert body["available"] is True
         assert body["enabled"] is False
         assert body["persisted_enabled"] is None
         assert body["consistent"] is True
+        assert body["stalled_outreach"] is True
 
     def test_empty_controlled_launch_rejects_enable(self, running_server):
         host, bot, db_url = running_server

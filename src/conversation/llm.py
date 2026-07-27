@@ -81,6 +81,7 @@ class DeepSeekChatResponder:
         known_facts: list[str],
         display_name: str | None = None,
         proactive: bool = False,
+        proactive_kind: str | None = None,
         chat_instructions: str = "",
         brand_bible: str = "",
     ) -> str | None:
@@ -92,15 +93,25 @@ class DeepSeekChatResponder:
         if not api_key:
             return None
 
-        mode_instruction = (
-            "Start one natural conversation with this returning fan. "
-            "They recently became active, but never mention online status, "
-            "tracking, monitoring, or that you saw them appear."
-            if proactive
-            else
-            "Reply directly to the fan's newest unread messages. Address what "
-            "they actually said and continue the conversation naturally."
-        )
+        if proactive_kind == "stalled":
+            mode_instruction = (
+                "Continue this existing conversation naturally after it went "
+                "quiet. Use the recent history and ask a specific, easy-to-answer "
+                "question. Never mention inactivity, waiting, ghosting, tracking, "
+                "automation, or that the fan failed to reply. Do not repeat the "
+                "creator's last message."
+            )
+        elif proactive:
+            mode_instruction = (
+                "Start one natural conversation with this returning fan. "
+                "They recently became active, but never mention online status, "
+                "tracking, monitoring, or that you saw them appear."
+            )
+        else:
+            mode_instruction = (
+                "Reply directly to the fan's newest unread messages. Address "
+                "what they actually said and continue the conversation naturally."
+            )
         brand_document = _bounded_text(
             brand_bible,
             MAX_PROMPT_DOCUMENT_CHARS,

@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Engine, and_, desc, func, select, update
+from sqlalchemy import Engine, and_, desc, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from .schema import (
     CONVERSATIONS,
+    CRM_CHAT_SYNC,
     FAN_MESSAGES,
     FAN_PRESENCE,
     FANS,
@@ -36,6 +37,24 @@ class PresenceObservation:
     first_observation: bool
     transitioned_online: bool
     last_seen_at: datetime | None
+
+
+@dataclass(frozen=True)
+class StalledConversationCandidate:
+    fan_id: str
+    chat_id: str
+    latest_creator_message_id: str | None
+    latest_creator_message_at: datetime
+    latest_fan_message_id: str | None
+    latest_fan_message_at: datetime | None
+
+    @property
+    def episode_key(self) -> str:
+        if self.latest_fan_message_id:
+            return self.latest_fan_message_id
+        if self.latest_fan_message_at:
+            return self.latest_fan_message_at.isoformat()
+        return "no-fan-message"
 
 
 class PresenceRepository:
@@ -267,31 +286,185 @@ class PresenceRepository:
             ):
                 return False, "creator sent the latest recent message"
 
-            sent_hour = connection.execute(
-                sent_base.where(OUTBOX_MESSAGES.c.sent_at >= hour_ago)
-            ).scalar_one()
-            if int(sent_hour or 0) >= max(0, max_per_hour):
-                return False, "hourly proactive limit reached"
+            if max_per_hour > 0:
+                sent_hour = connection.execute(
+                    sent_base.where(OUTBOX_MESSAGES.c.sent_at >= hour_ago)
+                ).scalar_one()
+                if int(sent_hour or 0) >= max_per_hour:
+                    return False, "hourly proactive limit reached"
 
-            sent_day = connection.execute(
-                sent_base.where(OUTBOX_MESSAGES.c.sent_at >= day_ago)
-            ).scalar_one()
-            if int(sent_day or 0) >= max(0, max_per_day):
-                return False, "daily proactive limit reached"
+            if max_per_day > 0:
+                sent_day = connection.execute(
+                    sent_base.where(OUTBOX_MESSAGES.c.sent_at >= day_ago)
+                ).scalar_one()
+                if int(sent_day or 0) >= max_per_day:
+                    return False, "daily proactive limit reached"
 
-            sent_fan_day = connection.execute(
-                sent_base.where(
-                    and_(
-                        OUTBOX_MESSAGES.c.sent_at >= day_ago,
-                        OUTBOX_MESSAGES.c.fan_id == fan_id,
+            if max_per_fan_per_day > 0:
+                sent_fan_day = connection.execute(
+                    sent_base.where(
+                        and_(
+                            OUTBOX_MESSAGES.c.sent_at >= day_ago,
+                            OUTBOX_MESSAGES.c.fan_id == fan_id,
+                        )
                     )
-                )
-            ).scalar_one()
-            if int(sent_fan_day or 0) >= max(
-                0, max_per_fan_per_day
-            ):
-                return False, "fan daily proactive limit reached"
+                ).scalar_one()
+                if int(sent_fan_day or 0) >= max_per_fan_per_day:
+                    return False, "fan daily proactive limit reached"
         return True, None
+
+    def stalled_candidates(
+        self,
+        creator_id: str,
+        *,
+        stalled_before: datetime,
+        allowed_fan_ids: set[str] | None = None,
+        limit: int = 5000,
+    ) -> list[StalledConversationCandidate]:
+        """Return chats whose latest fully-synced message is an old creator send."""
+        stalled_before = self._aware(stalled_before)
+        rank = func.row_number().over(
+            partition_by=FAN_MESSAGES.c.fan_id,
+            order_by=(
+                FAN_MESSAGES.c.created_at.desc(),
+                FAN_MESSAGES.c.id.desc(),
+            ),
+        )
+        latest_messages = (
+            select(
+                FAN_MESSAGES.c.fan_id.label("fan_id"),
+                FAN_MESSAGES.c.sender.label("sender"),
+                FAN_MESSAGES.c.message_id.label("message_id"),
+                FAN_MESSAGES.c.created_at.label("created_at"),
+                rank.label("message_rank"),
+            )
+            .where(FAN_MESSAGES.c.creator_id == creator_id)
+            .subquery("latest_messages")
+        )
+        latest_fan_messages = (
+            select(
+                FAN_MESSAGES.c.fan_id.label("fan_id"),
+                FAN_MESSAGES.c.message_id.label("message_id"),
+                FAN_MESSAGES.c.created_at.label("created_at"),
+                func.row_number()
+                .over(
+                    partition_by=FAN_MESSAGES.c.fan_id,
+                    order_by=(
+                        FAN_MESSAGES.c.created_at.desc(),
+                        FAN_MESSAGES.c.id.desc(),
+                    ),
+                )
+                .label("message_rank"),
+            )
+            .where(
+                and_(
+                    FAN_MESSAGES.c.creator_id == creator_id,
+                    FAN_MESSAGES.c.sender == "fan",
+                )
+            )
+            .subquery("latest_fan_messages")
+        )
+        pending_for_fan = exists(
+            select(INBOUND_MESSAGES.c.id).where(
+                and_(
+                    INBOUND_MESSAGES.c.creator_id == creator_id,
+                    INBOUND_MESSAGES.c.fan_id == CONVERSATIONS.c.fan_id,
+                    INBOUND_MESSAGES.c.status.in_(
+                        ["pending", "processing"]
+                    ),
+                )
+            )
+        )
+        statement = (
+            select(
+                CONVERSATIONS.c.fan_id,
+                CONVERSATIONS.c.chat_id,
+                latest_messages.c.message_id.label(
+                    "latest_creator_message_id"
+                ),
+                latest_messages.c.created_at.label(
+                    "latest_creator_message_at"
+                ),
+                latest_fan_messages.c.message_id.label(
+                    "latest_fan_message_id"
+                ),
+                latest_fan_messages.c.created_at.label(
+                    "latest_fan_message_at"
+                ),
+            )
+            .select_from(
+                CONVERSATIONS.join(
+                    latest_messages,
+                    and_(
+                        CONVERSATIONS.c.fan_id
+                        == latest_messages.c.fan_id,
+                        latest_messages.c.message_rank == 1,
+                    ),
+                )
+                .outerjoin(
+                    latest_fan_messages,
+                    and_(
+                        CONVERSATIONS.c.fan_id
+                        == latest_fan_messages.c.fan_id,
+                        latest_fan_messages.c.message_rank == 1,
+                    ),
+                )
+                .join(
+                    CRM_CHAT_SYNC,
+                    and_(
+                        CONVERSATIONS.c.creator_id
+                        == CRM_CHAT_SYNC.c.creator_id,
+                        CONVERSATIONS.c.chat_id
+                        == CRM_CHAT_SYNC.c.chat_id,
+                    ),
+                )
+            )
+            .where(
+                and_(
+                    CONVERSATIONS.c.creator_id == creator_id,
+                    latest_messages.c.sender == "creator",
+                    latest_messages.c.created_at <= stalled_before,
+                    CRM_CHAT_SYNC.c.provider_head_message_id
+                    == CRM_CHAT_SYNC.c.stored_head_message_id,
+                    ~pending_for_fan,
+                )
+            )
+            .order_by(
+                latest_messages.c.created_at.asc(),
+                CONVERSATIONS.c.fan_id.asc(),
+            )
+            .limit(min(max(int(limit), 1), 5000))
+        )
+        if allowed_fan_ids is not None:
+            normalized = tuple(
+                sorted(str(item) for item in allowed_fan_ids)
+            )
+            if not normalized:
+                return []
+            statement = statement.where(
+                CONVERSATIONS.c.fan_id.in_(normalized)
+            )
+        with self.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+        return [
+            StalledConversationCandidate(
+                fan_id=str(row["fan_id"]),
+                chat_id=str(row["chat_id"]),
+                latest_creator_message_id=row[
+                    "latest_creator_message_id"
+                ],
+                latest_creator_message_at=self._aware(
+                    row["latest_creator_message_at"]
+                ),
+                latest_fan_message_id=row["latest_fan_message_id"],
+                latest_fan_message_at=(
+                    self._aware(row["latest_fan_message_at"])
+                    if row["latest_fan_message_at"] is not None
+                    else None
+                ),
+            )
+            for row in rows
+        ]
 
     def mark_outreach_sent(
         self,

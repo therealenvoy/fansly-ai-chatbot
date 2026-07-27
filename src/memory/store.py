@@ -200,6 +200,33 @@ class MessageStore:
             lines.append(f"{speaker}: {m['content']}")
         return "\n".join(lines)
 
+    def get_latest_message(
+        self,
+        fan_id: str,
+        creator_id: str,
+        *,
+        sender: str | None = None,
+    ) -> dict | None:
+        """Return the newest durable message, optionally for one sender."""
+        filters = [
+            MESSAGES_TABLE.c.fan_id == fan_id,
+            MESSAGES_TABLE.c.creator_id == creator_id,
+        ]
+        if sender is not None:
+            filters.append(MESSAGES_TABLE.c.sender == sender)
+        statement = (
+            select(MESSAGES_TABLE)
+            .where(and_(*filters))
+            .order_by(
+                desc(MESSAGES_TABLE.c.created_at),
+                desc(MESSAGES_TABLE.c.id),
+            )
+            .limit(1)
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(statement).first()
+        return self._serialize(row) if row is not None else None
+
     def count_messages(self, fan_id: str, creator_id: str) -> int:
         with self.engine.connect() as conn:
             stmt = select(func.count()).select_from(MESSAGES_TABLE).where(

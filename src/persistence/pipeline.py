@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Engine, and_, exists, func, or_, select, update
+from sqlalchemy import Engine, and_, case, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -657,6 +657,18 @@ class MessageProcessingRepository:
             else None
         )
         earlier = INBOUND_MESSAGES.alias("earlier_inbound")
+        candidate_priority = case(
+            (INBOUND_MESSAGES.c.trigger_kind == "unread", 0),
+            (INBOUND_MESSAGES.c.trigger_kind == "online", 1),
+            (INBOUND_MESSAGES.c.trigger_kind == "stalled", 2),
+            else_=3,
+        )
+        earlier_priority = case(
+            (earlier.c.trigger_kind == "unread", 0),
+            (earlier.c.trigger_kind == "online", 1),
+            (earlier.c.trigger_kind == "stalled", 2),
+            else_=3,
+        )
         earlier_filters = [
             earlier.c.creator_id == INBOUND_MESSAGES.c.creator_id,
             earlier.c.status.in_(
@@ -677,12 +689,22 @@ class MessageProcessingRepository:
                 and_(
                     *earlier_filters,
                     or_(
-                        earlier.c.provider_created_at
-                        < INBOUND_MESSAGES.c.provider_created_at,
+                        earlier_priority < candidate_priority,
                         and_(
-                            earlier.c.provider_created_at
-                            == INBOUND_MESSAGES.c.provider_created_at,
-                            earlier.c.id < INBOUND_MESSAGES.c.id,
+                            earlier_priority == candidate_priority,
+                            or_(
+                                earlier.c.provider_created_at
+                                < INBOUND_MESSAGES.c.provider_created_at,
+                                and_(
+                                    earlier.c.provider_created_at
+                                    == INBOUND_MESSAGES.c.provider_created_at,
+                                    earlier.c.id < INBOUND_MESSAGES.c.id,
+                                ),
+                            ),
+                        ),
+                        and_(
+                            earlier.c.status == INBOUND_PROCESSING,
+                            earlier.c.fan_id == INBOUND_MESSAGES.c.fan_id,
                         ),
                     ),
                 )
@@ -697,6 +719,7 @@ class MessageProcessingRepository:
                 )
             )
             .order_by(
+                candidate_priority.asc(),
                 INBOUND_MESSAGES.c.provider_created_at.asc(),
                 INBOUND_MESSAGES.c.id.asc(),
             )

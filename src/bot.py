@@ -9,7 +9,7 @@ aftercare, and tier systems before a response is generated.
 import json
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING
 
 from .fansly_client import FanslyApiClient, ChatInfo, MessageInfo
@@ -84,6 +84,7 @@ class FanslyBot:
         chat_guidance: "ChatGuidanceService | None" = None,
         enable_unread_replies: bool = True,
         enable_online_outreach: bool = False,
+        enable_stalled_outreach: bool = False,
         outreach_existing_online: bool = False,
         online_window_seconds: int = 600,
         proactive_cooldown_hours: int = 48,
@@ -92,6 +93,9 @@ class FanslyBot:
         max_proactive_per_fan_per_day: int = 1,
         presence_batch_size: int = 100,
         presence_poll_interval_seconds: int = 300,
+        stalled_after_hours: int = 24,
+        stalled_scan_interval_seconds: int = 300,
+        stalled_scan_batch_size: int = 5000,
     ):
         self.client = client
         self.persona_loader = persona_loader
@@ -129,6 +133,7 @@ class FanslyBot:
         self.chat_guidance = chat_guidance
         self.enable_unread_replies = bool(enable_unread_replies)
         self.enable_online_outreach = bool(enable_online_outreach)
+        self.enable_stalled_outreach = bool(enable_stalled_outreach)
         self.outreach_existing_online = bool(outreach_existing_online)
         self.online_window_seconds = max(60, int(online_window_seconds))
         self.proactive_cooldown_hours = max(
@@ -151,8 +156,18 @@ class FanslyBot:
             0,
             int(presence_poll_interval_seconds),
         )
+        self.stalled_after_hours = max(1, int(stalled_after_hours))
+        self.stalled_scan_interval_seconds = max(
+            0,
+            int(stalled_scan_interval_seconds),
+        )
+        self.stalled_scan_batch_size = min(
+            max(1, int(stalled_scan_batch_size)),
+            5000,
+        )
         self._presence_offset = 0
         self._last_presence_poll_at: datetime | None = None
+        self._last_stalled_scan_at: datetime | None = None
         self.processing_repo = MessageProcessingRepository(
             self.state_repo.engine
         )
@@ -339,6 +354,14 @@ class FanslyBot:
                 logger.exception(
                     "Presence polling failed; unread work will continue"
                 )
+        stalled_activity = False
+        if self.enable_stalled_outreach:
+            try:
+                stalled_activity = self._poll_stalled_conversations()
+            except Exception:
+                logger.exception(
+                    "Stalled conversation scan failed; unread work will continue"
+                )
 
         processed = 0
         for _ in range(max(0, max_messages)):
@@ -357,7 +380,11 @@ class FanslyBot:
             if not terminal:
                 break
         return bool(
-            ledger_updates or ingested or processed or presence_activity
+            ledger_updates
+            or ingested
+            or processed
+            or presence_activity
+            or stalled_activity
         )
 
     def _chat_cursor_scope(self) -> str:
@@ -394,6 +421,7 @@ class FanslyBot:
             return bool(
                 self.enable_unread_replies
                 or self.enable_online_outreach
+                or self.enable_stalled_outreach
             )
         capabilities = self.client.capabilities
         return (
@@ -428,6 +456,7 @@ class FanslyBot:
             if not (
                 self.enable_unread_replies
                 or self.enable_online_outreach
+                or self.enable_stalled_outreach
             ):
                 return "conversation mode has no enabled conversation triggers"
             return None
@@ -628,6 +657,58 @@ class FanslyBot:
         if queued:
             logger.info("Queued %s online conversation opener(s)", queued)
         return bool(queued or any_online)
+
+    def _poll_stalled_conversations(self) -> bool:
+        """Queue one follow-up for each durable fan-response episode."""
+        if (
+            self.bot_mode != BotMode.CONVERSATION
+            or not self.enable_stalled_outreach
+        ):
+            return False
+        now = datetime.now(timezone.utc)
+        if (
+            self._last_stalled_scan_at is not None
+            and (
+                now - self._last_stalled_scan_at
+            ).total_seconds() < self.stalled_scan_interval_seconds
+        ):
+            return False
+        self._last_stalled_scan_at = now
+        stalled_before = now - timedelta(hours=self.stalled_after_hours)
+        candidates = self.presence_repo.stalled_candidates(
+            self.creator_id,
+            stalled_before=stalled_before,
+            allowed_fan_ids=(
+                set(self.allowed_fan_ids)
+                if self.require_fan_allowlist
+                else None
+            ),
+            limit=self.stalled_scan_batch_size,
+        )
+        queued = 0
+        for candidate in candidates:
+            digest = hashlib.sha256(
+                (
+                    f"{self.creator_id}\0{candidate.fan_id}\0"
+                    f"{candidate.episode_key}"
+                ).encode("utf-8")
+            ).hexdigest()[:48]
+            _, created = self.processing_repo.insert_inbound(
+                creator_id=self.creator_id,
+                platform_message_id=f"stalled:{digest}",
+                fan_id=candidate.fan_id,
+                chat_id=candidate.chat_id,
+                content=candidate.episode_key,
+                provider_created_at=now,
+                trigger_kind="stalled",
+            )
+            queued += int(created)
+        if queued:
+            logger.info(
+                "Queued %s stalled conversation follow-up(s)",
+                queued,
+            )
+        return bool(queued)
 
     def _fetch_incremental_chats(
         self,
@@ -877,8 +958,8 @@ class FanslyBot:
         try:
             outbox = self.processing_repo.get_outbox_for_inbound(inbound.id)
             if outbox is None:
-                if inbound.trigger_kind == "online":
-                    prepared = self._prepare_online_opener(inbound)
+                if inbound.trigger_kind in {"online", "stalled"}:
+                    prepared = self._prepare_proactive_opener(inbound)
                 else:
                     policy = self.content_policy.validate_inbound(
                         inbound.content
@@ -1147,15 +1228,20 @@ class FanslyBot:
         logger.info(f"Bot {'enabled' if self.enabled else 'disabled'}")
         return self.enabled
 
-    def _prepare_online_opener(
+    def _prepare_proactive_opener(
         self,
         inbound: InboundMessageRecord,
     ) -> OutboundMessage | None:
-        """Generate one contextual, non-sales opener for an online transition."""
+        """Generate one contextual, non-sales proactive conversation."""
         if (
             self.bot_mode != BotMode.CONVERSATION
             or not self.chat_responder
             or not self.chat_responder.enabled
+        ):
+            return None
+        if (
+            inbound.trigger_kind == "stalled"
+            and not self._stalled_episode_is_current(inbound)
         ):
             return None
         note = self.note_repo.get(inbound.fan_id, self.creator_id)
@@ -1180,6 +1266,7 @@ class FanslyBot:
             known_facts=self._fan_memory(note),
             display_name=note.display_name if note else None,
             proactive=True,
+            proactive_kind=inbound.trigger_kind,
             chat_instructions=(
                 guidance.chat_instructions if guidance else ""
             ),
@@ -1190,6 +1277,44 @@ class FanslyBot:
             generated,
         )
         return OutboundMessage.text(approved) if approved else None
+
+    def _stalled_episode_is_current(
+        self,
+        inbound: InboundMessageRecord,
+    ) -> bool:
+        if self.message_store is None:
+            return False
+        latest = self.message_store.get_latest_message(
+            inbound.fan_id,
+            self.creator_id,
+        )
+        if (
+            latest is None
+            or latest["sender"] != "creator"
+            or latest["created_at"] is None
+        ):
+            return False
+        latest_at = datetime.fromisoformat(latest["created_at"])
+        if latest_at.tzinfo is None:
+            latest_at = latest_at.replace(tzinfo=timezone.utc)
+        stalled_before = datetime.now(timezone.utc) - timedelta(
+            hours=self.stalled_after_hours
+        )
+        if latest_at.astimezone(timezone.utc) > stalled_before:
+            return False
+        latest_fan = self.message_store.get_latest_message(
+            inbound.fan_id,
+            self.creator_id,
+            sender="fan",
+        )
+        episode_key = "no-fan-message"
+        if latest_fan is not None:
+            episode_key = (
+                latest_fan["message_id"]
+                or latest_fan["created_at"]
+                or episode_key
+            )
+        return inbound.content == episode_key
 
     def _prepare_message(
         self,
