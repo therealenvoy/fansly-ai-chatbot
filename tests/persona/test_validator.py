@@ -65,3 +65,32 @@ class TestPersonaValidator:
 
         assert result.passed is False
         assert len(result.violations) >= 2
+
+    def test_short_forbidden_word_does_not_match_inside_normal_words(self):
+        persona = PersonaDocument(
+            creator_id="test",
+            tone="flirty",
+            signature_phrases=[],
+            forbidden_phrases=["yo"],
+            emoji_style="moderate",
+            sentence_style="short_punchy",
+        )
+        validator = PersonaValidator(persona)
+
+        assert validator.validate(
+            "how was your day? hope you're doing well"
+        ).passed is True
+        violation = validator.validate("yo, how was your day?")
+        assert violation.passed is False
+        assert violation.violations == ["forbidden: yo"]
+
+    def test_forbidden_phrase_allows_flexible_internal_whitespace(
+        self,
+        persona_doc,
+    ):
+        result = PersonaValidator(persona_doc).validate(
+            "what's   up dude?"
+        )
+
+        assert result.passed is False
+        assert "forbidden: what's up dude" in result.violations

@@ -1,6 +1,7 @@
 """PersonaValidator — checks messages against persona voice constraints."""
 
 from dataclasses import dataclass, field
+import re
 
 from src.persona.models import PersonaDocument
 
@@ -38,10 +39,17 @@ class PersonaValidator:
             ValidationResult indicating pass/fail and listing any violations.
         """
         violations: list[str] = []
-        message_lower = message.lower()
-
         for phrase in self.persona.forbidden_phrases:
-            if phrase.lower() in message_lower:
+            normalized = str(phrase or "").strip()
+            if not normalized:
+                continue
+            pattern = re.escape(normalized)
+            pattern = pattern.replace(r"\ ", r"\s+")
+            if re.search(
+                rf"(?<!\w){pattern}(?!\w)",
+                message,
+                flags=re.IGNORECASE,
+            ):
                 violations.append(f"forbidden: {phrase}")
 
         passed = len(violations) == 0
