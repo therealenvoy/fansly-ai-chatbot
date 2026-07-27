@@ -1,9 +1,14 @@
 from datetime import datetime, timezone
+import json
+from unittest.mock import MagicMock
+
+import httpx
 
 from sqlalchemy import func, select
 
 from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.shadow import (
+    DeepSeekStrategicAnalyzer,
     ShadowBrainService,
     StrategicResult,
 )
@@ -241,3 +246,44 @@ def test_per_turn_call_limit_downgrades_strategic_execution_to_fast():
     assert analyzer.fast_calls == 1
     assert analyzer.strategic_calls == 0
     service.shutdown()
+
+
+def test_fast_analyzer_serializes_durable_datetime_state(monkeypatch):
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps(
+                        {
+                            "fan_state": "engaged",
+                            "objective": "maintain",
+                            "tactic": "direct_answer",
+                            "open_thread": None,
+                            "confidence": 0.8,
+                            "message": "hey, how are you?",
+                        }
+                    )
+                }
+            }
+        ]
+    }
+    post = MagicMock(return_value=response)
+    monkeypatch.setattr(httpx, "post", post)
+
+    result = DeepSeekStrategicAnalyzer(
+        api_key="secret",
+        model="deepseek-v4-flash",
+    ).analyze_fast(
+        {
+            "fan_message": "hey",
+            "conversation_state": {
+                "updated_at": datetime.now(timezone.utc),
+            },
+        }
+    )
+
+    assert result.model_calls == 1
+    assert result.selected_candidate == "hey, how are you?"
+    assert "updated_at" in post.call_args.kwargs["json"]["messages"][1]["content"]

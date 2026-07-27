@@ -2255,7 +2255,7 @@ class FanslyBot:
                         "known_facts": known_facts,
                         "episode_summaries": episode_summaries,
                         "previous_decision": context.get("previous_decision"),
-                        "conversation_state": dict(brain_state),
+                        "conversation_state": context.get("conversation_state") or {},
                         "persona": persona_snapshot,
                         "chat_instructions": context.get("chat_instructions"),
                         "brand_bible": context.get("brand_bible"),

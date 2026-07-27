@@ -195,6 +195,7 @@ class DeepSeekStrategicAnalyzer:
                         "content": json.dumps(
                             payload,
                             ensure_ascii=False,
+                            default=str,
                             separators=(",", ":"),
                         ),
                     },
