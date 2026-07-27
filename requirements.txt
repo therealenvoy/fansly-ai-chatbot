@@ -1,6 +1,7 @@
 # Production runtime only. Keep optional emotion/CLI and test packages in
 # requirements-dev.txt so the Railway image does not carry unused ML stacks.
 alembic>=1.13.0,<2.0
+cryptography>=45.0.0,<47.0
 httpx>=0.27.0,<1.0
 psycopg2-binary>=2.9.9,<3.0
 pydantic>=2.7.0,<3.0

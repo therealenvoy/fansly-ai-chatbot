@@ -60,5 +60,7 @@ def test_deepseek_responder_uses_context_and_returns_message(monkeypatch):
 
     assert result == "hey babe, how was work?"
     payload = post.call_args.kwargs["json"]
+    assert payload["model"] == "deepseek-v4-flash"
+    assert payload["thinking"] == {"type": "disabled"}
     assert "conversation-only" in payload["messages"][0]["content"]
     assert "finally home" in payload["messages"][1]["content"]

@@ -32,6 +32,11 @@ from .memory.llm import LLMFactExtractor
 from .bot import FanslyBot
 from .web.dashboard import DashboardServer
 from .settings.store import SettingsStore
+from .settings.ai import (
+    AISettingsError,
+    DeepSeekSettingsService,
+    EncryptedCredentialStore,
+)
 from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
@@ -176,22 +181,52 @@ if not persona_target.exists() and persona_default.exists():
 persona_loader = PersonaLoader(config_dir=PERSONA_CONFIG_DIR)
 note_repo = FanNoteRepository(engine=database_engine)
 
-# Long-term memory: persistent message history + LLM fact extraction
-message_store = MessageStore(engine=database_engine)
-fact_extractor = LLMFactExtractor(api_key=os.getenv("DEEPSEEK_API_KEY", ""))
-chat_responder = DeepSeekChatResponder(
-    api_key=os.getenv("DEEPSEEK_API_KEY", "")
-)
-if fact_extractor.enabled:
-    logger.info("LLM fact extraction enabled (DeepSeek)")
-else:
-    logger.warning("DEEPSEEK_API_KEY not set — fact extraction disabled")
-
 # Persistent bot settings (on/off toggle, etc.)
 settings_store = SettingsStore(
     engine=database_engine,
     creator_id=CREATOR_ID,
 )
+credential_store = EncryptedCredentialStore(
+    settings_store,
+    os.getenv("CREDENTIAL_ENCRYPTION_KEY", ""),
+)
+ai_settings = DeepSeekSettingsService(
+    settings_store=settings_store,
+    credential_store=credential_store,
+    environment_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+    environment_model=os.getenv("DEEPSEEK_MODEL", ""),
+)
+try:
+    deepseek_api_key, deepseek_key_source = ai_settings.active_api_key()
+except AISettingsError as error:
+    deepseek_api_key = ""
+    deepseek_key_source = "configuration_error"
+    logger.error("DeepSeek credential configuration error: %s", error)
+
+# Long-term memory: persistent message history + LLM fact extraction
+message_store = MessageStore(engine=database_engine)
+fact_extractor = LLMFactExtractor(
+    api_key=deepseek_api_key,
+    model=ai_settings.model,
+)
+chat_responder = DeepSeekChatResponder(
+    api_key=deepseek_api_key,
+    model=ai_settings.model,
+)
+ai_settings.fact_extractor = fact_extractor
+ai_settings.chat_responder = chat_responder
+if fact_extractor.enabled:
+    logger.info(
+        "DeepSeek enabled: model=%s source=%s",
+        ai_settings.model,
+        deepseek_key_source,
+    )
+else:
+    logger.warning(
+        "DeepSeek is not configured — fact extraction and conversation "
+        "generation are disabled"
+    )
+
 state_repo = ConversationStateRepository(database_engine)
 state_repo.ensure_creator(CREATOR_ID)
 runtime_monitor = RuntimeMonitor()
@@ -374,6 +409,7 @@ dashboard = DashboardServer(
     brand_bible_path=BRAND_BIBLE_CONFIG_PATH,
     runtime_monitor=runtime_monitor,
     crm_sync=crm_sync,
+    ai_settings=ai_settings,
 )
 
 

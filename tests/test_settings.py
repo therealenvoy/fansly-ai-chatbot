@@ -34,6 +34,17 @@ def test_set_overwrites(store):
     store.set("key", "v2")
     assert store.get("key") == "v2"
 
+def test_set_many_is_atomic_and_delete_removes_value(store):
+    store.set_many({"first": "one", "second": "two"})
+
+    assert store.get("first") == "one"
+    assert store.get("second") == "two"
+
+    store.delete("first")
+
+    assert store.get("first") is None
+    assert store.get("second") == "two"
+
 
 def test_get_nonexistent_returns_default(store):
     """get() should return default for nonexistent keys."""
@@ -64,3 +75,14 @@ def test_settings_are_scoped_per_creator(tmp_path):
 
     assert first.get("bot_enabled") == "true"
     assert second.get("bot_enabled") == "false"
+
+
+def test_exact_scoped_read_does_not_inherit_global_value(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'scoped-settings.db'}"
+    global_store = SettingsStore(db_url, creator_id="global")
+    creator_store = SettingsStore(db_url, creator_id="creator-a")
+    global_store.create_table()
+    global_store.set("shared_default", "global-value")
+
+    assert creator_store.get("shared_default") == "global-value"
+    assert creator_store.get_scoped("shared_default") is None

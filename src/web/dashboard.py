@@ -764,6 +764,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def media_repo(self) -> MediaAssetRepository | None:
         return getattr(self.server, "media_repo", None)
 
+    @property
+    def ai_settings(self):
+        return getattr(self.server, "ai_settings", None)
+
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
@@ -932,6 +936,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/kpis": return self._kpi()
         if p=="/api/scripts": return self._scrs()
         if p=="/api/connection": return self._conn(False)
+        if p=="/api/ai/settings": return self._ai_settings_get()
         if p=="/api/persona": return self._pers_get(q)
         if p=="/api/brand-bible": return self._bible_get()
         if p=="/api/sequences": return self._seq_list()
@@ -959,6 +964,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/persona": return self._pers_post(q,b)
         if p=="/api/brand-bible": return self._bible_post(b)
         if p=="/api/connection/test": return self._conn(True)
+        if p=="/api/ai/settings": return self._ai_settings_save(b)
+        if p=="/api/ai/connection/test": return self._ai_connection_test()
         if p=="/api/scripts": return self._script_save(b)
         if p.startswith("/api/scripts/") and len(p.split("/"))==4: return self._script_save(b,p.rsplit("/",1)[-1])
         if p=="/api/media-assets": return self._media_asset_save(b)
@@ -1852,6 +1859,70 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "error":err,
         })
 
+    def _ai_settings_get(self):
+        if self.ai_settings is None:
+            return self.j(
+                {"error": "DeepSeek settings are unavailable"},
+                503,
+            )
+        return self.j(self.ai_settings.status())
+
+    def _ai_settings_save(self, body: str):
+        if self.ai_settings is None:
+            return self.j(
+                {"error": "DeepSeek settings are unavailable"},
+                503,
+            )
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                return self.j(
+                    {"error": "request body must be an object"},
+                    400,
+                )
+            api_key = data.get("api_key") if "api_key" in data else None
+            model = data.get("model")
+            if api_key is not None and not isinstance(api_key, str):
+                return self.j({"error": "api_key must be a string"}, 400)
+            if model is not None and not isinstance(model, str):
+                return self.j({"error": "model must be a string"}, 400)
+            result = self.ai_settings.save(
+                api_key=api_key,
+                model=model,
+            )
+            return self.j(result)
+        except json.JSONDecodeError:
+            return self.j({"error": "invalid JSON payload"}, 400)
+        except Exception as error:
+            from ..settings.ai import AISettingsError
+
+            if isinstance(error, AISettingsError):
+                return self.j({"error": str(error)}, 400)
+            logger.exception("Failed to save DeepSeek settings")
+            return self.j(
+                {"error": "DeepSeek settings could not be saved"},
+                500,
+            )
+
+    def _ai_connection_test(self):
+        if self.ai_settings is None:
+            return self.j(
+                {"error": "DeepSeek settings are unavailable"},
+                503,
+            )
+        try:
+            return self.j(self.ai_settings.test_connection())
+        except Exception as error:
+            from ..settings.ai import AISettingsError
+
+            if isinstance(error, AISettingsError):
+                return self.j({"error": str(error)}, 400)
+            logger.exception("DeepSeek connection test failed")
+            return self.j(
+                {"error": "DeepSeek connection test failed"},
+                500,
+            )
+
     def _bot_status(self):
         if not self.bot:
             return self.j({
@@ -2511,6 +2582,7 @@ class DashboardServer:
         apifansly_webhook_token: Optional[str] = None,
         runtime_monitor=None,
         crm_sync=None,
+        ai_settings=None,
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
         if allowed_hosts is None:
@@ -2549,6 +2621,7 @@ class DashboardServer:
         self.server.provider_last_checked_at = None
         self.server.runtime_monitor = runtime_monitor
         self.server.crm_sync = crm_sync
+        self.server.ai_settings = ai_settings
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
             if bot is not None and hasattr(bot, "persona_loader")

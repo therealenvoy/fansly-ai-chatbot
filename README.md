@@ -26,6 +26,13 @@ exposes Fansly `lastSeenAt`. Keep `CONTROLLED_LAUNCH=true`,
 `BOT_ENABLED_DEFAULT=false`, and a small `FAN_ALLOWLIST` until presence has been
 validated with a fan account you control.
 
+The authenticated **Settings** page can validate and replace the DeepSeek API
+key and select `deepseek-v4-flash` or `deepseek-v4-pro` without restarting the
+service. CRM-entered keys are encrypted before being stored and are never sent
+back to the browser. Configure a stable `CREDENTIAL_ENCRYPTION_KEY` of at least
+32 random characters in the server environment before saving a key through the
+CRM. `deepseek-v4-flash` is the default and recommended chat model.
+
 See [`.env.example`](.env.example) for the complete configuration.
 
 ## 📚 Quick Navigation

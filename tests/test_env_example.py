@@ -35,6 +35,8 @@ REQUIRED_VARS = [
     "DASHBOARD_USER",
     "DASHBOARD_PASSWORD",
     "DEEPSEEK_API_KEY",
+    "DEEPSEEK_MODEL",
+    "CREDENTIAL_ENCRYPTION_KEY",
 ]
 
 
@@ -101,6 +103,7 @@ class TestEnvExampleContent:
         assert "FANSLY_PROVIDER=fanslyapi" in content
         assert "BOT_MODE=conversation" in content
         assert "ENABLE_ONLINE_OUTREACH=true" in content
+        assert "DEEPSEEK_MODEL=deepseek-v4-flash" in content
 
     def test_env_file_structure(self):
         """.env.example should have standard env file structure (comments + key=value)."""

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -45,18 +45,40 @@ class SettingsStore:
             value = self._get_for_creator("global", key)
         return value if value is not None else default
 
+    def get_scoped(self, key: str, default=None):
+        """Read only this creator's value without global fallback."""
+        value = self._get_for_creator(self.creator_id, key)
+        return value if value is not None else default
+
     def set(self, key: str, value: str):
-        self._ensure_creator(self.creator_id)
+        self.set_many({key: value})
+
+    def set_many(self, values: dict[str, str]):
+        """Persist several creator settings in one transaction."""
+        if not values:
+            return
         now = utcnow()
-        stmt = self._insert(CREATOR_SETTINGS).values(
-            creator_id=self.creator_id,
-            key=key,
-            value=str(value),
-            updated_at=now,
-        )
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["creator_id", "key"],
-            set_={"value": str(value), "updated_at": now},
+        with self.engine.begin() as conn:
+            self._ensure_creator(self.creator_id, connection=conn)
+            for key, value in values.items():
+                stmt = self._insert(CREATOR_SETTINGS).values(
+                    creator_id=self.creator_id,
+                    key=key,
+                    value=str(value),
+                    updated_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["creator_id", "key"],
+                    set_={"value": str(value), "updated_at": now},
+                )
+                conn.execute(stmt)
+
+    def delete(self, key: str):
+        stmt = delete(CREATOR_SETTINGS).where(
+            and_(
+                CREATOR_SETTINGS.c.creator_id == self.creator_id,
+                CREATOR_SETTINGS.c.key == key,
+            )
         )
         with self.engine.begin() as conn:
             conn.execute(stmt)
@@ -71,7 +93,7 @@ class SettingsStore:
         with self.engine.connect() as conn:
             return conn.execute(stmt).scalar_one_or_none()
 
-    def _ensure_creator(self, creator_id: str):
+    def _ensure_creator(self, creator_id: str, *, connection=None):
         now = utcnow()
         stmt = self._insert(CREATORS).values(
             id=creator_id,
@@ -82,6 +104,9 @@ class SettingsStore:
             index_elements=["id"],
             set_={"updated_at": now},
         )
+        if connection is not None:
+            connection.execute(stmt)
+            return
         with self.engine.begin() as conn:
             conn.execute(stmt)
 

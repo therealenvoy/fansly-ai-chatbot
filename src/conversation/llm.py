@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 import httpx
+
+from src.settings.ai import DEFAULT_DEEPSEEK_MODEL
 
 if TYPE_CHECKING:
     from src.persona.models import PersonaDocument
@@ -21,10 +24,11 @@ class DeepSeekChatResponder:
         self,
         api_key: str | None,
         *,
-        model: str = "deepseek-chat",
+        model: str = DEFAULT_DEEPSEEK_MODEL,
         base_url: str = "https://api.deepseek.com",
         timeout: float = 30.0,
     ):
+        self._lock = threading.RLock()
         self.api_key = (api_key or "").strip()
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -32,7 +36,13 @@ class DeepSeekChatResponder:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        with self._lock:
+            return bool(self.api_key)
+
+    def configure(self, *, api_key: str | None, model: str) -> None:
+        with self._lock:
+            self.api_key = (api_key or "").strip()
+            self.model = model
 
     def respond(
         self,
@@ -44,7 +54,12 @@ class DeepSeekChatResponder:
         display_name: str | None = None,
         proactive: bool = False,
     ) -> str | None:
-        if not self.enabled:
+        with self._lock:
+            api_key = self.api_key
+            model = self.model
+            base_url = self.base_url
+            timeout = self.timeout
+        if not api_key:
             return None
 
         mode_instruction = (
@@ -83,13 +98,14 @@ class DeepSeekChatResponder:
         )
         try:
             response = httpx.post(
-                f"{self.base_url}/chat/completions",
+                f"{base_url}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {self.api_key}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": self.model,
+                    "model": model,
+                    "thinking": {"type": "disabled"},
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
@@ -97,7 +113,7 @@ class DeepSeekChatResponder:
                     "temperature": 0.75,
                     "max_tokens": 180,
                 },
-                timeout=self.timeout,
+                timeout=timeout,
             )
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]

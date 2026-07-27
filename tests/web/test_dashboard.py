@@ -129,6 +129,10 @@ class TestDashboardShell:
         assert 'id="media-provider-id"' in DASHBOARD_HTML
         assert 'id="persona-tone"' in DASHBOARD_HTML
         assert 'id="persona-boundaries"' in DASHBOARD_HTML
+        assert 'id="deepseek-key" type="password"' in DASHBOARD_HTML
+        assert 'autocomplete="new-password"' in DASHBOARD_HTML
+        assert "/api/ai/settings" in DASHBOARD_HTML
+        assert "/api/ai/connection/test" in DASHBOARD_HTML
         assert "function pickMedia(idx)" in DASHBOARD_HTML
 
 
@@ -223,6 +227,25 @@ def _make_bot(db_url):
         MagicMock(),
         True,
     )
+    bot.ai_settings = MagicMock()
+    bot.ai_settings.status.return_value = {
+        "provider": "DeepSeek",
+        "configured": True,
+        "model": "deepseek-v4-flash",
+        "source": "encrypted_crm",
+        "secure_storage_available": True,
+        "supported_models": [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+        ],
+        "last_test_ok": True,
+        "last_checked_at": "2026-07-27T00:00:00+00:00",
+        "error": None,
+    }
+    bot.ai_settings.save.return_value = bot.ai_settings.status.return_value
+    bot.ai_settings.test_connection.return_value = (
+        bot.ai_settings.status.return_value
+    )
 
     def _toggle(force=None):
         bot.enabled = bool(force) if force is not None else not bot.enabled
@@ -254,6 +277,7 @@ def running_server(db_url, tmp_path):
         apifansly_webhook_token=TEST_WEBHOOK_TOKEN,
         persona_dir=str(tmp_path / "personas"),
         brand_bible_path=str(tmp_path / "brand_bible.md"),
+        ai_settings=bot.ai_settings,
     )
     port = server.server.server_address[1]
 
@@ -486,6 +510,75 @@ class TestBotStatusEndpoints:
         assert status == 200
         assert persisted["connected"] is False
         assert persisted["status"] == "offline"
+
+    def test_ai_settings_never_return_api_key(self, running_server):
+        host, _, _ = running_server
+
+        status, body = _get(host, "/api/ai/settings")
+
+        assert status == 200
+        assert body["configured"] is True
+        assert body["model"] == "deepseek-v4-flash"
+        assert "api_key" not in body
+
+    def test_ai_key_is_passed_to_server_only_on_save(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        api_key = "deepseek-secret-value-with-enough-length"
+
+        status, body = _post(
+            host,
+            "/api/ai/settings",
+            {
+                "api_key": api_key,
+                "model": "deepseek-v4-flash",
+            },
+        )
+
+        assert status == 200
+        assert "api_key" not in body
+        bot.ai_settings.save.assert_called_once_with(
+            api_key=api_key,
+            model="deepseek-v4-flash",
+        )
+
+    def test_ai_key_save_requires_csrf(self, running_server):
+        host, bot, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/ai/settings",
+            {
+                "api_key": "deepseek-secret-value-with-enough-length",
+                "model": "deepseek-v4-flash",
+            },
+            csrf=False,
+        )
+
+        assert status == 403
+        assert body == {
+            "error": "invalid CSRF token or request origin"
+        }
+        bot.ai_settings.save.assert_not_called()
+
+    def test_ai_connection_test_uses_saved_credential(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/ai/connection/test",
+            {},
+        )
+
+        assert status == 200
+        assert body["last_test_ok"] is True
+        assert "api_key" not in body
+        bot.ai_settings.test_connection.assert_called_once_with()
 
 
 class TestCrmConversationHistory:

@@ -1,6 +1,9 @@
 """Tests for LLMFactExtractor — DeepSeek-based fan fact extraction."""
 
 import json
+from unittest.mock import MagicMock
+
+import httpx
 import pytest
 from src.memory.llm import LLMFactExtractor
 
@@ -53,6 +56,22 @@ def test_extracts_valid_json(monkeypatch):
     assert "hiking" in result["preferences"]
     assert "no meetups" in result["hard_limits"]
     assert len(result["facts"]) == 2
+
+
+def test_fact_extraction_uses_v4_flash_without_thinking(monkeypatch):
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [{"message": {"content": "{}"}}]
+    }
+    post = MagicMock(return_value=response)
+    monkeypatch.setattr(httpx, "post", post)
+
+    LLMFactExtractor(api_key="sk-test").extract(["hello"])
+
+    payload = post.call_args.kwargs["json"]
+    assert payload["model"] == "deepseek-v4-flash"
+    assert payload["thinking"] == {"type": "disabled"}
 
 
 def test_strips_markdown_fences(monkeypatch):
