@@ -115,6 +115,74 @@ class FanslyApiClientImpl(FanslyApiClient):
         response.raise_for_status()
         return response.json()
 
+    def ensure_message_webhook(
+        self,
+        endpoint_url: str,
+        signing_secret: str,
+    ) -> dict:
+        """Create or reconcile the signed, account-scoped Fansly webhook."""
+        endpoint_url = endpoint_url.strip()
+        signing_secret = signing_secret.strip()
+        if not endpoint_url.startswith("https://"):
+            raise ValueError("Webhook endpoint must use HTTPS")
+        if len(signing_secret) < 32:
+            raise ValueError("Webhook signing secret must be at least 32 characters")
+
+        payload = self._request("GET", "/api/webhooks")
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+        existing = next(
+            (
+                row
+                for row in rows
+                if isinstance(row, dict) and row.get("url") == endpoint_url
+            ),
+            None,
+        )
+        if existing is not None and not existing.get("has_signing_secret"):
+            raise UnsupportedProviderFeature(
+                "The production webhook endpoint already exists without a signing secret; "
+                "refusing to enable or replace it automatically"
+            )
+
+        if existing is None:
+            created = self._request(
+                "POST",
+                "/api/webhooks",
+                json={
+                    "endpoint_url": endpoint_url,
+                    "signing_secret": signing_secret,
+                    "events": ["fansly.messages.received"],
+                },
+            )
+            existing = created.get("data", {})
+            if not existing.get("has_signing_secret"):
+                raise UnsupportedProviderFeature(
+                    "OnlyFansAPI did not confirm a signing secret on the new webhook"
+                )
+
+        webhook_id = str(existing.get("id") or "").strip()
+        if not webhook_id:
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI webhook response did not contain an id"
+            )
+        updated = self._request(
+            "PUT",
+            f"/api/webhooks/{webhook_id}",
+            json={
+                "endpoint_url": endpoint_url,
+                "events": ["fansly.messages.received"],
+                "enabled": True,
+                "account_scope": "inclusive",
+                "account_ids": [self.account_id],
+            },
+        )
+        result = updated.get("data", {})
+        if not result.get("enabled"):
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI did not confirm that the Fansly webhook is enabled"
+            )
+        return result
+
     # ─── CHATS ───────────────────────────────────────────
 
     def list_chats_page(

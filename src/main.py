@@ -31,6 +31,10 @@ from .memory.store import MessageStore
 from .memory.llm import LLMFactExtractor
 from .bot import FanslyBot
 from .web.dashboard import DashboardServer
+from .webhooks.registration import (
+    production_webhook_url,
+    resolve_signing_secret,
+)
 from .settings.store import SettingsStore
 from .settings.ai import (
     AISettingsError,
@@ -209,6 +213,14 @@ BRAND_BIBLE_CONFIG_PATH = os.getenv(
         else "config/brand_bible.md"
     ),
 )
+
+try:
+    ONLYFANSAPI_WEBHOOK_SECRET = resolve_signing_secret(os.environ)
+    ONLYFANSAPI_WEBHOOK_URL = production_webhook_url(os.environ)
+except ValueError as error:
+    ONLYFANSAPI_WEBHOOK_SECRET = ""
+    ONLYFANSAPI_WEBHOOK_URL = ""
+    logger.error("Webhook configuration error: %s", error)
 
 if not API_KEY:
     logger.warning(
@@ -464,10 +476,7 @@ dashboard = DashboardServer(
     crm_sync=crm_sync,
     ai_settings=ai_settings,
     chat_guidance=chat_guidance,
-    onlyfansapi_webhook_secret=os.getenv(
-        "ONLYFANSAPI_WEBHOOK_SECRET",
-        "",
-    ),
+    onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
     inbound_wakeup=reply_wakeup,
 )
 
@@ -601,6 +610,43 @@ def run_outreach_worker() -> None:
         sleep_with_interrupt(5)
 
 
+def run_webhook_registration() -> None:
+    """Register the signed Fansly message webhook without console access."""
+    if FANSLY_PROVIDER != "fanslyapi" or not api_ok:
+        return
+    if not ONLYFANSAPI_WEBHOOK_URL:
+        logger.warning(
+            "Automatic webhook registration skipped: RAILWAY_PUBLIC_DOMAIN is missing"
+        )
+        return
+    if not ONLYFANSAPI_WEBHOOK_SECRET:
+        logger.warning(
+            "Automatic webhook registration skipped: no strong signing-secret source"
+        )
+        return
+    ensure_webhook = getattr(client, "ensure_message_webhook", None)
+    if not callable(ensure_webhook):
+        logger.warning(
+            "Automatic webhook registration is unavailable for this provider client"
+        )
+        return
+    try:
+        webhook = ensure_webhook(
+            ONLYFANSAPI_WEBHOOK_URL,
+            ONLYFANSAPI_WEBHOOK_SECRET,
+        )
+        logger.info(
+            "OnlyFansAPI Fansly webhook active: id=%s event=%s",
+            webhook.get("id", "unknown"),
+            "fansly.messages.received",
+        )
+    except Exception:
+        logger.exception(
+            "Automatic OnlyFansAPI Fansly webhook registration failed; "
+            "polling reconciliation remains active"
+        )
+
+
 def _start_background_worker(name: str, target) -> None:
     thread = threading.Thread(
         target=target,
@@ -620,6 +666,10 @@ else:
         CREATOR_ID,
         REPLY_WORKER_COUNT,
         RECONCILIATION_INTERVAL,
+    )
+    _start_background_worker(
+        "webhook-registration",
+        run_webhook_registration,
     )
     _start_background_worker(
         "provider-reconciliation",

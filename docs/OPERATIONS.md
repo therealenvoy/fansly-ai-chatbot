@@ -68,7 +68,9 @@ Never test a restore by overwriting production.
 Required OnlyFansAPI configuration:
 
 ```text
-ONLYFANSAPI_WEBHOOK_SECRET=<at least 32 random bytes>
+# Optional. When empty, the app derives an isolated HMAC secret from
+# CREDENTIAL_ENCRYPTION_KEY (or APIFANSLY_WEBHOOK_TOKEN).
+ONLYFANSAPI_WEBHOOK_SECRET=<at least 32 random characters>
 REPLY_WORKER_COUNT=2
 REPLY_WORKER_IDLE_SECONDS=1
 RECONCILIATION_INTERVAL=300
@@ -79,17 +81,18 @@ PROCESSING_RETRY_MAX_SECONDS=60
 CRM_SYNC_INTERVAL=300
 ```
 
-In the OnlyFansAPI console, create an account-scoped webhook for the exact
-Fansly inbound-message event exposed by the event catalog and point it to:
+At startup, the production app uses its existing `FANSLY_API_KEY` to create or
+update `fansly.messages.received` at:
 
 ```text
 https://<RAILWAY_PUBLIC_DOMAIN>/webhooks/onlyfansapi/fansly
 ```
 
-Use the same secret on both sides. Do not subscribe a global webhook when the
-bot only owns one creator account. Confirm `webhook_events_received` advances
-in `/api/operations`; if it does not, reconciliation still recovers messages
-but latency returns to the configured reconciliation interval.
+It enables the webhook and scopes it to the connected `fansly_acct_...`
+account. It refuses to take over an existing endpoint that has no signing
+secret. Confirm `webhook_events_received` advances in `/api/operations`; if
+registration fails, reconciliation remains active and latency returns to the
+configured reconciliation interval.
 
 ## Controlled launch
 

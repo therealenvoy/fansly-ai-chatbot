@@ -205,6 +205,84 @@ class TestAccountIdResolution:
         assert client.account_id == "fansly_acct_123"
 
 
+class TestWebhookRegistration:
+    def test_creates_enables_and_scopes_fansly_message_webhook(self):
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock(side_effect=[
+            _resp({"data": []}),
+            _resp({"data": {"id": "wh_new", "url": "https://bot.example/webhooks/onlyfansapi/fansly", "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": False}}),
+            _resp({"data": {"id": "wh_new", "url": "https://bot.example/webhooks/onlyfansapi/fansly", "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": True}}),
+        ])
+
+        result = client.ensure_message_webhook(
+            "https://bot.example/webhooks/onlyfansapi/fansly", "s" * 64
+        )
+
+        assert result["id"] == "wh_new"
+        assert result["enabled"] is True
+        assert client.client.request.call_count == 3
+        create_call = client.client.request.call_args_list[1]
+        assert create_call.args == ("POST", "/api/webhooks")
+        assert create_call.kwargs["json"] == {
+            "endpoint_url": "https://bot.example/webhooks/onlyfansapi/fansly",
+            "signing_secret": "s" * 64,
+            "events": ["fansly.messages.received"],
+        }
+        update_call = client.client.request.call_args_list[2]
+        assert update_call.args == ("PUT", "/api/webhooks/wh_new")
+        assert update_call.kwargs["json"] == {
+            "endpoint_url": "https://bot.example/webhooks/onlyfansapi/fansly",
+            "events": ["fansly.messages.received"],
+            "enabled": True,
+            "account_scope": "inclusive",
+            "account_ids": ["fansly_acct_123"],
+        }
+
+    def test_updates_existing_signed_webhook_without_creating_duplicate(self):
+        endpoint = "https://bot.example/webhooks/onlyfansapi/fansly"
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock(side_effect=[
+            _resp({"data": [{"id": "wh_existing", "url": endpoint, "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": False}]}),
+            _resp({"data": {"id": "wh_existing", "url": endpoint, "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": True}}),
+        ])
+
+        result = client.ensure_message_webhook(endpoint, "s" * 64)
+
+        assert result["id"] == "wh_existing"
+        assert client.client.request.call_count == 2
+        assert client.client.request.call_args_list[1].args == (
+            "PUT", "/api/webhooks/wh_existing"
+        )
+
+    def test_refuses_to_claim_unsigned_existing_endpoint(self):
+        endpoint = "https://bot.example/webhooks/onlyfansapi/fansly"
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock(return_value=_resp({"data": [{
+            "id": "wh_unsigned", "url": endpoint,
+            "events": ["fansly.messages.received"],
+            "has_signing_secret": False, "enabled": True,
+        }]}))
+
+        with pytest.raises(UnsupportedProviderFeature, match="without a signing secret"):
+            client.ensure_message_webhook(endpoint, "s" * 64)
+
+        client.client.request.assert_called_once_with("GET", "/api/webhooks")
+
+    @pytest.mark.parametrize(("endpoint", "secret"), [
+        ("http://bot.example/webhooks/onlyfansapi/fansly", "s" * 64),
+        ("https://bot.example/webhooks/onlyfansapi/fansly", "short"),
+    ])
+    def test_rejects_insecure_registration_input(self, endpoint, secret):
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client.client.request = MagicMock()
+        with pytest.raises(ValueError):
+            client.ensure_message_webhook(endpoint, secret)
+        client.client.request.assert_not_called()
+
+
 class TestGetAllChats:
     def test_parses_chats_from_real_response_shape(self):
         client = FanslyApiClientImpl(api_key="sk_test")
