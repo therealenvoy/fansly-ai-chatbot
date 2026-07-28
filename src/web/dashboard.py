@@ -1408,7 +1408,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             logger.warning(
                 "Rejected APIFansly PPV purchase event: %s",
-                exc,
+                type(exc).__name__,
             )
             return self.j(
                 {"error": "purchase does not match a sent PPV"},

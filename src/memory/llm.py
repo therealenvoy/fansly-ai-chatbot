@@ -124,6 +124,9 @@ class LLMFactExtractor:
                     result[key] = [str(v) for v in val if v]
             return result
 
-        except Exception as e:
-            logger.warning(f"Fact extraction failed: {e}")
+        except Exception as exc:
+            logger.warning(
+                "Fact extraction failed: %s",
+                type(exc).__name__,
+            )
             return {}

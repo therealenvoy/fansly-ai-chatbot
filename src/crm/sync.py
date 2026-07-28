@@ -104,9 +104,9 @@ class CrmSyncService:
                     chat_id=state.chat_id,
                     error=error,
                 )
-                logger.exception(
-                    "CRM message sync failed for chat %s",
-                    state.chat_id,
+                logger.error(
+                    "CRM message sync failed: %s",
+                    type(error).__name__,
                 )
         remaining = self.sync_repo.remaining(self.creator_id)
         if discovered or inserted or pages:

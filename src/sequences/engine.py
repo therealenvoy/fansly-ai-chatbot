@@ -115,7 +115,11 @@ class SequenceEngine:
             progress.last_sent_at = datetime.now(timezone.utc)
 
         self.repo.save_progress(progress)
-        logger.info(f"PPV step {step.position} sent for fan {fan_id} in seq {sequence.name}")
+        logger.info(
+            "PPV step marked sent: position=%s sequence_id=%s",
+            step.position,
+            sequence.id,
+        )
 
     def mark_purchased(self, fan_id: str, sequence_id: int):
         """Mark current step as bought. Advance to next step if one exists."""
@@ -146,8 +150,10 @@ class SequenceEngine:
 
         self.repo.save_progress(progress)
         logger.info(
-            f"Fan {fan_id} bought PPV step {bought_pos} in seq {sequence_id}. "
-            f"Next step: {progress.current_step if next_step else 'COMPLETE'}"
+            "PPV purchase attributed: step=%s sequence_id=%s next_step=%s",
+            bought_pos,
+            sequence_id,
+            progress.current_step if next_step else "COMPLETE",
         )
 
     def mark_skipped(self, fan_id: str, sequence_id: int):
@@ -163,7 +169,11 @@ class SequenceEngine:
         progress.status = StepStatus.SKIPPED
         # Don't advance current_step — get_next_ppv will serve current_step + 1
         self.repo.save_progress(progress)
-        logger.info(f"Fan {fan_id} skipped step {progress.current_step} in seq {sequence_id}")
+        logger.info(
+            "PPV step skipped: step=%s sequence_id=%s",
+            progress.current_step,
+            sequence_id,
+        )
 
     def get_active_tease_for_fan(self, fan_id: str, funnel_stage: str) -> Optional[str]:
         """Get the tease script for the next PPV the fan is due for."""

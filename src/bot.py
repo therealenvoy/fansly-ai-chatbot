@@ -404,10 +404,10 @@ class FanslyBot:
             return
         try:
             self.memory_v2_backfill.run(note)
-        except Exception:
-            logger.exception(
-                "Legacy Memory V2 backfill failed for %s",
-                note.fan_id,
+        except Exception as exc:
+            logger.error(
+                "Legacy Memory V2 backfill failed: %s",
+                type(exc).__name__,
             )
 
     def poll_and_process(
@@ -663,10 +663,10 @@ class FanslyBot:
                 meaningful=meaningful,
                 negative_signal=negative_signal,
             )
-        except Exception:
-            logger.exception(
-                "Failed to attribute inbound conversation outcome %s",
-                inbound.id,
+        except Exception as exc:
+            logger.error(
+                "Failed to attribute inbound conversation outcome: %s",
+                type(exc).__name__,
             )
 
     def _reply_available_at(self, platform_message_id: str) -> datetime:
@@ -931,8 +931,7 @@ class FanslyBot:
             )
             if not eligible:
                 logger.info(
-                    "Online outreach skipped for %s: %s",
-                    candidate.fan_id,
+                    "Online outreach skipped: %s",
                     reason,
                 )
                 continue
@@ -1362,8 +1361,7 @@ class FanslyBot:
                     )
                     if not policy.approved:
                         logger.info(
-                            "Skipping inbound %s: %s",
-                            inbound.platform_message_id,
+                            "Skipping inbound message: %s",
                             policy.reason,
                         )
                         self.processing_repo.complete_without_response(
@@ -1423,10 +1421,7 @@ class FanslyBot:
                         service_role=service_role,
                     )
                 except InboundSupersededError:
-                    logger.info(
-                        "Discarded superseded reply for inbound %s",
-                        inbound.platform_message_id,
-                    )
+                    logger.info("Discarded superseded reply")
                     return True
                 unsupported = self._unsupported_reason(outbound)
                 if unsupported:
@@ -1435,9 +1430,8 @@ class FanslyBot:
                         unsupported,
                     )
                     logger.error(
-                        "Blocked unsupported %s delivery for inbound %s: %s",
+                        "Blocked unsupported %s delivery: %s",
                         outbound.kind.value,
-                        inbound.platform_message_id,
                         unsupported,
                     )
                     return True
@@ -1489,11 +1483,11 @@ class FanslyBot:
             except Exception as exc:
                 self.processing_repo.mark_delivery_unknown(
                     sending.id,
-                    str(exc),
+                    type(exc).__name__,
                 )
-                logger.exception(
-                    "Delivery outcome unknown for outbox %s",
-                    sending.id,
+                logger.error(
+                    "Delivery outcome unknown: %s",
+                    type(exc).__name__,
                 )
                 return True
 
@@ -1526,10 +1520,10 @@ class FanslyBot:
                                 or datetime.now(timezone.utc)
                             ),
                         )
-                except Exception:
-                    logger.exception(
-                        "Failed to schedule conversation outcome for inbound %s",
-                        inbound.id,
+                except Exception as exc:
+                    logger.error(
+                        "Failed to schedule conversation outcome: %s",
+                        type(exc).__name__,
                     )
                     if (
                         stored_decision is not None
@@ -1564,7 +1558,7 @@ class FanslyBot:
             if current is None or current.status == OUTBOX_PENDING:
                 self.processing_repo.release_inbound(
                     inbound.id,
-                    str(exc),
+                    type(exc).__name__,
                     retry_base_seconds=(
                         self.processing_retry_base_seconds
                     ),
@@ -1576,14 +1570,14 @@ class FanslyBot:
             elif current.status == OUTBOX_SENDING:
                 self.processing_repo.mark_delivery_unknown(
                     current.id,
-                    str(exc),
+                    type(exc).__name__,
                 )
                 terminal = True
             else:
                 terminal = True
-            logger.exception(
-                "Failed to process inbound %s",
-                inbound.platform_message_id,
+            logger.error(
+                "Failed to process inbound message: %s",
+                type(exc).__name__,
             )
             return terminal
 
@@ -1849,7 +1843,10 @@ class FanslyBot:
                 relationship_stage=f"classified_{result.personality_type}",
             )
             self.note_repo.save(note)
-            logger.info(f"Fan {fan_id} classified as {result.personality_type}")
+            logger.info(
+                "Fan classified as %s",
+                result.personality_type,
+            )
 
         session = self.sessions[fan_id]
         session.add_message("subscriber", latest.content)
@@ -1860,8 +1857,11 @@ class FanslyBot:
                 self.message_store.save_message(
                     fan_id, self.creator_id, "fan", latest.content, latest.message_id
                 )
-            except Exception as e:
-                logger.error(f"Failed to persist fan message: {e}")
+            except Exception as exc:
+                logger.error(
+                    "Failed to persist fan message: %s",
+                    type(exc).__name__,
+                )
 
         # Periodic fact extraction: every 3rd fan message, batch-extract from recent history
         if (
@@ -1894,10 +1894,10 @@ class FanslyBot:
                                 latest.created_at
                             ),
                         )
-                except Exception:
-                    logger.exception(
-                        "Failed to submit memory extraction for fan %s",
-                        fan_id,
+                except Exception as exc:
+                    logger.error(
+                        "Failed to submit memory extraction: %s",
+                        type(exc).__name__,
                     )
 
         if self.bot_mode == BotMode.CONVERSATION:
@@ -1944,14 +1944,14 @@ class FanslyBot:
             hours_since = (datetime.now(timezone.utc) - session.last_activity).total_seconds() / 3600
             if hours_since > 48:
                 session.funnel.enter_warmup()
-                logger.info(f"Fan {fan_id} returned after ghost — warmup mode")
+                logger.info("Fan returned after ghost; warmup mode")
 
         # If warmup and fan sent a positive message, exit warmup
         if session.funnel.is_warmup and latest.content:
             positive_words = ["yes", "yeah", "sure", "ok", "miss", "hey", "hi", "hello", "how are", "good"]
             if any(w in latest.content.lower() for w in positive_words):
                 session.funnel.exit_warmup()
-                logger.info(f"Fan {fan_id} responded positively — warmup complete")
+                logger.info("Fan responded positively; warmup complete")
 
         # Track rejection: fan said no in OFFER or HANDLE phase
         funnel_spiral = session.funnel
@@ -1959,7 +1959,11 @@ class FanslyBot:
             rejection_keywords = ["no", "not", "can't", "cant", "broke", "don't have", "too much", "expensive", "pass"]
             if any(kw in latest.content.lower() for kw in rejection_keywords):
                 funnel_spiral.record_rejection()
-                logger.info(f"Fan {fan_id} rejected PPV in {funnel_spiral.current_stage.value} — rejection {funnel_spiral.consecutive_rejections}")
+                logger.info(
+                    "Fan rejected PPV in %s; rejection count=%s",
+                    funnel_spiral.current_stage.value,
+                    funnel_spiral.consecutive_rejections,
+                )
 
         # Cooldown exit on engagement signals
         if funnel_spiral.cooldown:
@@ -1970,12 +1974,12 @@ class FanslyBot:
             if any(kw in latest.content.lower() for kw in flirty_keywords):
                 funnel_spiral.exit_cooldown()
                 exited_cooldown = True
-                logger.info(f"Fan {fan_id} sent flirty message — cooldown exited")
+                logger.info("Fan engagement signal exited cooldown")
             # Also exit cooldown if fan is tipping
             if latest.total_tip > 0:
                 funnel_spiral.exit_cooldown()
                 exited_cooldown = True
-                logger.info(f"Fan {fan_id} tipped — cooldown exited")
+                logger.info("Fan tip signal exited cooldown")
             if not exited_cooldown:
                 # Cooldown active: limit sales energy — stay in rapport
                 if funnel_spiral.current_stage in (SpiralPhase.OFFER, SpiralPhase.HANDLE):
@@ -1983,7 +1987,9 @@ class FanslyBot:
                         funnel_spiral.transition(SpiralPhase.RAPPORT)
                     except ValueError:
                         pass
-                    logger.debug(f"Cooldown active for {fan_id} — staying in light rapport")
+                    logger.debug(
+                        "Cooldown active; staying in light rapport"
+                    )
 
         # 1. Check if we're in aftercare mode — only if spiral phase allows it
         if funnel_spiral.current_stage in (SpiralPhase.CLOSE, SpiralPhase.AFTERCARE) and self.aftercare.is_aftercare_due(fan_id):
@@ -2011,7 +2017,8 @@ class FanslyBot:
             validation = self.validator.validate(outbound.content)
             if not validation.passed:
                 logger.warning(
-                    f"Persona violation for {fan_id}: {validation.violations}"
+                    "Persona validation rejected response: %s",
+                    validation.violations,
                 )
                 # Fix: strip forbidden phrases
                 for phrase in self.persona.forbidden_phrases:
@@ -2125,8 +2132,7 @@ class FanslyBot:
                     )
 
                 logger.warning(
-                    "PPV offer skipped for %s: no configured media sequence",
-                    fan_id,
+                    "PPV offer skipped: no configured media sequence",
                 )
                 return None
 
@@ -2158,8 +2164,11 @@ class FanslyBot:
                     profile = self.style_mirror.analyze(fan_texts)
                     self._style_profiles[fan_id] = profile
                     return profile
-            except Exception as e:
-                logger.error(f"Style analysis failed for {fan_id}: {e}")
+            except Exception as exc:
+                logger.error(
+                    "Style analysis failed: %s",
+                    type(exc).__name__,
+                )
         return self._style_profiles.get(fan_id, StyleProfile())
 
     def _style_and_approve(self, fan_id: str, text: str) -> str | None:
@@ -2175,16 +2184,14 @@ class FanslyBot:
         policy = self.content_policy.validate_outbound(styled)
         if not policy.approved:
             logger.warning(
-                "Outbound response rejected for %s: %s",
-                fan_id,
+                "Outbound response rejected: %s",
                 policy.reason,
             )
             return None
         validation = self.validator.validate(policy.content)
         if not validation.passed:
             logger.warning(
-                "Styled response rejected for %s: %s",
-                fan_id,
+                "Styled response rejected: %s",
                 validation.violations,
             )
             return None
@@ -2200,8 +2207,7 @@ class FanslyBot:
         sales_reason = self.conversation_policy.sales_reason(text)
         if sales_reason:
             logger.warning(
-                "Conversation response rejected for %s: %s",
-                fan_id,
+                "Conversation response rejected: %s",
                 sales_reason,
             )
             return None
@@ -2211,8 +2217,7 @@ class FanslyBot:
         sales_reason = self.conversation_policy.sales_reason(approved)
         if sales_reason:
             logger.warning(
-                "Styled conversation response rejected for %s: %s",
-                fan_id,
+                "Styled conversation response rejected: %s",
                 sales_reason,
             )
             return None
@@ -2657,18 +2662,18 @@ class FanslyBot:
                         ),
                     },
                 )
-            except Exception:
-                logger.exception(
-                    "Failed to submit shadow analysis for inbound %s",
-                    inbound_id,
+            except Exception as exc:
+                logger.error(
+                    "Failed to submit shadow analysis: %s",
+                    type(exc).__name__,
                 )
         if self.episode_service is not None:
             try:
                 self.episode_service.submit(fan_id)
-            except Exception:
-                logger.exception(
-                    "Failed to submit episode generation for fan %s",
-                    fan_id,
+            except Exception as exc:
+                logger.error(
+                    "Failed to submit episode generation: %s",
+                    type(exc).__name__,
                 )
         return OutboundMessage.text(approved)
 
@@ -2707,9 +2712,12 @@ class FanslyBot:
                     content,
                     provider_message_id,
                 )
-            except Exception as e:
-                logger.error(f"Failed to persist styled reply: {e}")
-        logger.info("Replied to %s: %s...", fan_id, content[:50])
+            except Exception as exc:
+                logger.error(
+                    "Failed to persist styled reply: %s",
+                    type(exc).__name__,
+                )
+        logger.info("Recorded confirmed creator reply")
 
     def _generate_push_message(self, note: Optional[FanNote]) -> str:
         """Generate a flirtatious push spike, personalized with remembered facts."""
@@ -2726,8 +2734,7 @@ class FanslyBot:
         plan = self.aftercare.plans.get(fan_id)
         if plan is None:
             logger.error(
-                "Aftercare skipped for %s: no attributed purchase plan",
-                fan_id,
+                "Aftercare skipped: no attributed purchase plan",
             )
             return None
         response = (
@@ -2741,7 +2748,10 @@ class FanslyBot:
         if sess:
             try:
                 sess.funnel.complete_aftercare()
-                logger.info(f"Spiral: aftercare complete for {fan_id}, back to RAPPORT at level {sess.funnel.level.number}")
+                logger.info(
+                    "Spiral aftercare complete; rapport level=%s",
+                    sess.funnel.level.number,
+                )
             except Exception:
                 pass
         return response
@@ -2787,8 +2797,7 @@ class FanslyBot:
                     sequence_step_id=step.id,
                 )
         logger.warning(
-            "Premium offer skipped for %s: no attributable PPV sequence",
-            fan_id,
+            "Premium offer skipped: no attributable PPV sequence",
         )
         return None
 
@@ -2848,8 +2857,9 @@ class FanslyBot:
             )
             saved = self.state_repo.save_state(state)
             self._runtime_state_versions[fan_id] = saved.version
-        except Exception as e:
+        except Exception as exc:
             logger.error(
-                f"Failed to persist runtime state for {fan_id}: {e}",
+                "Failed to persist runtime state: %s",
+                type(exc).__name__,
                 exc_info=True,
             )

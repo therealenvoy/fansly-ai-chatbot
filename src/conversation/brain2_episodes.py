@@ -244,8 +244,11 @@ class ConversationEpisodeService:
                 episode_started_at=_timestamp(first["created_at"]),
                 episode_ended_at=_timestamp(last["created_at"]),
             )
-        except Exception:
-            logger.exception("Episode generation failed for fan %s", fan_id)
+        except Exception as exc:
+            logger.error(
+                "Episode generation failed: %s",
+                type(exc).__name__,
+            )
 
     def _complete(self, fan_id: str, future: Future) -> None:
         with self._lock:

@@ -22,6 +22,7 @@ import threading
 from pathlib import Path
 
 from .service_role import ServiceRole
+from .safe_logging import configure_privacy_safe_logging
 from dotenv import load_dotenv
 
 from .fansly_client import AuthError, PaymentRequiredError
@@ -71,10 +72,7 @@ from .conversation.shadow import (
 
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+configure_privacy_safe_logging()
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger("fansly-bot")
@@ -284,7 +282,10 @@ try:
 except ValueError as error:
     ONLYFANSAPI_WEBHOOK_SECRET = ""
     ONLYFANSAPI_WEBHOOK_URL = ""
-    logger.error("Webhook configuration error: %s", error)
+    logger.error(
+        "Webhook configuration error: %s",
+        type(error).__name__,
+    )
 
 if not API_KEY:
     logger.warning(
@@ -330,7 +331,10 @@ try:
 except AISettingsError as error:
     deepseek_api_key = ""
     deepseek_key_source = "configuration_error"
-    logger.error("DeepSeek credential configuration error: %s", error)
+    logger.error(
+        "DeepSeek credential configuration error: %s",
+        type(error).__name__,
+    )
 
 # Long-term memory: persistent message history + LLM fact extraction
 message_store = MessageStore(engine=database_engine)
@@ -419,14 +423,23 @@ if API_KEY:
         logger.info("API authentication verified")
         api_ok = True
     except AuthError as e:
-        api_error = str(e)
-        logger.warning(f"API AUTH FAILED: {e}. Dashboard will still work, bot will not poll.")
+        api_error = type(e).__name__
+        logger.warning(
+            "API AUTH FAILED (%s). Dashboard will still work; bot will not poll.",
+            type(e).__name__,
+        )
     except PaymentRequiredError as e:
-        api_error = str(e)
-        logger.warning(f"API PAYMENT REQUIRED: {e}. Bot will not poll until credits added.")
+        api_error = type(e).__name__
+        logger.warning(
+            "API PAYMENT REQUIRED (%s). Bot will not poll until credits are added.",
+            type(e).__name__,
+        )
     except Exception as e:
-        api_error = str(e)
-        logger.warning(f"API check failed: {e}. Bot will not poll.")
+        api_error = type(e).__name__
+        logger.warning(
+            "API check failed (%s). Bot will not poll.",
+            type(e).__name__,
+        )
 else:
     api_error = f"API key for provider '{FANSLY_PROVIDER}' is not configured"
 
@@ -456,7 +469,7 @@ if api_ok:
         except Exception as e:
             logger.warning(
                 "CRM sync initialization failed: %s",
-                e,
+                type(e).__name__,
                 exc_info=True,
             )
     try:
@@ -523,8 +536,12 @@ if api_ok:
         bot.enabled = requested_enabled
         logger.info(f"Bot enabled state from DB: {bot.enabled}")
     except Exception as e:
-        api_error = str(e)
-        logger.warning(f"Bot initialization failed: {e}. Dashboard will still work.", exc_info=True)
+        api_error = type(e).__name__
+        logger.warning(
+            "Bot initialization failed (%s). Dashboard will still work.",
+            type(e).__name__,
+            exc_info=True,
+        )
         api_ok = False
         bot = None
 
@@ -616,7 +633,7 @@ def _disable_bot_for_provider_error(error: Exception) -> None:
     logger.warning(
         "API access unavailable: %s. Bot disabled; dashboard remains "
         "available.",
-        error,
+        type(error).__name__,
     )
 
 

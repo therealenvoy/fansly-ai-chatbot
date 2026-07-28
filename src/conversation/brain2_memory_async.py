@@ -85,12 +85,14 @@ class MemoryExtractionService:
                     self.note_extractor.merge(note, extracted)
                 )
             logger.info(
-                "Memory extraction completed for fan %s with %s fields",
-                fan_id,
+                "Memory extraction completed with %s fields",
                 len(extracted),
             )
-        except Exception:
-            logger.exception("Asynchronous memory extraction failed for fan %s", fan_id)
+        except Exception as exc:
+            logger.error(
+                "Asynchronous memory extraction failed: %s",
+                type(exc).__name__,
+            )
 
     def _complete(
         self,
