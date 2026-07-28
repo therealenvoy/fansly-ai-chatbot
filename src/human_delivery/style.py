@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import re
 from statistics import mean
 
@@ -163,3 +164,39 @@ def repetition_score(candidate: str, recent: list[str]) -> float:
             / max(1, len(candidate_signature | other))
         )
     return max(scores, default=0.0)
+
+
+def apply_rare_typo(
+    text: str,
+    *,
+    enabled: bool,
+    seed: str,
+) -> str:
+    """Apply at most one deterministic, plausible typo to low-risk chat."""
+    normalized = str(text or "")
+    if not enabled or _SERIOUS.search(normalized):
+        return normalized
+    matches = [
+        match
+        for match in re.finditer(r"\b[a-z]{5,12}\b", normalized)
+        if match.group(0) not in {"please", "sorry", "never", "always"}
+    ]
+    if not matches:
+        return normalized
+    digest = hashlib.sha256(
+        f"{seed}\0{normalized}".encode("utf-8")
+    ).digest()
+    if digest[0] % 20 != 0:
+        return normalized
+    match = matches[digest[1] % len(matches)]
+    word = match.group(0)
+    index = 1 + digest[2] % (len(word) - 2)
+    if word[index] == word[index + 1]:
+        return normalized
+    typo = (
+        word[:index]
+        + word[index + 1]
+        + word[index]
+        + word[index + 2 :]
+    )
+    return normalized[: match.start()] + typo + normalized[match.end() :]

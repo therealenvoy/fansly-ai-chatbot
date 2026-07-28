@@ -145,6 +145,11 @@ class TestDashboardShell:
         assert 'maxlength="50000"' in DASHBOARD_HTML
         assert "/api/chat-instructions" in DASHBOARD_HTML
         assert "stored in the database" in DASHBOARD_HTML
+        assert "Voice Lab" in DASHBOARD_HTML
+        assert "/api/human-delivery/status" in DASHBOARD_HTML
+        assert "/api/human-delivery/documents" in DASHBOARD_HTML
+        assert "/api/human-delivery/preview" in DASHBOARD_HTML
+        assert "zero provider calls and zero sends" in DASHBOARD_HTML
         assert "function pickMedia(idx)" in DASHBOARD_HTML
 
 

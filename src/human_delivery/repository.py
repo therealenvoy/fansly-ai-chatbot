@@ -24,6 +24,12 @@ from src.human_delivery.schema import (
 from src.persistence.schema import INBOUND_MESSAGES, utcnow
 
 
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class DocumentRepository:
     """Version prompt documents without altering legacy live settings."""
 
@@ -292,6 +298,58 @@ class DocumentRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def create_example(self, payload: dict, *, actor: str = "operator") -> dict:
+        required = (
+            "stage",
+            "fan_tone",
+            "relationship_depth",
+            "intended_act",
+            "good_response",
+        )
+        values = {
+            key: str(payload.get(key) or "").strip()
+            for key in required
+        }
+        if any(not value for value in values.values()):
+            raise ValueError(
+                "stage, fan tone, relationship depth, intended act, "
+                "and good response are required"
+            )
+        if len(values["good_response"]) > 2_000:
+            raise ValueError("winning example response is too long")
+        status = str(payload.get("status") or "draft").strip().lower()
+        if status not in {"draft", "active", "archived"}:
+            raise ValueError("invalid winning example status")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                insert(CONVERSATION_EXAMPLES).values(
+                    creator_id=self.creator_id,
+                    **values,
+                    language=str(payload.get("language") or "en")[:16],
+                    anti_example=(
+                        str(payload.get("anti_example") or "").strip()
+                        or None
+                    ),
+                    explanation=(
+                        str(payload.get("explanation") or "").strip()
+                        or None
+                    ),
+                    safety_class="conversation_only",
+                    status=status,
+                    revision=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            row = connection.execute(
+                select(CONVERSATION_EXAMPLES).where(
+                    CONVERSATION_EXAMPLES.c.id
+                    == int(result.inserted_primary_key[0])
+                )
+            ).mappings().one()
+        return dict(row)
+
     def _active_map(self, connection) -> dict[str, str]:
         rows = connection.execute(
             select(
@@ -341,7 +399,7 @@ class FanTurnRepository:
             ).scalar_one_or_none()
             if existing_link is not None:
                 return self._turn(connection, int(existing_link))
-            candidate = connection.execute(
+            candidates = connection.execute(
                 select(FAN_TURNS)
                 .where(
                     and_(
@@ -349,16 +407,27 @@ class FanTurnRepository:
                         FAN_TURNS.c.fan_id == inbound["fan_id"],
                         FAN_TURNS.c.chat_id == inbound["chat_id"],
                         FAN_TURNS.c.status == "collecting",
-                        FAN_TURNS.c.started_at
-                        <= inbound["provider_created_at"],
-                        FAN_TURNS.c.closes_at
-                        >= inbound["provider_created_at"],
                     )
                 )
                 .order_by(FAN_TURNS.c.last_message_at.desc())
-                .limit(1)
+                .limit(10)
                 .with_for_update()
-            ).mappings().first()
+            ).mappings().all()
+            inbound_time = _aware(inbound["provider_created_at"])
+            candidate = next(
+                (
+                    row
+                    for row in candidates
+                    if abs(
+                        (
+                            inbound_time - _aware(row["started_at"])
+                        ).total_seconds()
+                    )
+                    <= max_window
+                    and inbound_time <= _aware(row["closes_at"])
+                ),
+                None,
+            )
             count = 0
             if candidate is not None:
                 count = int(
@@ -399,18 +468,25 @@ class FanTurnRepository:
             else:
                 turn_id = int(candidate["id"])
                 position = count + 1
-                latest = max(
-                    candidate["last_message_at"],
-                    inbound["provider_created_at"],
+                started = min(
+                    _aware(candidate["started_at"]),
+                    inbound_time,
                 )
+                latest = max(
+                    _aware(candidate["last_message_at"]),
+                    inbound_time,
+                )
+                closes_at = started + timedelta(seconds=max_window)
                 quiet_until = min(
-                    candidate["closes_at"],
+                    closes_at,
                     latest + timedelta(seconds=debounce),
                 )
                 connection.execute(
                     update(FAN_TURNS)
                     .where(FAN_TURNS.c.id == turn_id)
                     .values(
+                        started_at=started,
+                        closes_at=closes_at,
                         quiet_until=quiet_until,
                         last_message_at=latest,
                         updated_at=now,
@@ -477,6 +553,33 @@ class FanTurnRepository:
                     and_(
                         FAN_TURNS.c.creator_id == creator_id,
                         FAN_TURNS.c.fan_id == fan_id,
+                        FAN_TURNS.c.status.in_(
+                            ["collecting", "ready", "planned"]
+                        ),
+                    )
+                )
+                .values(
+                    status="cancelled",
+                    cancel_reason=str(reason)[:128],
+                    closed_at=now,
+                    updated_at=now,
+                )
+            )
+        return int(result.rowcount or 0)
+
+    def cancel_all_open(
+        self,
+        *,
+        creator_id: str,
+        reason: str,
+    ) -> int:
+        now = utcnow()
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(FAN_TURNS)
+                .where(
+                    and_(
+                        FAN_TURNS.c.creator_id == creator_id,
                         FAN_TURNS.c.status.in_(
                             ["collecting", "ready", "planned"]
                         ),
@@ -703,6 +806,111 @@ class HumanResponsePlanRepository:
                 .values(
                     status="cancelled",
                     cancellation_reason=str(reason)[:128],
+                    updated_at=now,
+                )
+            )
+        return int(result.rowcount or 0)
+
+    def cancel_open_for_fan(
+        self,
+        *,
+        creator_id: str,
+        fan_id: str,
+        reason: str,
+    ) -> int:
+        """Cancel unsent shadow/planned bubbles without touching the outbox."""
+        now = utcnow()
+        normalized_reason = str(reason)[:128]
+        with self.engine.begin() as connection:
+            plan_ids = [
+                int(value)
+                for value in connection.execute(
+                    select(HUMAN_RESPONSE_PLANS.c.id).where(
+                        and_(
+                            HUMAN_RESPONSE_PLANS.c.creator_id == creator_id,
+                            HUMAN_RESPONSE_PLANS.c.fan_id == fan_id,
+                            HUMAN_RESPONSE_PLANS.c.status.in_(
+                                ["planned", "shadow"]
+                            ),
+                        )
+                    )
+                ).scalars()
+            ]
+            if not plan_ids:
+                return 0
+            connection.execute(
+                update(HUMAN_RESPONSE_PLANS)
+                .where(HUMAN_RESPONSE_PLANS.c.id.in_(plan_ids))
+                .values(
+                    status="cancelled",
+                    cancel_reason=normalized_reason,
+                    updated_at=now,
+                )
+            )
+            result = connection.execute(
+                update(HUMAN_RESPONSE_BUBBLES)
+                .where(
+                    and_(
+                        HUMAN_RESPONSE_BUBBLES.c.plan_id.in_(plan_ids),
+                        HUMAN_RESPONSE_BUBBLES.c.status.in_(
+                            ["planned", "shadow"]
+                        ),
+                    )
+                )
+                .values(
+                    status="cancelled",
+                    cancellation_reason=normalized_reason,
+                    updated_at=now,
+                )
+            )
+        return int(result.rowcount or 0)
+
+    def cancel_all_open(
+        self,
+        *,
+        creator_id: str,
+        reason: str,
+    ) -> int:
+        now = utcnow()
+        normalized_reason = str(reason)[:128]
+        with self.engine.begin() as connection:
+            plan_ids = [
+                int(value)
+                for value in connection.execute(
+                    select(HUMAN_RESPONSE_PLANS.c.id).where(
+                        and_(
+                            HUMAN_RESPONSE_PLANS.c.creator_id == creator_id,
+                            HUMAN_RESPONSE_PLANS.c.status.in_(
+                                ["planned", "shadow"]
+                            ),
+                        )
+                    )
+                ).scalars()
+            ]
+            if not plan_ids:
+                return 0
+            connection.execute(
+                update(HUMAN_RESPONSE_PLANS)
+                .where(HUMAN_RESPONSE_PLANS.c.id.in_(plan_ids))
+                .values(
+                    status="cancelled",
+                    cancel_reason=normalized_reason,
+                    updated_at=now,
+                )
+            )
+            result = connection.execute(
+                update(HUMAN_RESPONSE_BUBBLES)
+                .where(
+                    and_(
+                        HUMAN_RESPONSE_BUBBLES.c.plan_id.in_(plan_ids),
+                        HUMAN_RESPONSE_BUBBLES.c.status.in_(
+                            ["planned", "shadow"]
+                        ),
+                    )
+                )
+                .values(
+                    status="cancelled",
+                    cancellation_reason=normalized_reason,
                     updated_at=now,
                 )
             )

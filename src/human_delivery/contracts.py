@@ -39,10 +39,25 @@ FORBIDDEN_QUALITY_FLAGS = (
     "ppv_intent",
     "tip_intent",
 )
+PRIVATE_REASONING_KEYS = frozenset(
+    {"reasoning", "analysis", "chain_of_thought", "rationale"}
+)
 
 
 def _clean_text(value: Any, maximum: int) -> str:
     return str(value or "").strip()[:maximum].strip()
+
+
+def _contains_private_reasoning(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            str(key).casefold() in PRIVATE_REASONING_KEYS
+            or _contains_private_reasoning(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_private_reasoning(item) for item in value)
+    return False
 
 
 @dataclass(frozen=True)
@@ -99,6 +114,7 @@ class HumanDeliveryDecision:
         *,
         max_bubbles: int = 3,
         conversation_only: bool = True,
+        verified_creator_facts: set[str] | None = None,
     ) -> "HumanDeliveryDecision | None":
         normalized = str(raw or "").strip()
         fenced = re.fullmatch(
@@ -120,6 +136,8 @@ class HumanDeliveryDecision:
             "quality",
         }:
             return None
+        if _contains_private_reasoning(parsed):
+            return None
         understanding = parsed["understanding"]
         strategy = parsed["strategy"]
         delivery = parsed["delivery"]
@@ -129,6 +147,26 @@ class HumanDeliveryDecision:
             isinstance(value, dict)
             for value in (understanding, strategy, delivery, quality)
         ) or not isinstance(memory_updates, list):
+            return None
+        if set(understanding) != {
+            "language",
+            "fan_emotion",
+            "relationship_stage",
+            "unresolved_topic",
+        }:
+            return None
+        if set(strategy) != {
+            "primary_act",
+            "secondary_act",
+            "should_ask_question",
+            "safety_class",
+        }:
+            return None
+        if set(delivery) != {
+            "casing_mode",
+            "energy",
+            "bubbles",
+        }:
             return None
         raw_bubbles = delivery.get("bubbles")
         if (
@@ -145,6 +183,9 @@ class HumanDeliveryDecision:
             role = _clean_text(item.get("role"), 32).lower()
             text = _clean_text(item.get("text"), 500)
             if role not in BUBBLE_ROLES or not text:
+                return None
+            word_count = len(re.findall(r"\b\w+\b", text, re.UNICODE))
+            if role != "reaction" and word_count < 2:
                 return None
             signature = re.sub(r"\W+", " ", text.casefold()).strip()
             if not signature or signature in normalized_texts:
@@ -173,6 +214,19 @@ class HumanDeliveryDecision:
             if any(bool(quality.get(flag)) for flag in FORBIDDEN_QUALITY_FLAGS):
                 return None
         if quality.get("facts_grounded") is not True:
+            return None
+        creator_claims = quality.get("creator_fact_claims") or []
+        if not isinstance(creator_claims, list):
+            return None
+        normalized_verified = {
+            str(value).strip().casefold()
+            for value in (verified_creator_facts or set())
+            if str(value).strip()
+        }
+        if any(
+            str(claim).strip().casefold() not in normalized_verified
+            for claim in creator_claims
+        ):
             return None
         confidence = quality.get("confidence", 1.0)
         if (

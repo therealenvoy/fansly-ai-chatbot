@@ -46,6 +46,9 @@ from .settings.ai import (
 )
 from .settings.chat_guidance import ChatGuidanceService
 from .settings.brain import BrainSettingsService
+from .human_delivery.guide import DEFAULT_CONVERSATION_GUIDE
+from .human_delivery.service import HumanDeliveryService
+from .human_delivery.settings import HumanDeliverySettings
 from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
@@ -316,6 +319,34 @@ chat_guidance = ChatGuidanceService(
     settings_store,
     legacy_brand_bible_path=BRAND_BIBLE_CONFIG_PATH,
 )
+human_delivery_settings = HumanDeliverySettings.from_mapping(os.environ)
+human_delivery = HumanDeliveryService(
+    database_engine,
+    creator_id=CREATOR_ID,
+    settings=human_delivery_settings,
+)
+try:
+    guidance_snapshot = chat_guidance.snapshot()
+    human_delivery.bootstrap(
+        creator_persona=(
+            persona_target.read_text(encoding="utf-8")
+            if persona_target.exists()
+            else ""
+        ),
+        brand_bible=guidance_snapshot.brand_bible,
+        conversation_guide=guidance_snapshot.chat_instructions,
+        suggested_guide=DEFAULT_CONVERSATION_GUIDE,
+    )
+except Exception as error:
+    logger.warning(
+        "Human Delivery document bootstrap failed safely: %s",
+        type(error).__name__,
+        exc_info=True,
+    )
+logger.info(
+    "Human Delivery controls: %s",
+    human_delivery_settings.safe_status(),
+)
 credential_store = EncryptedCredentialStore(
     settings_store,
     os.getenv("CREDENTIAL_ENCRYPTION_KEY", ""),
@@ -490,6 +521,7 @@ if api_ok:
             brain_settings_service=brain_settings_service,
             episode_service=episode_service,
             chat_guidance=chat_guidance,
+            human_delivery=human_delivery,
             enable_unread_replies=ENABLE_UNREAD_REPLIES,
             enable_online_outreach=ENABLE_ONLINE_OUTREACH,
             enable_stalled_outreach=ENABLE_STALLED_OUTREACH,
@@ -602,6 +634,7 @@ dashboard = DashboardServer(
     crm_sync=crm_sync,
     ai_settings=ai_settings,
     chat_guidance=chat_guidance,
+    human_delivery=human_delivery,
     credit_governor=provider_credit_governor,
     onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
     webhook_endpoint_url=ONLYFANSAPI_WEBHOOK_URL,

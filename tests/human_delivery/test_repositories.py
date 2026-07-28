@@ -5,11 +5,14 @@ from sqlalchemy import create_engine, insert, select
 
 from src.human_delivery.contracts import HumanDeliveryDecision
 from src.human_delivery.guide import DEFAULT_CONVERSATION_GUIDE
+from src.human_delivery.documents import PromptCompiler
+from src.human_delivery.planner import HumanDeliveryPlanner
 from src.human_delivery.repository import (
     DocumentRepository,
     FanTurnRepository,
     HumanResponsePlanRepository,
 )
+from src.human_delivery.settings import HumanDeliverySettings
 from src.human_delivery.schema import (
     FAN_TURN_INBOUND_LINKS,
     HUMAN_RESPONSE_BUBBLES,
@@ -165,6 +168,28 @@ def test_fan_turn_closes_after_quiet_window_and_survives_repository_restart():
     assert closed[0]["status"] == "ready"
 
 
+def test_fan_turn_converges_when_older_webhook_arrives_second():
+    engine = _engine()
+    started = datetime.now(timezone.utc)
+    newer = _inbound(
+        engine,
+        message_id="synthetic-newer",
+        content="second",
+        created_at=started + timedelta(seconds=2),
+    )
+    older = _inbound(
+        engine,
+        message_id="synthetic-older",
+        content="first",
+        created_at=started,
+    )
+    repository = FanTurnRepository(engine)
+    first_observed = repository.add_inbound(newer)
+    converged = repository.add_inbound(older)
+    assert converged["id"] == first_observed["id"]
+    assert repository.assembled_text(converged["id"]) == "first\nsecond"
+
+
 def test_shadow_plan_is_idempotent_and_never_writes_outbox():
     engine = _engine()
     started = datetime.now(timezone.utc)
@@ -213,3 +238,90 @@ def test_shadow_plan_is_idempotent_and_never_writes_outbox():
     assert bubbles[0]["available_at"] < bubbles[1]["available_at"]
     assert repository.metrics(creator_id="creator-a")["outbox_writes"] == 0
     assert repository.cancel_plan(plan["id"], reason="manual_creator_send") == 2
+
+
+def test_shadow_planner_uses_one_model_call_and_never_writes_outbox():
+    engine = _engine()
+    documents = DocumentRepository(engine, creator_id="creator-a")
+    documents.bootstrap(
+        creator_persona="tone: warm",
+        brand_bible="Never invent facts.",
+        conversation_guide="Answer before asking.",
+        suggested_guide=DEFAULT_CONVERSATION_GUIDE,
+    )
+    inbound_id = _inbound(
+        engine,
+        message_id="synthetic-planner",
+        content="i finished it",
+        created_at=datetime.now(timezone.utc),
+    )
+    turn = FanTurnRepository(engine).add_inbound(inbound_id)
+
+    class Provider:
+        calls = 0
+
+        def complete_json(self, prompt):
+            self.calls += 1
+            assert "newest_fan_turn" in prompt
+            return json.dumps(
+                {
+                    "understanding": {
+                        "language": "en",
+                        "fan_emotion": "happy",
+                        "relationship_stage": "warm",
+                        "unresolved_topic": None,
+                    },
+                    "strategy": {
+                        "primary_act": "validate",
+                        "secondary_act": None,
+                        "should_ask_question": False,
+                        "safety_class": "conversation_only",
+                    },
+                    "delivery": {
+                        "casing_mode": "mostly_lowercase",
+                        "energy": "medium",
+                        "bubbles": [
+                            {
+                                "role": "validation",
+                                "text": "That is actually huge",
+                            }
+                        ],
+                    },
+                    "memory_updates": [],
+                    "quality": {
+                        "facts_grounded": True,
+                        "sales_intent": False,
+                        "media_intent": False,
+                        "ppv_intent": False,
+                        "tip_intent": False,
+                        "confidence": 0.9,
+                    },
+                }
+            )
+
+    provider = Provider()
+    planner = HumanDeliveryPlanner(
+        documents=documents,
+        plans=HumanResponsePlanRepository(engine),
+        compiler=PromptCompiler(),
+        settings=HumanDeliverySettings.from_mapping(
+            {
+                "HUMAN_DELIVERY_ENABLED": "true",
+                "HUMAN_DELIVERY_MODE": "shadow",
+                "HUMAN_DELIVERY_SHADOW_PERCENT": "100",
+                "HUMAN_DELIVERY_PROMPT_COMPILER": "true",
+            }
+        ),
+        provider=provider,
+        model="stub",
+    )
+    result = planner.plan_shadow(
+        turn_id=turn["id"],
+        creator_id="creator-a",
+        fan_id="fan-a",
+        newest_turn="i finished it",
+    )
+    assert provider.calls == 1
+    assert result["status"] == "shadow_planned"
+    assert result["model_calls"] == 1
+    assert result["outbox_writes"] == 0

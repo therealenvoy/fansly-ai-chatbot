@@ -100,6 +100,31 @@ def test_prompt_compiler_excludes_sales_and_reports_budget_omissions():
     ).fingerprint
 
 
+def test_prompt_compiler_reserves_space_for_newest_turn_and_ranks_sections():
+    compiler = PromptCompiler(budget=8_000)
+    compiled = compiler.compile(
+        runtime_rules="Conversation only.",
+        documents={
+            "creator_persona": (
+                "# Skiing\n" + ("snow " * 900) +
+                "\n\n# Cats\nThe creator has a verified cat named Luna."
+            ),
+            "brand_bible": "Never invent facts.",
+            "conversation_guide": "Answer the newest turn first.",
+        },
+        creator_facts=["pet=Luna"],
+        contact_policy="inbound reply permitted",
+        newest_turn="how is Luna doing?",
+    )
+    assert "newest_fan_turn" in compiled.included
+    assert compiled.character_count <= compiled.budget
+    assert compiled.included.index(
+        "creator_persona:2:Cats"
+    ) < compiled.included.index(
+        "creator_persona:1:Skiing"
+    )
+
+
 def test_linter_reports_sales_mixing_and_legacy_truncation():
     findings = DocumentLinter().lint(
         {
@@ -115,6 +140,25 @@ def test_linter_reports_sales_mixing_and_legacy_truncation():
     assert "sales_rules_mixed_into_conversation" in codes
     assert "legacy_runtime_truncation" in codes
     assert "forced_question_quota" in codes
+
+
+def test_linter_reports_creator_fact_and_emotional_conflicts():
+    findings = DocumentLinter().lint(
+        {
+            "creator_persona": (
+                "Location: Paris\nAlways flirt in every conversation."
+            ),
+            "brand_bible": (
+                "Location: Rome\nNever flirt with anyone."
+            ),
+            "conversation_guide": "Use at least 4 pet names.",
+        }
+    )
+    codes = {finding.code for finding in findings}
+    assert "conflicting_creator_fact" in codes
+    assert "conflicting_emotional_positioning" in codes
+    assert "excessive_phrase_quota" in codes
+    assert "missing_factual_grounding" in codes
 
 
 def test_structured_decision_accepts_meaningful_bubbles():
@@ -165,3 +209,22 @@ def test_structured_decision_requires_memory_provenance():
             "source_message_id": "synthetic-message-1",
         },
     )
+
+
+def test_structured_decision_rejects_private_reasoning_and_ungrounded_claims():
+    private = _decision()
+    private["quality"]["reasoning"] = "hidden private analysis"
+    assert HumanDeliveryDecision.from_model_output(
+        json.dumps(private)
+    ) is None
+
+    claim = _decision()
+    claim["quality"]["creator_fact_claims"] = ["location=rome"]
+    assert HumanDeliveryDecision.from_model_output(
+        json.dumps(claim),
+        verified_creator_facts={"location=paris"},
+    ) is None
+    assert HumanDeliveryDecision.from_model_output(
+        json.dumps(claim),
+        verified_creator_facts={"location=rome"},
+    ) is not None

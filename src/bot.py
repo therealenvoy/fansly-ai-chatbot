@@ -82,6 +82,7 @@ from .persistence.presence import PresenceRepository
 if TYPE_CHECKING:
     from .persistence.state import ConversationStateRepository
     from .settings.chat_guidance import ChatGuidanceService
+    from .human_delivery.service import HumanDeliveryService
     from .webhooks.onlyfansapi import (
         OnlyFansApiFanslyAccountEvent,
         OnlyFansApiFanslyDeletedMessage,
@@ -121,6 +122,7 @@ class FanslyBot:
         episode_service=None,
         memory_extraction_service=None,
         chat_guidance: "ChatGuidanceService | None" = None,
+        human_delivery: "HumanDeliveryService | None" = None,
         enable_unread_replies: bool = True,
         enable_online_outreach: bool = False,
         enable_stalled_outreach: bool = False,
@@ -182,6 +184,7 @@ class FanslyBot:
         self.brain_auto_rollback = AutomaticRollbackEvaluator()
         self.episode_service = episode_service
         self.chat_guidance = chat_guidance
+        self.human_delivery = human_delivery
         self.enable_unread_replies = bool(enable_unread_replies)
         self.enable_online_outreach = bool(enable_online_outreach)
         self.enable_stalled_outreach = bool(enable_stalled_outreach)
@@ -570,25 +573,60 @@ class FanslyBot:
                     inbound_record,
                     event.provider_created_at,
                 )
+                if self.human_delivery is not None:
+                    try:
+                        self.human_delivery.observe_inbound(
+                            inbound_record.id,
+                            fan_id=inbound_record.fan_id,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Human Delivery inbound observation failed safely: %s",
+                            type(exc).__name__,
+                        )
         return result.created
 
     def ingest_webhook_sent(
         self,
         event: "OnlyFansApiFanslySentMessage",
     ) -> "WebhookIngestResult":
-        return self.webhook_event_repo.ingest_sent(
+        result = self.webhook_event_repo.ingest_sent(
             creator_id=self.creator_id,
             event=event,
         )
+        if result.created and self.human_delivery is not None:
+            try:
+                self.human_delivery.observe_creator_send(
+                    fan_id=event.fan_id,
+                    chat_id=event.chat_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Human Delivery creator-send cancellation failed safely: %s",
+                    type(exc).__name__,
+                )
+        return result
 
     def ingest_webhook_deleted(
         self,
         event: "OnlyFansApiFanslyDeletedMessage",
     ) -> "WebhookIngestResult":
-        return self.webhook_event_repo.ingest_deleted(
+        result = self.webhook_event_repo.ingest_deleted(
             creator_id=self.creator_id,
             event=event,
         )
+        if result.created and self.human_delivery is not None:
+            try:
+                self.human_delivery.observe_deleted(
+                    fan_id=event.fan_id,
+                    chat_id=event.chat_id,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Human Delivery deletion cancellation failed safely: %s",
+                    type(exc).__name__,
+                )
+        return result
 
     def ingest_webhook_read(
         self,
@@ -612,6 +650,16 @@ class FanslyBot:
             == "fansly.accounts.authentication_failed"
         ):
             self.enabled = False
+            if self.human_delivery is not None:
+                try:
+                    self.human_delivery.cancel_all(
+                        reason="provider_authentication_failed",
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Human Delivery provider cancellation failed safely: %s",
+                        type(exc).__name__,
+                    )
         return result
 
     def ingest_webhook_domain(
@@ -1704,6 +1752,14 @@ class FanslyBot:
         if target and not self.launch_ready:
             raise LaunchGuardError(self.launch_block_reason)
         self.enabled = target
+        if not target and self.human_delivery is not None:
+            try:
+                self.human_delivery.cancel_all(reason="bot_disabled")
+            except Exception as exc:
+                logger.error(
+                    "Human Delivery disable cancellation failed safely: %s",
+                    type(exc).__name__,
+                )
         logger.info(f"Bot {'enabled' if self.enabled else 'disabled'}")
         return self.enabled
 

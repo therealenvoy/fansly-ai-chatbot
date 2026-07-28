@@ -24,6 +24,19 @@ DOCUMENT_PRECEDENCE = (
 )
 
 
+def _relevance(text: str, query: str) -> int:
+    query_terms = {
+        term
+        for term in re.findall(r"\b[\w']{3,}\b", query.casefold())
+    }
+    if not query_terms:
+        return 0
+    text_terms = set(
+        re.findall(r"\b[\w']{3,}\b", str(text).casefold())
+    )
+    return len(query_terms & text_terms)
+
+
 @dataclass(frozen=True)
 class LintFinding:
     code: str
@@ -111,6 +124,21 @@ class DocumentLinter:
         r"(babe|baby|sweetie|handsome|cutie|pet\s+name)\b",
         re.IGNORECASE,
     )
+    _FACT_LINE = re.compile(
+        r"^\s*(location|age|pet|pets|occupation|job|study|studies)\s*:"
+        r"\s*(.+?)\s*$",
+        re.IGNORECASE,
+    )
+    _FLIRT_POSITION = re.compile(
+        r"\b(always|never|do\s+not|don't)\b.{0,30}\b"
+        r"(flirt|romantic|girlfriend|intimate)\b",
+        re.IGNORECASE,
+    )
+    _PHRASE_QUOTA = re.compile(
+        r"\b(use|say|include)\b.{0,30}\b"
+        r"(at\s+least|minimum|exactly)\s+([2-9]|\d{2,})\b",
+        re.IGNORECASE,
+    )
 
     def lint(
         self,
@@ -180,6 +208,25 @@ class DocumentLinter:
                         f"{duplicate_lines} normalized instruction lines repeat.",
                     )
                 )
+            if self._PHRASE_QUOTA.search(content):
+                findings.append(
+                    LintFinding(
+                        "excessive_phrase_quota",
+                        "warning",
+                        document_type,
+                        "A fixed phrase quota is likely to create repetitive output.",
+                    )
+                )
+            for label, text in _chunks(document_type, content):
+                if len(text) > 8_000:
+                    findings.append(
+                        LintFinding(
+                            "overlong_section",
+                            "warning",
+                            document_type,
+                            f"{label} is over 8,000 characters and may be excluded as one block.",
+                        )
+                    )
         pet_rules = [
             match.group(0).casefold()
             for content in documents.values()
@@ -194,6 +241,63 @@ class DocumentLinter:
                     "error",
                     "cross_document",
                     "The documents contain both mandatory and forbidden pet-name rules.",
+                )
+            )
+        facts: dict[str, set[str]] = {}
+        for content in documents.values():
+            for line in str(content or "").splitlines():
+                match = self._FACT_LINE.match(line)
+                if match:
+                    facts.setdefault(match.group(1).casefold(), set()).add(
+                        re.sub(r"\s+", " ", match.group(2).casefold()).strip()
+                    )
+        for fact_key, values in facts.items():
+            if len(values) > 1:
+                findings.append(
+                    LintFinding(
+                        "conflicting_creator_fact",
+                        "error",
+                        "cross_document",
+                        f"Creator fact '{fact_key}' has conflicting values.",
+                    )
+                )
+        emotional_rules = [
+            match.group(0).casefold()
+            for content in documents.values()
+            for match in self._FLIRT_POSITION.finditer(str(content or ""))
+        ]
+        if any("always" in rule for rule in emotional_rules) and any(
+            "never" in rule or "don't" in rule or "do not" in rule
+            for rule in emotional_rules
+        ):
+            findings.append(
+                LintFinding(
+                    "conflicting_emotional_positioning",
+                    "error",
+                    "cross_document",
+                    "Documents contain both mandatory and forbidden intimacy rules.",
+                )
+            )
+        grounding_corpus = " ".join(
+            str(documents.get(key, ""))
+            for key in ("creator_persona", "brand_bible")
+        ).casefold()
+        if grounding_corpus.strip() and not any(
+            marker in grounding_corpus
+            for marker in (
+                "never invent",
+                "do not invent",
+                "verified fact",
+                "factual grounding",
+                "only claim",
+            )
+        ):
+            findings.append(
+                LintFinding(
+                    "missing_factual_grounding",
+                    "warning",
+                    "cross_document",
+                    "Persona and Brand Bible do not state how unsupported facts are blocked.",
                 )
             )
         return findings
@@ -227,6 +331,8 @@ class PromptCompiler:
         *,
         runtime_rules: str,
         documents: dict[str, str],
+        creator_facts: Iterable[str] = (),
+        contact_policy: str = "",
         fan_memory: Iterable[str] = (),
         history: str = "",
         newest_turn: str = "",
@@ -237,14 +343,35 @@ class PromptCompiler:
         excluded: list[dict] = []
         parts: list[str] = []
         used = 0
+        newest_block = (
+            f"[newest_fan_turn]\n{newest_turn.strip()}"
+            if newest_turn.strip()
+            else ""
+        )
+        reserved = len(newest_block)
+        if len(str(runtime_rules).strip()) + reserved > self.budget:
+            raise ValueError(
+                "required runtime rules and newest fan turn exceed prompt budget"
+            )
 
-        def add(label: str, text: str, *, required: bool = False) -> None:
+        def add(
+            label: str,
+            text: str,
+            *,
+            required: bool = False,
+            preserve_reserved: bool = True,
+        ) -> None:
             nonlocal used
             block = f"\n\n[{label}]\n{str(text).strip()}".strip()
             if not block:
                 return
             projected = used + len(block)
-            if projected <= self.budget:
+            ceiling = (
+                self.budget - reserved
+                if preserve_reserved and not required
+                else self.budget
+            )
+            if projected <= ceiling:
                 parts.append(block)
                 included.append(label)
                 used = projected
@@ -262,22 +389,55 @@ class PromptCompiler:
             )
 
         add("runtime_rules", runtime_rules, required=True)
-        for document_type in DOCUMENT_PRECEDENCE:
-            if conversation_only and document_type == "sales_playbook":
-                if str(documents.get(document_type, "")).strip():
-                    excluded.append(
-                        {
-                            "label": document_type,
-                            "reason": "conversation_only",
-                            "characters": len(documents[document_type]),
-                        }
+        query = f"{history}\n{newest_turn}"
+
+        def add_document(document_type: str) -> None:
+            ranked = list(
+                enumerate(
+                    _chunks(
+                        document_type,
+                        documents.get(document_type, ""),
                     )
-                continue
-            for label, text in _chunks(
-                document_type,
-                documents.get(document_type, ""),
-            ):
+                )
+            )
+            ranked.sort(
+                key=lambda item: (
+                    -_relevance(item[1][1], query),
+                    item[0],
+                )
+            )
+            for _, (label, text) in ranked:
                 add(label, text)
+
+        add_document("creator_persona")
+        add_document("brand_bible")
+        grounded_creator_facts = [
+            str(item).strip()
+            for item in creator_facts
+            if str(item).strip()
+        ][:50]
+        if grounded_creator_facts:
+            add(
+                "verified_creator_facts",
+                "\n".join(
+                    f"- {item}" for item in grounded_creator_facts
+                ),
+            )
+        if contact_policy.strip():
+            add("current_contact_policy", contact_policy)
+        add_document("conversation_guide")
+        if conversation_only and str(
+            documents.get("sales_playbook", "")
+        ).strip():
+            excluded.append(
+                {
+                    "label": "sales_playbook",
+                    "reason": "conversation_only",
+                    "characters": len(documents["sales_playbook"]),
+                }
+            )
+        elif not conversation_only:
+            add_document("sales_playbook")
         relevant_memory = [
             str(item).strip()
             for item in fan_memory
@@ -291,7 +451,12 @@ class PromptCompiler:
         if history.strip():
             add("recent_history", history)
         if newest_turn.strip():
-            add("newest_fan_turn", newest_turn, required=True)
+            add(
+                "newest_fan_turn",
+                newest_turn,
+                required=True,
+                preserve_reserved=False,
+            )
         for index, example in enumerate(list(examples)[:12], start=1):
             if not isinstance(example, dict):
                 continue

@@ -53,6 +53,16 @@ def test_postgres_migrations_and_runtime_tables_initialize(
         "ppv_sequences",
         "ppv_sequence_steps",
         "ppv_fan_progress",
+        "conversation_documents",
+        "conversation_document_events",
+        "conversation_examples",
+        "fan_turns",
+        "fan_turn_inbound_links",
+        "creator_facts",
+        "fan_style_profiles",
+        "human_response_plans",
+        "human_response_bubbles",
+        "human_delivery_reviews",
     } <= table_names
     expected_head = ScriptDirectory.from_config(
         alembic_config(POSTGRES_URL)

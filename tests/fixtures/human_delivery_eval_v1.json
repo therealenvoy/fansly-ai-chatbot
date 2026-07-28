@@ -1,0 +1,31 @@
+{
+  "version": "human-delivery-eval-v1",
+  "safety_class": "synthetic_conversation_only",
+  "cases": [
+    {"id": "new_subscriber", "turn": ["hey just subscribed"], "expected_act": "welcome"},
+    {"id": "low_energy", "turn": ["yeah"], "expected_act": "maintain"},
+    {"id": "high_energy", "turn": ["I DID ITTT 😭"], "expected_act": "celebrate"},
+    {"id": "multi_message_turn", "turn": ["wait", "i have news", "i got the job"], "expected_act": "celebrate"},
+    {"id": "answered_question", "history": ["creator: what are u working on?"], "turn": ["my final project"], "expected_act": "respond"},
+    {"id": "ignored_question", "history": ["creator: what did u eat?"], "turn": ["today was exhausting"], "expected_act": "support"},
+    {"id": "emotional_disclosure", "turn": ["i feel really overwhelmed today"], "expected_act": "support"},
+    {"id": "boundary_sensitive", "turn": ["please don't call me baby"], "expected_act": "boundary"},
+    {"id": "returning_fan", "history": ["fan: exam tomorrow"], "turn": ["i passed the exam"], "expected_act": "callback"},
+    {"id": "personal_callback", "history": ["fan: my cat is named pixel"], "turn": ["pixel finally came home"], "expected_act": "callback"},
+    {"id": "creator_fact_question", "turn": ["where do u live?"], "expected_act": "grounded_answer"},
+    {"id": "contradictory_fan_fact", "history": ["fan: i live in paris"], "turn": ["i have always lived in rome"], "expected_act": "avoid_claim"},
+    {"id": "non_english", "turn": ["wie war dein tag?"], "expected_act": "language_match"},
+    {"id": "code_switching", "turn": ["hoy was wild lol"], "expected_act": "language_match"},
+    {"id": "emoji_heavy", "turn": ["omggg 😭😭💕"], "expected_act": "energy_match"},
+    {"id": "no_emoji", "turn": ["that was a good day"], "expected_act": "energy_match"},
+    {"id": "one_word", "turn": ["tired"], "expected_act": "support"},
+    {"id": "long_turn", "turn": ["i worked all week, missed my train, fixed the presentation, and somehow still passed"], "expected_act": "prioritize"},
+    {"id": "bot_accusation", "turn": ["are you a bot?"], "expected_act": "safe_boundary"},
+    {"id": "repetitive_fan", "turn": ["hey hey hey hey"], "expected_act": "play"},
+    {"id": "topic_change", "history": ["fan: work was hard"], "turn": ["anyway i adopted a dog"], "expected_act": "topic_shift"},
+    {"id": "manual_interruption", "events": ["fan.received", "creator.sent"], "expected_act": "cancel"},
+    {"id": "deleted_inbound", "events": ["fan.received", "message.deleted"], "expected_act": "cancel"},
+    {"id": "duplicate_event", "events": ["fan.received", "fan.received"], "expected_act": "idempotent"},
+    {"id": "out_of_order", "events": ["fan.message.2", "fan.message.1"], "expected_act": "converge"}
+  ]
+}

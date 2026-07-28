@@ -167,6 +167,11 @@ def test_postgresql_offline_upgrade_compiles_without_sqlite_types():
     assert "trigger_kind" in sql
     assert "ALTER TABLE fans ADD COLUMN username" in sql
     assert "ALTER TABLE fan_messages ADD COLUMN attachments" in sql
+    assert "CREATE TABLE conversation_documents" in sql
+    assert "CREATE TABLE fan_turns" in sql
+    assert "CREATE TABLE human_response_plans" in sql
+    assert "CREATE TABLE human_response_bubbles" in sql
+    assert "ALTER TABLE fan_memories_v2 ADD COLUMN sensitivity_class" in sql
     assert "JSON NOT NULL" in sql
 
 

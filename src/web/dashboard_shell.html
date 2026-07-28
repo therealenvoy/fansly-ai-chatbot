@@ -327,6 +327,9 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
       <button type="button" class="nav-item" data-tab="brain">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4a3 3 0 0 0-3 3v1a3 3 0 0 0-2 3v2a3 3 0 0 0 3 3 3 3 0 0 0 5 2 3 3 0 0 0 5-2 3 3 0 0 0 3-3v-2a3 3 0 0 0-2-3V7a3 3 0 0 0-6-1 3 3 0 0 0-3-2zM12 6v12"/></svg><span>Brain</span>
       </button>
+      <button type="button" class="nav-item" data-tab="voice">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4zM9 9h6M9 12h4"/></svg><span>Voice Lab</span>
+      </button>
       <button type="button" class="nav-item" data-tab="settings">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a8 8 0 0 0-1.8-1L14.4 3h-4.8l-.4 3.1a8 8 0 0 0-1.8 1L5 6.1 3 9.5 5.1 11a7 7 0 0 0 0 2L3 14.5 5 18l2.4-1a8 8 0 0 0 1.8 1l.4 3h4.8l.4-3a8 8 0 0 0 1.8-1l2.4 1 2-3.5-2.1-1.5a7 7 0 0 0 .1-1z"/></svg><span>Settings</span>
       </button>
@@ -389,6 +392,7 @@ var dashboardScripts=[];
 var editScriptId=null;
 var dashboardScriptDraft={};
 var dashboardPersona={};
+var voiceDocuments=[];
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function attr(s){return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
@@ -403,7 +407,7 @@ function botControlMarkup(){return'<div class="bot-control-group"><button type="
 async function F(u){try{var r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return null;return await r.json()}catch(e){return null}}
 async function M(u,options){options=options||{};options.credentials='same-origin';options.cache='no-store';options.headers=Object.assign({},options.headers||{}, {'X-CSRF-Token':CSRF_TOKEN});return fetch(u,options)}
 
-var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,scripts:loadScripts,sequences:loadSequences,vault:loadVault,brain:loadBrain,settings:loadSettings};
+var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,scripts:loadScripts,sequences:loadSequences,vault:loadVault,brain:loadBrain,voice:loadVoiceLab,settings:loadSettings};
 function navTo(tab,skipHash){
   if(!loaders[tab])tab='dashboard';
   currentTab=tab;
@@ -670,6 +674,60 @@ function renderBrainOperations(status,metrics){
   ];
   return '<section class="block"><h3>Operational evidence</h3><p class="block-copy">Creator-scoped aggregate evidence only. Credentials, prompts, chain-of-thought, and private fan context are excluded.</p><div class="table-wrap"><table><thead><tr><th>Signal</th><th>Value</th><th>State</th></tr></thead><tbody>'+rows.map(function(row){return'<tr><td>'+esc(row[0])+'</td><td>'+esc(row[1])+'</td><td>'+esc(row[2]||'')+'</td></tr>'}).join('')+'</tbody></table></div></section>';
 }
+function voiceDocumentOption(d){return'<option value="'+Number(d.id)+'">'+esc(String(d.document_type||'').replace(/_/g,' '))+' · r'+Number(d.revision||0)+' · '+esc(d.status||'draft')+'</option>'}
+function selectVoiceDocument(id){
+  var d=voiceDocuments.find(function(item){return Number(item.id)===Number(id)}),type=document.getElementById('voice-document-type'),content=document.getElementById('voice-document-content'),activate=document.getElementById('voice-activate-document'),meta=document.getElementById('voice-document-meta');
+  if(!d||!type||!content)return;
+  type.value=d.document_type||'conversation_guide';content.value=d.content||'';
+  if(activate){activate.dataset.documentId=String(d.id);activate.disabled=d.status==='active'||d.document_type==='sales_playbook'}
+  if(meta)meta.textContent='Revision '+Number(d.revision||0)+' · '+String(d.status||'draft')+' · '+Number(d.character_count||0).toLocaleString()+' characters · '+Number((d.conflict_findings||[]).length)+' lint findings';
+}
+async function loadVoiceLab(){
+  var c=document.getElementById('content');
+  c.innerHTML=pageHead('Workspace','Voice Lab','Version and lint the creator voice, then run synthetic previews with zero provider calls and zero sends.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>')+'<p class="muted-note">Loading fail-closed Human Delivery controls…</p>';
+  var data=await Promise.all([F('/api/human-delivery/status'),F('/api/human-delivery/documents')]),status=data[0],payload=data[1];
+  if(!status||!payload){c.innerHTML=pageHead('Workspace','Voice Lab','Human Delivery controls are unavailable.','')+'<section class="block"><p class="muted-note">The database migration or service wiring is not ready.</p></section>';return}
+  voiceDocuments=payload.documents||[];
+  var s=status.settings||{},docs=status.documents||{},safety=status.safety||{},active=docs.active_revisions||{},findings=docs.finding_counts||{},latest={};
+  voiceDocuments.forEach(function(d){if(!latest[d.document_type]||Number(d.revision)>Number(latest[d.document_type].revision))latest[d.document_type]=d});
+  var selected=latest.conversation_guide||voiceDocuments[0]||null;
+  var h=pageHead('Workspace','Voice Lab','Govern voice documents and inspect message shape before any future shadow rollout. The active production responder is unchanged.','');
+  h+='<div class="cards">'+metricCard('Runtime mode',s.mode||'off','Enabled '+Boolean(s.enabled)+' · live '+Number(s.live_percent||0)+'% / ceiling '+Number(s.max_live_percent||0)+'%','<path d="M4 12h16M12 4v16"/>')+metricCard('Prompt compiler',s.prompt_compiler_enabled?'enabled':'off','Deployment flag remains fail-closed','<path d="M5 4h14v16H5zM8 8h8M8 12h8"/>')+metricCard('Document revisions',Number(docs.revision_count||0),Object.keys(active).length+' active types','<path d="M6 3h9l3 3v15H6z"/>')+metricCard('Lint findings',Number(findings.error||0)+' errors',Number(findings.warning||0)+' warnings','<path d="M12 3 2 21h20zM12 9v5M12 18h.01"/>')+'</div>';
+  h+='<section class="block"><h3>Safety boundary</h3><p class="block-copy">This lab cannot send messages, write to the outbox, activate sales rules, or replace the current live prompt. Saving creates a review revision; activating only selects the revision inside this inert document store.</p><div class="g3"><div><span class="muted-note">Live pipeline changed</span><strong>'+esc(safety.live_pipeline_changed?'yes':'no')+'</strong></div><div><span class="muted-note">Preview can send</span><strong>'+esc(safety.preview_can_send?'yes':'no')+'</strong></div><div><span class="muted-note">Multi-bubble live send</span><strong>'+esc(s.allow_multi_bubble_send?'enabled':'blocked')+'</strong></div></div></section>';
+  h+='<section class="block"><div class="section-intro"><div><h2>Versioned voice documents</h2><p>Legacy persona, brand bible, and chat guidance were preserved as immutable revisions. The cleaned guide remains a review draft until selected here.</p></div></div><div class="g2"><div><label for="voice-document-select">Revision</label><select id="voice-document-select">'+voiceDocuments.map(voiceDocumentOption).join('')+'</select></div><div><label for="voice-document-type">Document type</label><select id="voice-document-type">'+['creator_persona','brand_bible','conversation_guide','sales_playbook'].map(function(x){return'<option value="'+x+'">'+esc(x.replace(/_/g,' '))+'</option>'}).join('')+'</select></div></div><label for="voice-document-content">Content</label><textarea id="voice-document-content" rows="18" maxlength="100000"></textarea><p class="muted-note" id="voice-document-meta"></p><div class="actions"><button class="btn" data-action="save-voice-document">Save new draft revision</button><button class="btn-ghost" id="voice-activate-document" data-action="activate-voice-document">Activate in review store</button><span class="muted-note" id="voice-document-result"></span></div></section>';
+  h+='<section class="block"><div class="section-intro"><div><h2>Synthetic delivery preview</h2><p>Use invented test text only. Split candidate bubbles with a new line or ||. This runs deterministic casing, repetition, lint, and prompt-budget checks without calling DeepSeek or Fansly.</p></div></div><label for="voice-preview-turn">Synthetic newest fan turn</label><textarea id="voice-preview-turn" rows="3" placeholder="invented test message only"></textarea><label for="voice-preview-history">Synthetic earlier context (optional)</label><textarea id="voice-preview-history" rows="3" placeholder="invented context only"></textarea><label for="voice-preview-candidate">Candidate creator response</label><textarea id="voice-preview-candidate" rows="4" placeholder="first bubble || second bubble"></textarea><div class="actions"><button class="btn" data-action="run-voice-preview">Run no-send preview</button><span class="muted-note" id="voice-preview-result"></span></div><div id="voice-preview-output"></div></section>';
+  h+='<section class="block"><div class="section-intro"><div><h2>Evidence ledgers</h2><p>Authenticated inspection only. Fan memory is evidence-backed and deactivation is a soft delete; creator facts require an explicit operator entry.</p></div></div><div class="g2"><div><label for="voice-fan-id">Fan ID</label><input id="voice-fan-id" autocomplete="off" placeholder="exact internal fan ID"><div class="actions"><button class="btn-ghost" data-action="load-voice-memory">Load structured memory</button></div></div><div><label for="voice-creator-fact-key">Creator fact</label><div class="g2"><input id="voice-creator-fact-key" placeholder="location"><input id="voice-creator-fact-value" placeholder="verified value"></div><div class="actions"><button class="btn-ghost" data-action="save-creator-fact">Save verified fact</button></div></div></div><div id="voice-memory-output"></div><p class="muted-note" id="voice-evidence-result"></p></section>';
+  h+='<section class="block"><div class="section-intro"><div><h2>Tagged winning example</h2><p>Examples remain drafts unless explicitly promoted. They are excluded from the current production responder.</p></div></div><div class="g3"><input id="voice-example-stage" placeholder="stage"><input id="voice-example-tone" placeholder="fan tone"><input id="voice-example-depth" placeholder="relationship depth"></div><div class="g2"><input id="voice-example-act" placeholder="intended act"><input id="voice-example-language" value="en" placeholder="language"></div><textarea id="voice-example-good" rows="3" placeholder="good response"></textarea><textarea id="voice-example-bad" rows="2" placeholder="anti-example (optional)"></textarea><div class="actions"><button class="btn-ghost" data-action="save-voice-example">Save draft example</button><span class="muted-note" id="voice-example-result"></span></div></section>';
+  c.innerHTML=h;
+  var selector=document.getElementById('voice-document-select');if(selector&&selected){selector.value=String(selected.id);selectVoiceDocument(selected.id)}
+}
+async function saveVoiceDocument(){
+  var type=document.getElementById('voice-document-type'),content=document.getElementById('voice-document-content'),result=document.getElementById('voice-document-result');if(!type||!content||!result)return;
+  result.textContent='Saving review draft…';var r=await M('/api/human-delivery/documents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({document_type:type.value,content:content.value})}),d=await r.json();result.textContent=r.ok?'Draft revision saved; live prompt unchanged':'Failed: '+(d.error||'unknown');result.style.color=r.ok?'var(--green)':'var(--red)';if(r.ok)setTimeout(loadVoiceLab,600);
+}
+async function activateVoiceDocument(id){
+  if(!id)return;var result=document.getElementById('voice-document-result');if(result)result.textContent='Activating review revision…';
+  var r=await M('/api/human-delivery/documents/'+encodeURIComponent(id)+'/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),d=await r.json();if(result){result.textContent=r.ok?'Selected in review store; live prompt unchanged':'Failed: '+(d.error||'unknown');result.style.color=r.ok?'var(--green)':'var(--red)'}if(r.ok)setTimeout(loadVoiceLab,600);
+}
+async function runVoicePreview(){
+  var result=document.getElementById('voice-preview-result'),output=document.getElementById('voice-preview-output'),selector=document.getElementById('voice-document-select');if(!result||!output)return;result.textContent='Running local checks…';output.innerHTML='';
+  var body={document_id:selector&&selector.value||null,newest_turn:(document.getElementById('voice-preview-turn').value||''),history:(document.getElementById('voice-preview-history').value||''),candidate_response:(document.getElementById('voice-preview-candidate').value||'')};
+  var r=await M('/api/human-delivery/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),d=await r.json();if(!r.ok){result.textContent='Failed: '+(d.error||'unknown');result.style.color='var(--red)';return}
+  result.textContent='No-send preview · '+Number(d.external_calls||0)+' external calls · '+Number(d.outbox_writes||0)+' outbox writes';result.style.color='var(--green)';
+  var q=d.quality||{},comp=d.compilation||{},warnings=q.warnings||[];output.innerHTML='<div class="g2" style="margin-top:16px"><article class="card"><h3>Rendered bubbles</h3>'+(d.bubbles||[]).map(function(b){return'<p style="padding:10px 12px;border:1px solid var(--line);border-radius:12px">'+esc(b.content)+'</p>'}).join('')+'</article><article class="card"><h3>Checks</h3><p class="muted-note">Questions '+Number(q.question_count||0)+' · repetition '+Number(q.repetition_score||0).toFixed(2)+'</p><p class="muted-note">Prompt '+Number(comp.character_count||0).toLocaleString()+' / '+Number(comp.budget||0).toLocaleString()+' characters · '+Number((comp.excluded||[]).length)+' excluded chunks</p>'+(warnings.length?'<ul>'+warnings.map(function(x){return'<li>'+esc(x)+'</li>'}).join('')+'</ul>':'<p class="muted-note">No preview warnings.</p>')+'</article></div>';
+}
+async function loadVoiceMemory(){
+  var fan=document.getElementById('voice-fan-id'),output=document.getElementById('voice-memory-output'),result=document.getElementById('voice-evidence-result');if(!fan||!output||!result)return;result.textContent='Loading structured facts…';var d=await F('/api/human-delivery/memory?fan_id='+encodeURIComponent(fan.value.trim()));if(!d){result.textContent='Memory lookup failed';result.style.color='var(--red)';return}var rows=d.memories||[];result.textContent=rows.length+' memory records';result.style.color='var(--faint)';output.innerHTML=rows.length?'<div class="table-wrap"><table><thead><tr><th>Type</th><th>Value</th><th>Confidence</th><th>Evidence</th><th>Status</th><th></th></tr></thead><tbody>'+rows.map(function(m){return'<tr><td>'+esc(m.memory_type)+'</td><td>'+esc(m.display_value)+'</td><td>'+Math.round(Number(m.confidence||0)*100)+'%</td><td>'+esc(m.source_message_id)+'</td><td>'+esc(m.status)+'</td><td>'+(m.status==='active'?'<button class="btn-danger" data-action="deactivate-voice-memory" data-memory-id="'+Number(m.id)+'">Deactivate</button>':'')+'</td></tr>'}).join('')+'</tbody></table></div>':'<p class="muted-note">No structured memories found.</p>';
+}
+async function deactivateVoiceMemory(id){
+  if(!id||!confirm('Deactivate this memory so future prompts cannot select it?'))return;var r=await M('/api/human-delivery/memory/'+encodeURIComponent(id),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'deactivate'})});if(r.ok)loadVoiceMemory();
+}
+async function saveCreatorFact(){
+  var key=document.getElementById('voice-creator-fact-key'),value=document.getElementById('voice-creator-fact-value'),result=document.getElementById('voice-evidence-result');if(!key||!value||!result)return;var r=await M('/api/human-delivery/creator-facts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fact_key:key.value,fact_value:value.value,confidence:1})}),d=await r.json();result.textContent=r.ok?'Verified creator fact saved':'Failed: '+(d.error||'unknown');result.style.color=r.ok?'var(--green)':'var(--red)';
+}
+async function saveVoiceExample(){
+  var result=document.getElementById('voice-example-result');if(!result)return;var payload={stage:document.getElementById('voice-example-stage').value,fan_tone:document.getElementById('voice-example-tone').value,relationship_depth:document.getElementById('voice-example-depth').value,intended_act:document.getElementById('voice-example-act').value,language:document.getElementById('voice-example-language').value,good_response:document.getElementById('voice-example-good').value,anti_example:document.getElementById('voice-example-bad').value,status:'draft'};var r=await M('/api/human-delivery/examples',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),d=await r.json();result.textContent=r.ok?'Draft example saved; not live':'Failed: '+(d.error||'unknown');result.style.color=r.ok?'var(--green)':'var(--red)';
+}
 async function loadBrain(){
   var c=document.getElementById('content');
   c.innerHTML=pageHead('Intelligence','Conversation Brain','Inspect safe shadow reasoning, durable outcomes, and runtime controls.',botControlMarkup())+'<p class="muted-note">Loading Brain 2.0…</p>';
@@ -849,6 +907,13 @@ document.addEventListener('click',function(event){
   else if(action==='rollback-brain')rollbackBrain();
   else if(action==='save-brain-review')saveBrainReview(control.dataset.pair,control.dataset.winner);
   else if(action==='pause-brain-experiment')pauseBrainExperiment(control.dataset.id);
+  else if(action==='save-voice-document')saveVoiceDocument();
+  else if(action==='activate-voice-document')activateVoiceDocument(control.dataset.documentId);
+  else if(action==='run-voice-preview')runVoicePreview();
+  else if(action==='load-voice-memory')loadVoiceMemory();
+  else if(action==='deactivate-voice-memory')deactivateVoiceMemory(Number(control.dataset.memoryId));
+  else if(action==='save-creator-fact')saveCreatorFact();
+  else if(action==='save-voice-example')saveVoiceExample();
   else if(action==='save-brand-bible')saveBible();
   else if(action==='new-script')newScript();
   else if(action==='load-scripts')loadScripts();
@@ -870,7 +935,7 @@ document.addEventListener('click',function(event){
   else if(action==='select-media'&&Number.isInteger(stepIndex))selectMedia(stepIndex,control.dataset.mediaId||'',control.dataset.previewId||'');
 });
 document.addEventListener('input',function(event){if(event.target.id==='conversation-search')filterConversations(event.target.value)});
-document.addEventListener('change',function(event){if(event.target.id==='album-picker'){var stepIndex=Number(event.target.dataset.stepIndex);if(Number.isInteger(stepIndex))loadAlbumMedia(stepIndex)}});
+document.addEventListener('change',function(event){if(event.target.id==='album-picker'){var stepIndex=Number(event.target.dataset.stepIndex);if(Number.isInteger(stepIndex))loadAlbumMedia(stepIndex)}else if(event.target.id==='voice-document-select')selectVoiceDocument(event.target.value)});
 document.addEventListener('keydown',function(event){if(event.key==='Escape')closeDrawer()});
 window.addEventListener('hashchange',function(){navTo(location.hash.slice(1)||'dashboard',true)});
 

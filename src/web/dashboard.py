@@ -824,6 +824,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def webhook_control(self):
         return getattr(self.server, "webhook_control", None)
 
+    @property
+    def human_delivery(self):
+        return getattr(self.server, "human_delivery", None)
+
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
@@ -1010,6 +1014,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/brain/context": return self._brain_context(q)
         if p=="/api/brain/experiments": return self._brain_experiments()
         if p=="/api/brain/reviews": return self._brain_reviews(q)
+        if p=="/api/human-delivery/status": return self._human_delivery_status()
+        if p=="/api/human-delivery/documents": return self._human_delivery_documents()
+        if p=="/api/human-delivery/examples": return self._human_delivery_examples(q)
+        if p=="/api/human-delivery/creator-facts": return self._human_delivery_creator_facts()
+        if p=="/api/human-delivery/memory": return self._human_delivery_memory(q)
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1047,7 +1056,161 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/brain/rollback": return self._brain_rollback(b)
         if p=="/api/brain/reviews": return self._brain_review_save(b)
         if p=="/api/brain/experiments": return self._brain_experiments_save(b)
+        if p=="/api/human-delivery/documents": return self._human_delivery_document_save(b)
+        if p=="/api/human-delivery/examples": return self._human_delivery_example_save(b)
+        if p=="/api/human-delivery/creator-facts": return self._human_delivery_creator_fact_save(b)
+        if p.startswith("/api/human-delivery/documents/") and p.endswith("/activate"):
+            return self._human_delivery_document_activate(p)
+        if p.startswith("/api/human-delivery/memory/"):
+            return self._human_delivery_memory_update(p, b)
+        if p=="/api/human-delivery/preview": return self._human_delivery_preview(b)
         self.j({"error":"not found"},404)
+
+    def _human_delivery_service(self):
+        service = self.human_delivery
+        if service is None:
+            self.j({"error": "Human Delivery is unavailable"}, 503)
+            return None
+        return service
+
+    def _human_delivery_status(self):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            payload = service.status()
+        except Exception as error:
+            logger.warning(
+                "Human Delivery status failed safely: %s",
+                type(error).__name__,
+            )
+            return self.j({"error": "Human Delivery status is unavailable"}, 503)
+        return self.j(payload)
+
+    def _human_delivery_documents(self):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        return self.j({
+            "documents": service.list_documents(include_content=True),
+            "runtime_applied": False,
+            "live_prompt_unchanged": True,
+        })
+
+    def _human_delivery_document_save(self, body: str):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            document = service.create_revision(data)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "saved",
+            "document": document,
+            "runtime_applied": False,
+            "live_prompt_unchanged": True,
+        }, 201)
+
+    def _human_delivery_examples(self, query: dict):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        status = str(query.get("status", ["active"])[0])[:24]
+        return self.j({"examples": service.examples(status=status)})
+
+    def _human_delivery_example_save(self, body: str):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            example = service.create_example(data)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({"status": "saved", "example": example}, 201)
+
+    def _human_delivery_creator_facts(self):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        return self.j({"facts": service.creator_facts()})
+
+    def _human_delivery_creator_fact_save(self, body: str):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            fact = service.save_creator_fact(data)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({"status": "saved", "fact": fact}, 201)
+
+    def _human_delivery_memory(self, query: dict):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            fan_id = str(query.get("fan_id", [""])[0])
+            memories = service.memory(fan_id=fan_id)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({"memories": memories})
+
+    def _human_delivery_memory_update(self, path: str, body: str):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            parts = path.strip("/").split("/")
+            if len(parts) != 4:
+                raise ValueError("invalid memory path")
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            memory = service.update_memory(int(parts[3]), data)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({"status": "saved", "memory": memory})
+
+    def _human_delivery_document_activate(self, path: str):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            parts = path.strip("/").split("/")
+            if len(parts) != 5:
+                raise ValueError("invalid document activation path")
+            document = service.activate(int(parts[3]))
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "activated_for_review_store",
+            "document": document,
+            "runtime_applied": False,
+            "live_prompt_unchanged": True,
+        })
+
+    def _human_delivery_preview(self, body: str):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            preview = service.preview(data)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(preview)
 
     def _record_webhook_dead_letter(
         self,
@@ -3883,6 +4046,7 @@ class DashboardServer:
         crm_sync=None,
         ai_settings=None,
         chat_guidance=None,
+        human_delivery=None,
         credit_governor=None,
         webhook_control=None,
         webhook_endpoint_url: str = "",
@@ -3955,6 +4119,7 @@ class DashboardServer:
         self.server.crm_sync = crm_sync
         self.server.ai_settings = ai_settings
         self.server.chat_guidance = chat_guidance
+        self.server.human_delivery = human_delivery
         self.server.credit_governor = credit_governor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir

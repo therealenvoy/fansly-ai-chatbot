@@ -269,6 +269,9 @@ class FanMemoryV2Repository(_Repository):
         source_timestamp: datetime,
         contradiction_key: str | None = None,
         expires_at: datetime | None = None,
+        sensitivity_class: str = "standard",
+        contradiction_status: str = "clear",
+        source_event_id: str | None = None,
     ) -> int:
         now = utcnow()
         memory_key = contradiction_key or (
@@ -291,6 +294,13 @@ class FanMemoryV2Repository(_Repository):
             "last_confirmed_at": now,
             "expires_at": expires_at,
             "status": "active",
+            "sensitivity_class": str(sensitivity_class)[:32],
+            "contradiction_status": str(contradiction_status)[:32],
+            "source_event_id": (
+                str(source_event_id)[:128]
+                if source_event_id
+                else None
+            ),
             "created_at": now,
             "updated_at": now,
         }
@@ -306,6 +316,11 @@ class FanMemoryV2Repository(_Repository):
                 "display_value": values["display_value"],
                 "confidence": values["confidence"],
                 "importance": values["importance"],
+                "sensitivity_class": values["sensitivity_class"],
+                "contradiction_status": values[
+                    "contradiction_status"
+                ],
+                "source_event_id": values["source_event_id"],
                 "last_confirmed_at": now,
                 "updated_at": now,
             },
@@ -375,6 +390,80 @@ class FanMemoryV2Repository(_Repository):
                 select(FAN_MEMORIES_V2).where(FAN_MEMORIES_V2.c.id == memory_id)
             ).mappings().first()
         return dict(row) if row else None
+
+    def correct(
+        self,
+        memory_id: int,
+        *,
+        creator_id: str,
+        display_value: str,
+        confidence: float,
+        contradiction_status: str = "clear",
+        sensitivity_class: str = "standard",
+    ) -> dict | None:
+        """Apply an authenticated correction while retaining provenance."""
+        normalized_display = str(display_value or "").strip()
+        if not normalized_display:
+            raise ValueError("memory correction requires a value")
+        if len(normalized_display) > 2_000:
+            raise ValueError("memory correction is too long")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(FAN_MEMORIES_V2)
+                .where(
+                    and_(
+                        FAN_MEMORIES_V2.c.id == int(memory_id),
+                        FAN_MEMORIES_V2.c.creator_id == creator_id,
+                    )
+                )
+                .values(
+                    display_value=normalized_display,
+                    confidence=min(max(float(confidence), 0.0), 1.0),
+                    contradiction_status=str(
+                        contradiction_status
+                    )[:32],
+                    sensitivity_class=str(sensitivity_class)[:32],
+                    source_event_id=f"crm-correction:{int(now.timestamp())}",
+                    last_confirmed_at=now,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount != 1:
+                return None
+            row = connection.execute(
+                select(FAN_MEMORIES_V2).where(
+                    FAN_MEMORIES_V2.c.id == int(memory_id)
+                )
+            ).mappings().one()
+        return dict(row)
+
+    def deactivate(
+        self,
+        memory_id: int,
+        *,
+        creator_id: str,
+        reason: str = "operator_deactivated",
+    ) -> bool:
+        """Soft-delete memory so no future prompt selects it."""
+        result = None
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(FAN_MEMORIES_V2)
+                .where(
+                    and_(
+                        FAN_MEMORIES_V2.c.id == int(memory_id),
+                        FAN_MEMORIES_V2.c.creator_id == creator_id,
+                        FAN_MEMORIES_V2.c.status == "active",
+                    )
+                )
+                .values(
+                    status="inactive",
+                    contradiction_status=str(reason)[:32],
+                    updated_at=utcnow(),
+                )
+            )
+        return bool(result.rowcount)
 
 
 class FanConversationStateRepository(_Repository):

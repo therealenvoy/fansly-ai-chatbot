@@ -1,5 +1,6 @@
 from src.human_delivery.style import (
     apply_casing,
+    apply_rare_typo,
     fingerprint,
     repetition_score,
 )
@@ -35,3 +36,25 @@ def test_semantic_repetition_catches_template_reuse():
         "rainy nights are my favorite",
         ["what did u eat today?"],
     ) == 0.0
+
+
+def test_typos_are_off_by_default_deterministic_and_skip_serious_text():
+    text = "that sounds really amazing"
+    assert apply_rare_typo(text, enabled=False, seed="1") == text
+    changed = next(
+        (
+            apply_rare_typo(text, enabled=True, seed=str(seed))
+            for seed in range(500)
+            if apply_rare_typo(text, enabled=True, seed=str(seed)) != text
+        ),
+        None,
+    )
+    assert changed is not None
+    seed = next(
+        str(value)
+        for value in range(500)
+        if apply_rare_typo(text, enabled=True, seed=str(value)) == changed
+    )
+    assert apply_rare_typo(text, enabled=True, seed=seed) == changed
+    serious = "sorry you feel unsafe, please stop"
+    assert apply_rare_typo(serious, enabled=True, seed="1") == serious
