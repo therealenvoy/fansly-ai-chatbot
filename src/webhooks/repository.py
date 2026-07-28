@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Engine, and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -83,12 +83,21 @@ class WebhookEventRepository:
                 error_category=None,
                 provider_created_at=event.provider_created_at,
                 received_at=now,
+                last_received_at=now,
+                delivery_count=1,
+                duplicate_count=0,
                 processed_at=now,
             )
             event_insert = event_insert.on_conflict_do_nothing(
                 index_elements=["creator_id", "event_key"]
             )
             if connection.execute(event_insert).rowcount != 1:
+                self._record_duplicate(
+                    connection,
+                    creator_id=creator_id,
+                    event_key=event_key,
+                    received_at=now,
+                )
                 return WebhookIngestResult(False, None)
 
             message_state = self._upsert_message_state(
@@ -1167,13 +1176,239 @@ class WebhookEventRepository:
             error_category=error_category[:64],
             provider_created_at=None,
             received_at=now,
+            last_received_at=now,
+            delivery_count=1,
+            duplicate_count=0,
             processed_at=None,
         )
         statement = statement.on_conflict_do_nothing(
             index_elements=["creator_id", "event_key"]
         )
         with self.engine.begin() as connection:
-            return connection.execute(statement).rowcount == 1
+            if connection.execute(statement).rowcount == 1:
+                return True
+            self._record_duplicate(
+                connection,
+                creator_id=creator_id,
+                event_key=event_key[:64],
+                received_at=now,
+            )
+            return False
+
+    def webhook_metrics(self, *, creator_id: str) -> dict[str, object]:
+        """Return aggregate, content-free webhook operations telemetry."""
+        now = datetime.now(timezone.utc)
+        day_cutoff = now - timedelta(hours=24)
+        with self.engine.connect() as connection:
+            summary = connection.execute(
+                select(
+                    func.count(PROVIDER_WEBHOOK_EVENTS.c.event_key).label(
+                        "unique_events"
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            PROVIDER_WEBHOOK_EVENTS.c.delivery_count
+                        ),
+                        0,
+                    ).label("deliveries"),
+                    func.coalesce(
+                        func.sum(
+                            PROVIDER_WEBHOOK_EVENTS.c.duplicate_count
+                        ),
+                        0,
+                    ).label("duplicates"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    PROVIDER_WEBHOOK_EVENTS.c.status
+                                    == "dead_letter",
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("quarantined"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    PROVIDER_WEBHOOK_EVENTS.c.status
+                                    == "failed",
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("failed"),
+                    func.coalesce(
+                        func.sum(
+                            case(
+                                (
+                                    PROVIDER_WEBHOOK_EVENTS.c.status
+                                    == "accepted",
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        0,
+                    ).label("processed"),
+                ).where(
+                    PROVIDER_WEBHOOK_EVENTS.c.creator_id == creator_id
+                )
+            ).mappings().one()
+            recent_deliveries = connection.execute(
+                select(
+                    func.coalesce(
+                        func.sum(
+                            PROVIDER_WEBHOOK_EVENTS.c.delivery_count
+                        ),
+                        0,
+                    )
+                ).where(
+                    and_(
+                        PROVIDER_WEBHOOK_EVENTS.c.creator_id
+                        == creator_id,
+                        PROVIDER_WEBHOOK_EVENTS.c.last_received_at
+                        >= day_cutoff,
+                    )
+                )
+            ).scalar_one()
+            event_times = connection.execute(
+                select(
+                    PROVIDER_WEBHOOK_EVENTS.c.event_name,
+                    func.max(
+                        PROVIDER_WEBHOOK_EVENTS.c.last_received_at
+                    ).label("last_received_at"),
+                )
+                .where(
+                    PROVIDER_WEBHOOK_EVENTS.c.creator_id == creator_id
+                )
+                .group_by(PROVIDER_WEBHOOK_EVENTS.c.event_name)
+            ).mappings().all()
+            lag_rows = connection.execute(
+                select(
+                    PROVIDER_WEBHOOK_EVENTS.c.provider_created_at,
+                    PROVIDER_WEBHOOK_EVENTS.c.processed_at,
+                )
+                .where(
+                    and_(
+                        PROVIDER_WEBHOOK_EVENTS.c.creator_id
+                        == creator_id,
+                        PROVIDER_WEBHOOK_EVENTS.c.provider_created_at
+                        .is_not(None),
+                        PROVIDER_WEBHOOK_EVENTS.c.processed_at.is_not(
+                            None
+                        ),
+                    )
+                )
+                .order_by(
+                    PROVIDER_WEBHOOK_EVENTS.c.received_at.desc()
+                )
+                .limit(1000)
+            ).all()
+            mismatch = connection.execute(
+                select(
+                    PROVIDER_WEBHOOK_EVENTS.c.event_name,
+                    PROVIDER_WEBHOOK_EVENTS.c.error_category,
+                    PROVIDER_WEBHOOK_EVENTS.c.last_received_at,
+                )
+                .where(
+                    and_(
+                        PROVIDER_WEBHOOK_EVENTS.c.creator_id
+                        == creator_id,
+                        PROVIDER_WEBHOOK_EVENTS.c.status
+                        == "dead_letter",
+                    )
+                )
+                .order_by(
+                    PROVIDER_WEBHOOK_EVENTS.c.last_received_at.desc()
+                )
+                .limit(1)
+            ).mappings().first()
+            circuit = connection.execute(
+                select(
+                    PROVIDER_CIRCUIT_BREAKERS.c.is_open,
+                    PROVIDER_CIRCUIT_BREAKERS.c.reason_code,
+                    PROVIDER_CIRCUIT_BREAKERS.c.opened_at,
+                ).where(
+                    and_(
+                        PROVIDER_CIRCUIT_BREAKERS.c.creator_id
+                        == creator_id,
+                        PROVIDER_CIRCUIT_BREAKERS.c.provider
+                        == "onlyfansapi",
+                    )
+                )
+            ).mappings().first()
+
+        from .registry import EVENT_REGISTRY
+
+        last_by_family: dict[str, datetime] = {}
+        for row in event_times:
+            spec = EVENT_REGISTRY.get(row["event_name"])
+            occurred_at = row["last_received_at"]
+            if spec is None or occurred_at is None:
+                continue
+            current = last_by_family.get(spec.family)
+            if current is None or occurred_at > current:
+                last_by_family[spec.family] = occurred_at
+        lags = [
+            max(0.0, (processed - created).total_seconds())
+            for created, processed in lag_rows
+            if created is not None and processed is not None
+        ]
+        estimated_daily_credits = (
+            int(recent_deliveries) + 99
+        ) // 100
+        return {
+            "processed_count": int(summary["processed"]),
+            "unique_event_count": int(summary["unique_events"]),
+            "delivery_count": int(summary["deliveries"]),
+            "duplicate_count": int(summary["duplicates"]),
+            "quarantined_count": int(summary["quarantined"]),
+            "failed_count": int(summary["failed"]),
+            "processing_lag_seconds": {
+                "max": max(lags) if lags else 0.0,
+                "average": (
+                    sum(lags) / len(lags) if lags else 0.0
+                ),
+                "sample_size": len(lags),
+            },
+            "last_event_time_by_family": {
+                family: value.isoformat()
+                for family, value in sorted(last_by_family.items())
+            },
+            "last_permanent_schema_mismatch": (
+                {
+                    "event_name": mismatch["event_name"],
+                    "category": mismatch["error_category"],
+                    "occurred_at": mismatch[
+                        "last_received_at"
+                    ].isoformat(),
+                }
+                if mismatch is not None
+                else None
+            ),
+            "estimated_webhook_credits": {
+                "last_24_hours": estimated_daily_credits,
+                "monthly_at_current_rate": (
+                    estimated_daily_credits * 30
+                ),
+                "pricing_basis": "approximately_1_per_100_events",
+            },
+            "provider_circuit": {
+                "open": bool(circuit["is_open"]) if circuit else False,
+                "reason": circuit["reason_code"] if circuit else None,
+                "opened_at": (
+                    circuit["opened_at"].isoformat()
+                    if circuit and circuit["opened_at"]
+                    else None
+                ),
+            },
+        }
 
     def _insert_event(
         self,
@@ -1200,12 +1435,50 @@ class WebhookEventRepository:
             error_category=None,
             provider_created_at=event.provider_created_at,
             received_at=now,
+            last_received_at=now,
+            delivery_count=1,
+            duplicate_count=0,
             processed_at=now,
         )
         statement = statement.on_conflict_do_nothing(
             index_elements=["creator_id", "event_key"]
         )
-        return connection.execute(statement).rowcount == 1
+        if connection.execute(statement).rowcount == 1:
+            return True
+        self._record_duplicate(
+            connection,
+            creator_id=creator_id,
+            event_key=event.event_key,
+            received_at=now,
+        )
+        return False
+
+    @staticmethod
+    def _record_duplicate(
+        connection,
+        *,
+        creator_id: str,
+        event_key: str,
+        received_at: datetime,
+    ) -> None:
+        connection.execute(
+            update(PROVIDER_WEBHOOK_EVENTS)
+            .where(
+                and_(
+                    PROVIDER_WEBHOOK_EVENTS.c.creator_id == creator_id,
+                    PROVIDER_WEBHOOK_EVENTS.c.event_key == event_key,
+                )
+            )
+            .values(
+                delivery_count=(
+                    PROVIDER_WEBHOOK_EVENTS.c.delivery_count + 1
+                ),
+                duplicate_count=(
+                    PROVIDER_WEBHOOK_EVENTS.c.duplicate_count + 1
+                ),
+                last_received_at=received_at,
+            )
+        )
 
     def _upsert_message_state(
         self,

@@ -33,6 +33,7 @@ from src.sequences.models import (
 from src.sequences.repository import SequenceRepository
 from src.web.dashboard import DASHBOARD_HTML, MAX_BODY_BYTES, DashboardServer
 from src.webhooks.repository import WebhookIngestResult
+from src.webhooks.registry import EVENT_REGISTRY
 
 
 TEST_USER = "test-operator"
@@ -256,6 +257,11 @@ def _make_bot(db_url):
     bot.client._creator_fansly_id = "creator-native-1"
     bot.client.creator_fansly_id = "creator-native-1"
     bot.client.list_chats.return_value = []
+    bot.client.list_fansly_webhooks.return_value = []
+    bot.client.list_available_webhook_events.return_value = {
+        "events": [],
+        "credits_used": 0,
+    }
     bot.client.verify_auth.return_value = True
     bot.client.capabilities = ProviderCapabilities(
         supports_free_media_messages=True,
@@ -302,6 +308,12 @@ def _make_bot(db_url):
         True,
         None,
     )
+    bot.webhook_event_repo.webhook_metrics.return_value = {
+        "delivery_count": 0,
+        "duplicate_count": 0,
+        "quarantined_count": 0,
+        "provider_circuit": {"open": False},
+    }
     bot.ai_settings = MagicMock()
     bot.ai_settings.status.return_value = {
         "provider": "DeepSeek",
@@ -366,6 +378,10 @@ def running_server(db_url, tmp_path):
         brand_bible_path=str(tmp_path / "brand_bible.md"),
         ai_settings=bot.ai_settings,
         chat_guidance=guidance,
+        webhook_endpoint_url=(
+            "https://bot.example/webhooks/onlyfansapi/fansly"
+        ),
+        webhook_registration_enabled=False,
     )
     port = server.server.server_address[1]
 
@@ -621,6 +637,64 @@ class TestOnlyFansApiFanslyWebhook:
         assert body == {
             "error": "webhook persistence unavailable"
         }
+
+
+class TestWebhookControlCenter:
+    def test_authenticated_status_is_sanitized_and_lists_all_handlers(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body = _get(host, "/api/webhooks/control")
+
+        assert status == 200
+        assert body["registration_enabled"] is False
+        assert len(body["desired_events"]) == 14
+        assert len(body["handler_readiness"]) == 25
+        serialized = json.dumps(body)
+        assert TEST_ONLYFANSAPI_WEBHOOK_SECRET not in serialized
+        assert "signing_secret" not in serialized
+
+    def test_reconcile_is_blocked_while_deployment_gate_is_false(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post(host, "/api/webhooks/reconcile", {})
+
+        assert status == 409
+        assert "disabled by deployment policy" in body["error"]
+        bot.client.ensure_fansly_webhook.assert_not_called()
+
+    def test_explicit_health_check_compares_zero_credit_live_catalog(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        bot.client.list_available_webhook_events.return_value = {
+            "events": [
+                {
+                    "value": spec.name,
+                    "description": spec.description,
+                }
+                for spec in EVENT_REGISTRY.values()
+            ],
+            "credits_used": 0,
+        }
+
+        status, body = _post(
+            host,
+            "/api/webhooks/health-check",
+            {},
+        )
+
+        assert status == 200
+        assert body["healthy"] is True
+        assert body["catalog_event_count"] == 25
+        assert body["catalog_credits_used"] == 0
+        bot.client.list_available_webhook_events.assert_called_once()
 
 
 class TestBotStatusEndpoints:

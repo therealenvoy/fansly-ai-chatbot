@@ -335,34 +335,79 @@ class FanslyApiClientImpl(FanslyApiClient):
             return payload
         raise ProviderRequestError(f"{operation} failed")
 
-    def ensure_message_webhook(
-        self,
-        endpoint_url: str,
-        signing_secret: str,
-    ) -> dict:
-        """Create or reconcile the signed, account-scoped Fansly webhook."""
-        endpoint_url = endpoint_url.strip()
-        signing_secret = signing_secret.strip()
-        if not endpoint_url.startswith("https://"):
-            raise ValueError("Webhook endpoint must use HTTPS")
-        if len(signing_secret) < 32:
-            raise ValueError("Webhook signing secret must be at least 32 characters")
-
+    def list_fansly_webhooks(self) -> list[dict]:
+        """Return provider webhook registrations through a zero-credit control call."""
         payload = self._request(
             "GET",
             "/api/webhooks",
             operation="webhooks.list",
             request_class="control",
+            expected_credits=0,
+        )
+        rows = payload.get("data", []) if isinstance(payload, dict) else payload
+        return [row for row in rows if isinstance(row, dict)]
+
+    def list_available_webhook_events(self) -> dict:
+        """Return the live Fansly event catalog and reported credit use."""
+        payload = self._request(
+            "GET",
+            "/api/webhooks/events",
+            operation="webhooks.events",
+            request_class="control",
+            expected_credits=0,
         )
         rows = payload.get("data", []) if isinstance(payload, dict) else []
-        existing = next(
-            (
-                row
-                for row in rows
-                if isinstance(row, dict) and row.get("url") == endpoint_url
-            ),
-            None,
+        events = [
+            {
+                "value": str(row.get("value") or ""),
+                "description": str(row.get("description") or ""),
+            }
+            for row in rows
+            if isinstance(row, dict) and row.get("value")
+        ]
+        used, _ = self._credit_meta(payload)
+        return {"events": events, "credits_used": used}
+
+    def ensure_fansly_webhook(
+        self,
+        endpoint_url: str,
+        signing_secret: str,
+        event_names: list[str] | tuple[str, ...],
+    ) -> dict:
+        """Create or reconcile the signed, account-scoped Fansly webhook."""
+        endpoint_url = endpoint_url.strip()
+        signing_secret = signing_secret.strip()
+        events = sorted(
+            {
+                str(event_name).strip()
+                for event_name in event_names
+                if str(event_name).strip()
+            }
         )
+        if not endpoint_url.startswith("https://"):
+            raise ValueError("Webhook endpoint must use HTTPS")
+        if len(signing_secret) < 32:
+            raise ValueError("Webhook signing secret must be at least 32 characters")
+        if not events or any(
+            not event_name.startswith("fansly.")
+            for event_name in events
+        ):
+            raise ValueError("Webhook events must be non-empty Fansly events")
+
+        matching = [
+            row
+            for row in self.list_fansly_webhooks()
+            if str(
+                row.get("url") or row.get("endpoint_url") or ""
+            ).strip()
+            == endpoint_url
+        ]
+        if len(matching) > 1:
+            raise UnsupportedProviderFeature(
+                "Multiple webhooks already use the owned endpoint; "
+                "refusing ambiguous reconciliation"
+            )
+        existing = matching[0] if matching else None
         if existing is not None and not existing.get("has_signing_secret"):
             raise UnsupportedProviderFeature(
                 "The production webhook endpoint already exists without a signing secret; "
@@ -378,8 +423,9 @@ class FanslyApiClientImpl(FanslyApiClient):
                 json={
                     "endpoint_url": endpoint_url,
                     "signing_secret": signing_secret,
-                    "events": ["fansly.messages.received"],
+                    "events": events,
                 },
+                expected_credits=0,
             )
             existing = created.get("data", {})
             if not existing.get("has_signing_secret"):
@@ -399,18 +445,91 @@ class FanslyApiClientImpl(FanslyApiClient):
             request_class="control",
             json={
                 "endpoint_url": endpoint_url,
-                "events": ["fansly.messages.received"],
+                "events": events,
                 "enabled": True,
                 "account_scope": "inclusive",
                 "account_ids": [self.account_id],
             },
+            expected_credits=0,
         )
         result = updated.get("data", {})
         if not result.get("enabled"):
             raise UnsupportedProviderFeature(
                 "OnlyFansAPI did not confirm that the Fansly webhook is enabled"
             )
+        returned_url = str(
+            result.get("url") or result.get("endpoint_url") or ""
+        ).strip()
+        if returned_url and returned_url != endpoint_url:
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI confirmed a different webhook endpoint"
+            )
+        if set(result.get("events") or []) != set(events):
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI did not confirm the requested event set"
+            )
+        if (
+            result.get("account_scope") != "inclusive"
+            or set(result.get("account_ids") or []) != {self.account_id}
+        ):
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI did not confirm the requested account scope"
+            )
         return result
+
+    def pause_fansly_webhook(self, endpoint_url: str) -> dict:
+        """Pause exactly one webhook owned by this endpoint; never delete it."""
+        endpoint_url = endpoint_url.strip()
+        matching = [
+            row
+            for row in self.list_fansly_webhooks()
+            if str(
+                row.get("url") or row.get("endpoint_url") or ""
+            ).strip()
+            == endpoint_url
+        ]
+        if len(matching) != 1:
+            raise UnsupportedProviderFeature(
+                "Expected exactly one webhook at the owned endpoint"
+            )
+        existing = matching[0]
+        webhook_id = str(existing.get("id") or "").strip()
+        if not webhook_id:
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI webhook response did not contain an id"
+            )
+        updated = self._request(
+            "PUT",
+            f"/api/webhooks/{webhook_id}",
+            operation="webhooks.pause",
+            request_class="control",
+            expected_credits=0,
+            json={
+                "endpoint_url": endpoint_url,
+                "events": list(existing.get("events") or []),
+                "enabled": False,
+                "account_scope": existing.get("account_scope", "inclusive"),
+                "account_ids": list(existing.get("account_ids") or []),
+            },
+        )
+        result = updated.get("data", {})
+        if result.get("enabled") is not False:
+            raise UnsupportedProviderFeature(
+                "OnlyFansAPI did not confirm that the webhook is paused"
+            )
+        return result
+
+    def ensure_message_webhook(
+        self,
+        endpoint_url: str,
+        signing_secret: str,
+    ) -> dict:
+        """Backward-compatible one-event registration wrapper."""
+        return self.ensure_fansly_webhook(
+            endpoint_url,
+            signing_secret,
+            ["fansly.messages.received"],
+        )
 
     # ─── CHATS ───────────────────────────────────────────
 

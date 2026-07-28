@@ -205,8 +205,20 @@ def test_received_event_commits_ledger_history_and_inbound_once():
             "inbound": connection.execute(
                 select(func.count(INBOUND_MESSAGES.c.id))
             ).scalar_one(),
+            "duplicates": connection.execute(
+                select(
+                    func.sum(
+                        PROVIDER_WEBHOOK_EVENTS.c.duplicate_count
+                    )
+                )
+            ).scalar_one(),
         }
-    assert counts == {"events": 1, "messages": 1, "inbound": 1}
+    assert counts == {
+        "events": 1,
+        "messages": 1,
+        "inbound": 1,
+        "duplicates": 1,
+    }
 
 
 def test_missing_provider_timestamp_is_rejected_not_replaced_with_now():

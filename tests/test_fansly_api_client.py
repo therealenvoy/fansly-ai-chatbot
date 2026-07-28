@@ -212,7 +212,7 @@ class TestWebhookRegistration:
         client.client.request = MagicMock(side_effect=[
             _resp({"data": []}),
             _resp({"data": {"id": "wh_new", "url": "https://bot.example/webhooks/onlyfansapi/fansly", "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": False}}),
-            _resp({"data": {"id": "wh_new", "url": "https://bot.example/webhooks/onlyfansapi/fansly", "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": True}}),
+            _resp({"data": {"id": "wh_new", "url": "https://bot.example/webhooks/onlyfansapi/fansly", "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": True, "account_scope": "inclusive", "account_ids": ["fansly_acct_123"]}}),
         ])
 
         result = client.ensure_message_webhook(
@@ -245,7 +245,7 @@ class TestWebhookRegistration:
         client._account_id = "fansly_acct_123"
         client.client.request = MagicMock(side_effect=[
             _resp({"data": [{"id": "wh_existing", "url": endpoint, "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": False}]}),
-            _resp({"data": {"id": "wh_existing", "url": endpoint, "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": True}}),
+            _resp({"data": {"id": "wh_existing", "url": endpoint, "events": ["fansly.messages.received"], "has_signing_secret": True, "enabled": True, "account_scope": "inclusive", "account_ids": ["fansly_acct_123"]}}),
         ])
 
         result = client.ensure_message_webhook(endpoint, "s" * 64)
@@ -268,6 +268,83 @@ class TestWebhookRegistration:
 
         with pytest.raises(UnsupportedProviderFeature, match="without a signing secret"):
             client.ensure_message_webhook(endpoint, "s" * 64)
+
+        client.client.request.assert_called_once_with("GET", "/api/webhooks")
+
+    def test_reconciles_exact_multi_event_profile_without_touching_others(self):
+        endpoint = "https://bot.example/webhooks/onlyfansapi/fansly"
+        other = "https://other.example/webhook"
+        events = [
+            "fansly.messages.received",
+            "fansly.messages.sent",
+        ]
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock(side_effect=[
+            _resp({"data": [
+                {
+                    "id": "wh_other",
+                    "url": other,
+                    "events": ["fansly.messages.received"],
+                    "has_signing_secret": True,
+                    "enabled": True,
+                },
+                {
+                    "id": "wh_owned",
+                    "url": endpoint,
+                    "events": ["fansly.messages.received"],
+                    "has_signing_secret": True,
+                    "enabled": False,
+                },
+            ]}),
+            _resp({"data": {
+                "id": "wh_owned",
+                "url": endpoint,
+                "events": events,
+                "has_signing_secret": True,
+                "enabled": True,
+                "account_scope": "inclusive",
+                "account_ids": ["fansly_acct_123"],
+            }}),
+        ])
+
+        result = client.ensure_fansly_webhook(
+            endpoint,
+            "s" * 64,
+            events,
+        )
+
+        assert result["id"] == "wh_owned"
+        update = client.client.request.call_args_list[1]
+        assert update.args == ("PUT", "/api/webhooks/wh_owned")
+        assert update.kwargs["json"]["events"] == sorted(events)
+
+    def test_refuses_ambiguous_duplicate_owned_endpoints(self):
+        endpoint = "https://bot.example/webhooks/onlyfansapi/fansly"
+        client = FanslyApiClientImpl(api_key="sk_test")
+        client._account_id = "fansly_acct_123"
+        client.client.request = MagicMock(return_value=_resp({"data": [
+            {
+                "id": "wh_a",
+                "url": endpoint,
+                "has_signing_secret": True,
+            },
+            {
+                "id": "wh_b",
+                "url": endpoint,
+                "has_signing_secret": True,
+            },
+        ]}))
+
+        with pytest.raises(
+            UnsupportedProviderFeature,
+            match="Multiple webhooks",
+        ):
+            client.ensure_fansly_webhook(
+                endpoint,
+                "s" * 64,
+                ["fansly.messages.received"],
+            )
 
         client.client.request.assert_called_once_with("GET", "/api/webhooks")
 

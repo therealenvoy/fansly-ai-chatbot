@@ -446,6 +446,9 @@ PROVIDER_WEBHOOK_EVENTS = Table(
     Column("error_category", String(64), nullable=True),
     Column("provider_created_at", DateTime(timezone=True), nullable=True),
     Column("received_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("last_received_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("delivery_count", Integer, nullable=False, default=1),
+    Column("duplicate_count", Integer, nullable=False, default=0),
     Column("processed_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint(
         "creator_id",

@@ -36,6 +36,7 @@ from .webhooks.registration import (
     production_webhook_url,
     resolve_signing_secret,
 )
+from .webhooks.registry import eligible_event_names
 from .settings.store import SettingsStore
 from .settings.ai import (
     AISettingsError,
@@ -120,6 +121,10 @@ WEBHOOK_REGISTRATION_ENABLED = _env_bool(
     "WEBHOOK_REGISTRATION_ENABLED",
     False,
 )
+WEBHOOK_EVENT_PROFILE = os.getenv(
+    "WEBHOOK_EVENT_PROFILE",
+    "core_v1",
+).strip()
 REPLY_DELAY_MIN_SECONDS = max(
     0,
     int(os.getenv("REPLY_DELAY_MIN_SECONDS", "5")),
@@ -575,6 +580,9 @@ dashboard = DashboardServer(
     chat_guidance=chat_guidance,
     credit_governor=provider_credit_governor,
     onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
+    webhook_endpoint_url=ONLYFANSAPI_WEBHOOK_URL,
+    webhook_registration_enabled=WEBHOOK_REGISTRATION_ENABLED,
+    webhook_event_profile=WEBHOOK_EVENT_PROFILE,
     inbound_wakeup=reply_wakeup,
 )
 
@@ -762,7 +770,7 @@ def run_webhook_registration() -> None:
             "Automatic webhook registration skipped: no strong signing-secret source"
         )
         return
-    ensure_webhook = getattr(client, "ensure_message_webhook", None)
+    ensure_webhook = getattr(client, "ensure_fansly_webhook", None)
     if not callable(ensure_webhook):
         logger.warning(
             "Automatic webhook registration is unavailable for this provider client"
@@ -773,11 +781,12 @@ def run_webhook_registration() -> None:
             webhook = ensure_webhook(
                 ONLYFANSAPI_WEBHOOK_URL,
                 ONLYFANSAPI_WEBHOOK_SECRET,
+                eligible_event_names(WEBHOOK_EVENT_PROFILE),
             )
         logger.info(
-            "OnlyFansAPI Fansly webhook active: id=%s event=%s",
+            "OnlyFansAPI Fansly webhook active: id=%s profile=%s",
             webhook.get("id", "unknown"),
-            "fansly.messages.received",
+            WEBHOOK_EVENT_PROFILE,
         )
     except Exception:
         logger.exception(

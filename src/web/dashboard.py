@@ -62,6 +62,10 @@ from ..webhooks.gateway import (
     WebhookAccountMismatch,
     validate_gateway_event,
 )
+from ..webhooks.control import (
+    WebhookControlError,
+    WebhookControlService,
+)
 from ..webhooks.onlyfansapi import (
     InvalidWebhookEvent,
     DOMAIN_EVENT_NAMES,
@@ -816,6 +820,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def ai_settings(self):
         return getattr(self.server, "ai_settings", None)
 
+    @property
+    def webhook_control(self):
+        return getattr(self.server, "webhook_control", None)
+
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
@@ -995,6 +1003,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/fan-progress/"): return self._fan_progress(p.rsplit("/",1)[-1])
         if p=="/api/bot/status": return self._bot_status()
         if p=="/api/operations": return self._operations()
+        if p=="/api/webhooks/control": return self._webhook_control_status()
         if p=="/api/brain/status": return self._brain_status()
         if p=="/api/brain/metrics": return self._brain_metrics()
         if p=="/api/brain/runs": return self._brain_runs(q)
@@ -1031,6 +1040,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_update(p.rsplit("/",1)[-1], b)
         if p=="/api/bot/toggle": return self._bot_toggle(b)
         if p=="/api/provider/credits/reset": return self._provider_credit_reset(b)
+        if p=="/api/webhooks/reconcile": return self._webhook_reconcile()
+        if p=="/api/webhooks/pause": return self._webhook_pause()
+        if p=="/api/webhooks/health-check": return self._webhook_health_check()
         if p=="/api/brain/settings": return self._brain_settings_save(b)
         if p=="/api/brain/rollback": return self._brain_rollback(b)
         if p=="/api/brain/reviews": return self._brain_review_save(b)
@@ -3163,6 +3175,69 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.server.provider_error = None
         return self.j({"status": "reset", "circuit_open": False})
 
+    def _webhook_control_status(self):
+        if self.webhook_control is None:
+            return self.j(
+                {"error": "webhook controls are unavailable"},
+                503,
+            )
+        try:
+            return self.j(self.webhook_control.status())
+        except Exception:
+            logger.exception("Failed to load webhook control status")
+            return self.j(
+                {"error": "webhook status could not be loaded"},
+                503,
+            )
+
+    def _webhook_reconcile(self):
+        if self.webhook_control is None:
+            return self.j(
+                {"error": "webhook controls are unavailable"},
+                503,
+            )
+        try:
+            return self.j(self.webhook_control.reconcile())
+        except WebhookControlError as error:
+            return self.j({"error": str(error)}, 409)
+        except Exception:
+            logger.exception("Webhook reconciliation failed")
+            return self.j(
+                {"error": "webhook reconciliation failed"},
+                502,
+            )
+
+    def _webhook_pause(self):
+        if self.webhook_control is None:
+            return self.j(
+                {"error": "webhook controls are unavailable"},
+                503,
+            )
+        try:
+            return self.j(self.webhook_control.pause())
+        except WebhookControlError as error:
+            return self.j({"error": str(error)}, 409)
+        except Exception:
+            logger.exception("Webhook pause failed")
+            return self.j({"error": "webhook pause failed"}, 502)
+
+    def _webhook_health_check(self):
+        if self.webhook_control is None:
+            return self.j(
+                {"error": "webhook controls are unavailable"},
+                503,
+            )
+        try:
+            return self.j(self.webhook_control.health_check())
+        except WebhookControlError as error:
+            return self.j({"error": str(error)}, 409)
+        except Exception:
+            logger.exception("Webhook health check failed")
+            return self.j(
+                {"error": "webhook health check failed"},
+                502,
+            )
+
     def _operations(self):
         pipeline_counts = {}
         crm_sync = {}
@@ -3815,6 +3890,10 @@ class DashboardServer:
         ai_settings=None,
         chat_guidance=None,
         credit_governor=None,
+        webhook_control=None,
+        webhook_endpoint_url: str = "",
+        webhook_registration_enabled: bool = False,
+        webhook_event_profile: str = "core_v1",
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
         if allowed_hosts is None:
@@ -3886,6 +3965,32 @@ class DashboardServer:
             if onlyfansapi_webhook_secret is None
             else onlyfansapi_webhook_secret
         ).strip()
+        if webhook_control is None and self.server.client is not None:
+            repository = getattr(
+                self.server.bot,
+                "webhook_event_repo",
+                None,
+            )
+            credit_snapshot = (
+                credit_governor.snapshot
+                if credit_governor is not None
+                else None
+            )
+            webhook_control = WebhookControlService(
+                client=self.server.client,
+                repository=repository,
+                creator_id=self.server.creator_id,
+                endpoint_url=webhook_endpoint_url,
+                signing_secret=(
+                    self.server.onlyfansapi_webhook_secret
+                ),
+                registration_enabled=(
+                    webhook_registration_enabled
+                ),
+                event_profile=webhook_event_profile,
+                credit_snapshot=credit_snapshot,
+            )
+        self.server.webhook_control = webhook_control
         self.server.inbound_wakeup = inbound_wakeup
         self.server.script_repo = (
             ScriptTemplateRepository(
