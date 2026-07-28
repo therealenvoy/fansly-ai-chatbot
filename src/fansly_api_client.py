@@ -424,6 +424,8 @@ class FanslyApiClientImpl(FanslyApiClient):
                     "endpoint_url": endpoint_url,
                     "signing_secret": signing_secret,
                     "events": events,
+                    "account_scope": "inclusive",
+                    "account_ids": [self.account_id],
                 },
                 expected_credits=0,
             )

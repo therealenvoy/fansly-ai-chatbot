@@ -228,6 +228,8 @@ class TestWebhookRegistration:
             "endpoint_url": "https://bot.example/webhooks/onlyfansapi/fansly",
             "signing_secret": "s" * 64,
             "events": ["fansly.messages.received"],
+            "account_scope": "inclusive",
+            "account_ids": ["fansly_acct_123"],
         }
         update_call = client.client.request.call_args_list[2]
         assert update_call.args == ("PUT", "/api/webhooks/wh_new")
