@@ -180,20 +180,19 @@ def test_received_event_commits_ledger_history_and_inbound_once():
     repository = WebhookEventRepository(engine)
     event = _event()
 
-    first = repository.ingest_received(
-        creator_id="creator-a",
-        event=event,
-        available_at=datetime.now(timezone.utc),
-    )
-    duplicate = repository.ingest_received(
-        creator_id="creator-a",
-        event=event,
-        available_at=datetime.now(timezone.utc),
-    )
+    results = [
+        repository.ingest_received(
+            creator_id="creator-a",
+            event=event,
+            available_at=datetime.now(timezone.utc),
+        )
+        for _ in range(10)
+    ]
+    first, *duplicates = results
 
     assert first.created is True
     assert first.inbound_message_id is not None
-    assert duplicate.created is False
+    assert all(duplicate.created is False for duplicate in duplicates)
     with engine.connect() as connection:
         counts = {
             "events": connection.execute(
@@ -217,7 +216,7 @@ def test_received_event_commits_ledger_history_and_inbound_once():
         "events": 1,
         "messages": 1,
         "inbound": 1,
-        "duplicates": 1,
+        "duplicates": 9,
     }
 
 

@@ -500,6 +500,23 @@ class TestOnlyFansApiFanslyWebhook:
         assert event.chat_id == "chat-1"
         assert event.fan_id == "fan-1"
 
+    def test_signed_gateway_uses_startup_cached_provider_identity(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        bot.client.account_id = "must-not-be-read-in-request"
+        bot.client.creator_fansly_id = "must-not-be-read-in-request"
+
+        status, body = _post_onlyfansapi_webhook(
+            host,
+            self._payload(),
+        )
+
+        assert status == 200
+        assert body == {"accepted": True, "duplicate": False}
+        bot.ingest_webhook_message.assert_called_once()
+
     def test_invalid_signature_is_rejected_before_ingestion(
         self,
         running_server,

@@ -1097,9 +1097,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 raw,
                 self.headers,
                 signing_secret=signing_secret,
-                expected_account_id=str(
-                    getattr(self.client, "account_id", "")
-                ),
+                expected_account_id=self.server.provider_account_id,
             )
         except InvalidWebhookSignature:
             return self.j({"error": "invalid signature"}, 401)
@@ -1154,11 +1152,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 202,
             )
         try:
-            expected_account_id = str(
-                getattr(self.client, "account_id", "")
-            )
-            creator_fansly_id = str(
-                getattr(self.client, "creator_fansly_id", "")
+            expected_account_id = self.server.provider_account_id
+            creator_fansly_id = (
+                self.server.provider_creator_fansly_id
             )
             if event_name == "fansly.messages.received":
                 event = OnlyFansApiFanslyMessage.from_payload(
@@ -1341,9 +1337,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             return self.j({"error": "missing webhook data"}, 400)
         provider_account_id = str(payload.get("accountId", "")).strip()
-        expected_account_id = str(
-            getattr(self.client, "account_id", "")
-        ).strip()
+        expected_account_id = self.server.provider_account_id
         if (
             not provider_account_id
             or provider_account_id != expected_account_id
@@ -1356,9 +1350,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         creator_fansly_id = str(
             data.get("correlationAccountId", "")
         ).strip()
-        known_creator_fansly_id = str(
-            getattr(self.client, "_creator_fansly_id", "") or ""
-        ).strip()
+        known_creator_fansly_id = (
+            self.server.provider_creator_fansly_id
+        )
         if (
             known_creator_fansly_id
             and creator_fansly_id != known_creator_fansly_id
@@ -3894,6 +3888,8 @@ class DashboardServer:
         webhook_endpoint_url: str = "",
         webhook_registration_enabled: bool = False,
         webhook_event_profile: str = "core_v1",
+        provider_account_id: Optional[str] = None,
+        provider_creator_fansly_id: Optional[str] = None,
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
         if allowed_hosts is None:
@@ -3920,6 +3916,31 @@ class DashboardServer:
         self.server.client = client or (
             bot.client if bot is not None else None
         )
+        if provider_account_id is None:
+            try:
+                provider_account_id = str(
+                    getattr(self.server.client, "account_id", "") or ""
+                )
+            except Exception:
+                provider_account_id = ""
+        if provider_creator_fansly_id is None:
+            try:
+                provider_creator_fansly_id = str(
+                    getattr(
+                        self.server.client,
+                        "creator_fansly_id",
+                        "",
+                    )
+                    or ""
+                )
+            except Exception:
+                provider_creator_fansly_id = ""
+        self.server.provider_account_id = str(
+            provider_account_id or ""
+        ).strip()
+        self.server.provider_creator_fansly_id = str(
+            provider_creator_fansly_id or ""
+        ).strip()
         self.server.creator_id = creator_id or (
             bot.creator_id if bot is not None else "sunny_charm"
         )
