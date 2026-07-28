@@ -110,3 +110,37 @@ def test_health_check_reports_catalog_drift_without_mutation():
         "fansly.messages.read"
     ]
     client.ensure_fansly_webhook.assert_not_called()
+
+
+def test_health_check_separates_fansly_and_provider_catalog_counts():
+    service, client = _service()
+    fansly_events = [
+        {
+            "value": spec.name,
+            "description": spec.description,
+        }
+        for spec in EVENT_REGISTRY.values()
+    ]
+    client.list_available_webhook_events.return_value = {
+        "events": [
+            *fansly_events,
+            {
+                "value": "onlyfans.messages.received",
+                "description": "An unrelated provider event",
+            },
+        ],
+        "credits_used": 0,
+    }
+
+    result = service.health_check()
+
+    assert result["catalog_event_count"] == len(EVENT_REGISTRY)
+    assert result["provider_catalog_event_count"] == (
+        len(EVENT_REGISTRY) + 1
+    )
+    assert result["catalog_drift"] == {
+        "missing": [],
+        "unexpected": [],
+        "description_mismatches": [],
+    }
+    assert result["healthy"] is True

@@ -240,7 +240,15 @@ class WebhookControlService:
                 "Live Fansly event catalog inspection is unavailable"
             )
         catalog = method()
-        drift = compare_live_catalog(catalog.get("events") or [])
+        provider_events = catalog.get("events") or []
+        fansly_events = [
+            event
+            for event in provider_events
+            if str(
+                event.get("value") or event.get("name") or ""
+            ).startswith("fansly.")
+        ]
+        drift = compare_live_catalog(provider_events)
         credits_used = catalog.get("credits_used")
         if credits_used not in (0, None):
             raise WebhookControlError(
@@ -248,7 +256,8 @@ class WebhookControlService:
             )
         metrics = self._metrics()
         return {
-            "catalog_event_count": len(catalog.get("events") or []),
+            "catalog_event_count": len(fansly_events),
+            "provider_catalog_event_count": len(provider_events),
             "catalog_credits_used": credits_used,
             "catalog_drift": {
                 "missing": list(drift.missing),
