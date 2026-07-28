@@ -67,21 +67,24 @@ def _sent_event(
     *,
     message_id="creator-message-a",
     created_at="2026-07-28T00:01:00Z",
+    payload_overrides=None,
 ):
+    payload = {
+        "id": message_id,
+        "groupId": "chat-a",
+        "senderId": "creator-a-provider-id",
+        "recipientId": "fan-a",
+        "content": "creator reply",
+        "createdAt": created_at,
+    }
+    payload.update(payload_overrides or {})
     return OnlyFansApiFanslySentMessage.from_payload(
         {
             "event": "fansly.messages.sent",
             "event_id": f"sent-{message_id}",
             "version": "1",
             "account_id": "account-a",
-            "payload": {
-                "id": message_id,
-                "groupId": "chat-a",
-                "senderId": "creator-a-provider-id",
-                "recipientId": "fan-a",
-                "content": "creator reply",
-                "createdAt": created_at,
-            },
+            "payload": payload,
         },
         expected_account_id="account-a",
         creator_fansly_id="creator-a-provider-id",
@@ -318,6 +321,31 @@ def test_manual_sent_event_cancels_pending_reply_and_never_enqueues_inbound():
     assert creator_messages[0]["source_class"] == "manual"
 
 
+@pytest.mark.parametrize(
+    ("payload_overrides", "matched_outbox", "expected"),
+    (
+        ({}, object(), "ai"),
+        ({"automationId": "automation-a"}, None, "native_automation"),
+        ({"integrationId": "integration-a"}, None, "external_api"),
+        ({}, None, "manual"),
+    ),
+)
+def test_sent_source_class_distinguishes_every_creator_origin(
+    payload_overrides,
+    matched_outbox,
+    expected,
+):
+    event = _sent_event(payload_overrides=payload_overrides)
+
+    assert (
+        WebhookEventRepository._sent_source_class(
+            event,
+            matched_outbox,
+        )
+        == expected
+    )
+
+
 def test_out_of_order_sent_and_received_converge_to_newest_speaker():
     for order in ("sent_first", "received_first"):
         engine = _engine()
@@ -543,7 +571,16 @@ def test_lifecycle_events_update_fan_without_contact_work():
     assert outbox_count == 0
 
 
-def test_transaction_and_purchase_share_revenue_without_double_counting():
+@pytest.mark.parametrize(
+    "purchase_event_name",
+    (
+        "fansly.media.purchased",
+        "fansly.stories.purchased",
+    ),
+)
+def test_transaction_and_purchase_share_revenue_without_double_counting(
+    purchase_event_name,
+):
     engine = _engine()
     repository = WebhookEventRepository(engine)
 
@@ -559,10 +596,10 @@ def test_transaction_and_purchase_share_revenue_without_double_counting():
     repository.ingest_domain(
         creator_id="creator-a",
         event=_domain_event(
-            "fansly.media.purchased",
+            purchase_event_name,
             "purchase-event",
             transaction_id="transaction-a",
-            reference_id="media-a",
+            reference_id="purchased-content-a",
         ),
     )
 

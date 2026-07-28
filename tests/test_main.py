@@ -540,6 +540,16 @@ def test_crm_backfill_uses_dedicated_short_interval(
 class TestCreditAwarenessLogging:
     """Webhook-first startup logging must not invent a polling baseline."""
 
+    def test_recovery_interval_cannot_run_more_than_every_six_hours(
+        self,
+        module,
+    ):
+        os.environ["RECONCILIATION_INTERVAL"] = "60"
+
+        importlib.reload(module)
+
+        assert module.RECONCILIATION_INTERVAL == 21600
+
     def test_logs_bounded_webhook_recovery_policy(self, module, caplog):
         os.environ["POLL_INTERVAL"] = "300"
         importlib.reload(module)
