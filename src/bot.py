@@ -12,7 +12,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING
 
-from .fansly_client import FanslyApiClient, ChatInfo, MessageInfo
+from .fansly_client import (
+    FanslyApiClient, ChatInfo, MessageInfo, AuthError,
+    PaymentRequiredError, ProviderDeliveryUnknownError,
+)
+from .provider_credit import ProviderBudgetExceeded, ProviderCircuitOpen
+from .contact_policy import ContactPolicyRepository, is_opt_out_message
 from .conversation.llm import DeepSeekChatResponder
 from .conversation.brain import ConversationDecision
 from .conversation.mode import BotMode, ConversationPolicy
@@ -219,6 +224,9 @@ class FanslyBot:
         self._last_presence_poll_at: datetime | None = None
         self._last_stalled_scan_at: datetime | None = None
         self.processing_repo = MessageProcessingRepository(
+            self.state_repo.engine
+        )
+        self.contact_policy_repo = ContactPolicyRepository(
             self.state_repo.engine
         )
         self.purchase_repo = PurchaseRepository(self.state_repo.engine)
@@ -1203,6 +1211,13 @@ class FanslyBot:
                 if inbound.trigger_kind in {"online", "stalled"}:
                     prepared = self._prepare_proactive_opener(inbound)
                 else:
+                    if is_opt_out_message(inbound.content):
+                        self.contact_policy_repo.record_opt_out(
+                            self.creator_id, inbound.fan_id
+                        )
+                        self.processing_repo.complete_without_response(inbound.id)
+                        logger.info("Recorded durable fan opt-out")
+                        return True
                     policy = self.content_policy.validate_inbound(
                         inbound.content
                     )
@@ -1301,6 +1316,21 @@ class FanslyBot:
                     raise RuntimeError(
                         "Provider did not return the PPV purchase reference"
                     )
+            except (
+                AuthError,
+                PaymentRequiredError,
+                ProviderBudgetExceeded,
+                ProviderCircuitOpen,
+            ) as exc:
+                self.processing_repo.mark_provider_blocked(
+                    sending.id, type(exc).__name__
+                )
+                logger.error("Provider confirmed send was blocked: %s", type(exc).__name__)
+                return True
+            except ProviderDeliveryUnknownError as exc:
+                self.processing_repo.mark_delivery_unknown(sending.id, type(exc).__name__)
+                logger.error("Provider delivery outcome unknown")
+                return True
             except Exception as exc:
                 self.processing_repo.mark_delivery_unknown(
                     sending.id,
@@ -1318,6 +1348,7 @@ class FanslyBot:
                 provider_purchase_ref=purchase_reference_id,
             )
             if self.bot_mode == BotMode.CONVERSATION:
+                stored_decision = None
                 try:
                     stored_decision = self.conversation_decision_repo.get(
                         inbound.id,

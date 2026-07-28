@@ -10,10 +10,12 @@ Unsupported operations fail closed rather than fabricating provider behavior.
 """
 
 import logging
-from typing import Optional
+import time
+from typing import Any, Optional
 
 import httpx
 
+from .provider_credit import ProviderCreditGovernor
 from .fansly_client import (
     FanslyApiClient,
     ChatInfo,
@@ -22,6 +24,8 @@ from .fansly_client import (
     AuthError,
     PaymentRequiredError,
     NotFoundError,
+    ProviderRequestError,
+    ProviderDeliveryUnknownError,
     ProviderCapabilities,
     UnsupportedProviderFeature,
     UserPresence,
@@ -36,9 +40,16 @@ BASE_URL = "https://app.onlyfansapi.com"
 class FanslyApiClientImpl(FanslyApiClient):
     """HTTP client for OnlyFansAPI's Fansly product."""
 
-    def __init__(self, api_key: str, timeout: float = 30.0):
+    def __init__(
+        self,
+        api_key: str,
+        timeout: float = 30.0,
+        *,
+        credit_governor: ProviderCreditGovernor | None = None,
+    ):
         self.api_key = api_key.strip()
         self.timeout = timeout
+        self.credit_governor = credit_governor
         self._account_id: Optional[str] = None
         self._creator_fansly_id: Optional[str] = None
         headers = {}
@@ -81,7 +92,14 @@ class FanslyApiClientImpl(FanslyApiClient):
     def _resolve_account_id(self):
         if not self.api_key:
             raise AuthError("FANSLY_API_KEY is not configured")
-        data = self._request("GET", "/api/fansly/accounts")
+        data = self._request(
+            "GET",
+            "/api/fansly/accounts",
+            operation="accounts.verify",
+            request_class="control",
+            expected_credits=0,
+            allow_when_open=True,
+        )
         accounts = data if isinstance(data, list) else []
         if not accounts:
             raise AuthError("No connected Fansly account found on this API key")
@@ -102,18 +120,220 @@ class FanslyApiClientImpl(FanslyApiClient):
         self._resolve_account_id()
         return True
 
-    def _request(self, method: str, path: str, **kwargs) -> dict | list:
-        response = self.client.request(method, path, **kwargs)
+    def attach_credit_governor(
+        self,
+        governor: ProviderCreditGovernor,
+    ) -> None:
+        self.credit_governor = governor
 
-        if response.status_code in (401, 403):
-            raise AuthError(f"Authentication failed: {response.status_code} on {method} {path}")
-        if response.status_code == 402:
-            raise PaymentRequiredError(f"Payment required: {response.text}")
-        if response.status_code == 404:
-            raise NotFoundError(f"Resource not found: {path}")
+    @staticmethod
+    def _credit_meta(payload: Any) -> tuple[int | None, int | None]:
+        if not isinstance(payload, dict):
+            return None, None
+        meta = payload.get("_meta")
+        credits = meta.get("_credits") if isinstance(meta, dict) else None
+        used = credits.get("used") if isinstance(credits, dict) else None
+        balance = (
+            credits.get("balance") if isinstance(credits, dict) else None
+        )
+        if used is None and payload.get("credits_used") is not None:
+            used = payload.get("credits_used")
+        try:
+            normalized_used = int(used) if used is not None else None
+        except (TypeError, ValueError):
+            normalized_used = None
+        try:
+            normalized_balance = (
+                int(balance) if balance is not None else None
+            )
+        except (TypeError, ValueError):
+            normalized_balance = None
+        return normalized_used, normalized_balance
 
-        response.raise_for_status()
-        return response.json()
+    def _reserve(
+        self,
+        operation: str,
+        *,
+        request_class: str,
+        expected_credits: int,
+        allow_when_open: bool,
+    ):
+        if self.credit_governor is None:
+            return None
+        return self.credit_governor.reserve(
+            operation,
+            request_class=request_class,
+            credits=expected_credits,
+            allow_when_open=allow_when_open,
+        )
+
+    def _finalize(
+        self,
+        reservation,
+        *,
+        method: str,
+        result: str,
+        status_code: int | None,
+        payload: Any = None,
+        known_used_credits: int | None = None,
+        retry_count: int = 0,
+        detail_code: str | None = None,
+    ) -> None:
+        if reservation is None or self.credit_governor is None:
+            return
+        used, balance = self._credit_meta(payload)
+        if known_used_credits is not None:
+            used = known_used_credits
+        self.credit_governor.finalize(
+            reservation,
+            method=method,
+            result=result,
+            status_code=status_code,
+            used_credits=used,
+            balance=balance,
+            retry_count=retry_count,
+            detail_code=detail_code,
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation: str = "provider.request",
+        request_class: str = "read",
+        expected_credits: int = 1,
+        allow_when_open: bool = False,
+        **kwargs,
+    ) -> dict | list:
+        method = method.upper()
+        retry_safe = method in {"GET", "HEAD"}
+        for attempt in range(2):
+            reservation = self._reserve(
+                operation,
+                request_class=request_class,
+                expected_credits=expected_credits,
+                allow_when_open=allow_when_open,
+            )
+            try:
+                response = self.client.request(method, path, **kwargs)
+            except (httpx.TimeoutException, httpx.TransportError) as error:
+                self._finalize(
+                    reservation,
+                    method=method,
+                    result="transport_error",
+                    status_code=None,
+                    retry_count=attempt,
+                    detail_code=type(error).__name__,
+                )
+                if retry_safe and attempt == 0:
+                    continue
+                if not retry_safe:
+                    raise ProviderDeliveryUnknownError(
+                        f"{operation} delivery outcome is unknown"
+                    ) from error
+                raise ProviderRequestError(
+                    f"{operation} failed after a bounded retry"
+                ) from error
+
+            payload = None
+            try:
+                payload = response.json()
+            except (ValueError, TypeError):
+                payload = None
+            status = int(response.status_code)
+
+            if status == 402:
+                self._finalize(
+                    reservation,
+                    method=method,
+                    result="payment_required",
+                    status_code=status,
+                    payload=payload,
+                    known_used_credits=0,
+                    retry_count=attempt,
+                    detail_code="payment_required",
+                )
+                if self.credit_governor is not None:
+                    self.credit_governor.open_circuit("payment_required")
+                raise PaymentRequiredError(
+                    f"{operation} blocked because provider credits are unavailable"
+                )
+            if status in (401, 403):
+                self._finalize(
+                    reservation,
+                    method=method,
+                    result="auth_error",
+                    status_code=status,
+                    payload=payload,
+                    retry_count=attempt,
+                    detail_code=f"http_{status}",
+                )
+                raise AuthError(
+                    f"{operation} authentication failed with HTTP {status}"
+                )
+            if status == 404:
+                self._finalize(
+                    reservation,
+                    method=method,
+                    result="not_found",
+                    status_code=status,
+                    payload=payload,
+                    retry_count=attempt,
+                    detail_code="http_404",
+                )
+                raise NotFoundError(f"{operation} resource was not found")
+            if status == 429 or 500 <= status <= 599:
+                self._finalize(
+                    reservation,
+                    method=method,
+                    result="retryable_error",
+                    status_code=status,
+                    payload=payload,
+                    retry_count=attempt,
+                    detail_code=f"http_{status}",
+                )
+                if retry_safe and attempt == 0:
+                    if status == 429:
+                        try:
+                            delay = float(
+                                response.headers.get("Retry-After", "0")
+                            )
+                        except (TypeError, ValueError):
+                            delay = 0
+                        time.sleep(min(max(delay, 0), 5))
+                    continue
+                raise ProviderRequestError(
+                    f"{operation} failed with HTTP {status}"
+                )
+            if status >= 400:
+                self._finalize(
+                    reservation,
+                    method=method,
+                    result="request_error",
+                    status_code=status,
+                    payload=payload,
+                    retry_count=attempt,
+                    detail_code=f"http_{status}",
+                )
+                raise ProviderRequestError(
+                    f"{operation} failed with HTTP {status}"
+                )
+
+            self._finalize(
+                reservation,
+                method=method,
+                result="success",
+                status_code=status,
+                payload=payload,
+                retry_count=attempt,
+            )
+            if payload is None:
+                raise ProviderRequestError(
+                    f"{operation} returned an invalid JSON response"
+                )
+            return payload
+        raise ProviderRequestError(f"{operation} failed")
 
     def ensure_message_webhook(
         self,
@@ -128,7 +348,12 @@ class FanslyApiClientImpl(FanslyApiClient):
         if len(signing_secret) < 32:
             raise ValueError("Webhook signing secret must be at least 32 characters")
 
-        payload = self._request("GET", "/api/webhooks")
+        payload = self._request(
+            "GET",
+            "/api/webhooks",
+            operation="webhooks.list",
+            request_class="control",
+        )
         rows = payload.get("data", []) if isinstance(payload, dict) else []
         existing = next(
             (
@@ -148,6 +373,8 @@ class FanslyApiClientImpl(FanslyApiClient):
             created = self._request(
                 "POST",
                 "/api/webhooks",
+                operation="webhooks.create",
+                request_class="control",
                 json={
                     "endpoint_url": endpoint_url,
                     "signing_secret": signing_secret,
@@ -168,6 +395,8 @@ class FanslyApiClientImpl(FanslyApiClient):
         updated = self._request(
             "PUT",
             f"/api/webhooks/{webhook_id}",
+            operation="webhooks.update",
+            request_class="control",
             json={
                 "endpoint_url": endpoint_url,
                 "events": ["fansly.messages.received"],
@@ -203,6 +432,8 @@ class FanslyApiClientImpl(FanslyApiClient):
         data = self._request(
             "GET",
             f"/api/fansly/{self.account_id}/chats",
+            operation="fansly.chats.list",
+            request_class="read",
             params={"limit": limit, "offset": offset, "order": order},
         )
         inner = data.get("data", {})
@@ -285,6 +516,8 @@ class FanslyApiClientImpl(FanslyApiClient):
         data = self._request(
             "GET",
             f"/api/fansly/{self.account_id}/users/",
+            operation="fansly.users.presence",
+            request_class="optional_read",
             params={"ids": ",".join(normalized)},
         )
         rows = data.get("data", []) if isinstance(data, dict) else []
@@ -320,7 +553,11 @@ class FanslyApiClientImpl(FanslyApiClient):
             params["before"] = cursor
 
         data = self._request(
-            "GET", f"/api/fansly/{self.account_id}/chats/{chat_id}/messages", params=params
+            "GET",
+            f"/api/fansly/{self.account_id}/chats/{chat_id}/messages",
+            operation="fansly.messages.list",
+            request_class="read",
+            params=params,
         )
         inner = data.get("data", {})
         messages_raw = inner.get("messages", [])
@@ -373,7 +610,11 @@ class FanslyApiClientImpl(FanslyApiClient):
             body["mediaFiles"] = ids
 
         data = self._request(
-            "POST", f"/api/fansly/{self.account_id}/chats/{chat_id}/messages", json=body
+            "POST",
+            f"/api/fansly/{self.account_id}/chats/{chat_id}/messages",
+            operation="fansly.messages.send",
+            request_class="send",
+            json=body,
         )
         msg = data.get("data", {})
         return SentMessage(
@@ -409,6 +650,8 @@ class FanslyApiClientImpl(FanslyApiClient):
         payload = self._request(
             "GET",
             f"/api/fansly/{self.account_id}/earnings/transactions",
+            operation="fansly.wallet.list",
+            request_class="read",
             params={"limit": limit, "offset": offset},
         )
         inner = payload.get("data", {})
@@ -439,6 +682,8 @@ class FanslyApiClientImpl(FanslyApiClient):
         data = self._request(
             "POST",
             f"/api/fansly/{self.account_id}/chats/{chat_id}/messages/{message_id}/reactions",
+            operation="fansly.reactions.create",
+            request_class="send",
             json={"type": 1},  # 1 = heart
         )
         return "data" in data
@@ -454,6 +699,8 @@ class FanslyApiClientImpl(FanslyApiClient):
             data = self._request(
                 "POST",
                 f"/api/fansly/{self.account_id}/media/upload",
+                operation="fansly.media.upload",
+                request_class="send",
                 files={"file": f},
             )
         return data["prefixed_id"]

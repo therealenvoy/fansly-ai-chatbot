@@ -48,6 +48,13 @@ from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
 from .operations import RuntimeMonitor
 from .credit_budget import BASIC_MONTHLY_CREDITS, estimate_minimum_monthly_requests
+from .provider_credit import (
+    ProviderBudgetExceeded,
+    ProviderCircuitOpen,
+    ProviderCreditGovernor,
+    ProviderCreditSettings,
+    provider_worker,
+)
 from .crm.sync import CrmSyncService
 from .persistence.crm import CrmSyncRepository
 from .conversation.llm import DeepSeekChatResponder
@@ -101,7 +108,15 @@ REPLY_WORKER_IDLE_SECONDS = max(
 )
 RECONCILIATION_INTERVAL = max(
     60,
-    int(os.getenv("RECONCILIATION_INTERVAL", str(POLL_INTERVAL))),
+    int(os.getenv("RECONCILIATION_INTERVAL", "21600")),
+)
+RECOVERY_RECONCILIATION_ENABLED = _env_bool(
+    "RECOVERY_RECONCILIATION_ENABLED",
+    False,
+)
+WEBHOOK_REGISTRATION_ENABLED = _env_bool(
+    "WEBHOOK_REGISTRATION_ENABLED",
+    False,
 )
 REPLY_DELAY_MIN_SECONDS = max(
     0,
@@ -177,21 +192,21 @@ STALLED_SCAN_BATCH_SIZE = min(
     max(1, int(os.getenv("STALLED_SCAN_BATCH_SIZE", "5000"))),
     5000,
 )
-CRM_SYNC_ENABLED = _env_bool("CRM_SYNC_ENABLED", True)
+CRM_SYNC_ENABLED = _env_bool("CRM_SYNC_ENABLED", False)
 CRM_SYNC_INTERVAL = max(
     60,
     int(os.getenv("CRM_SYNC_INTERVAL", "300")),
 )
 CRM_SYNC_MESSAGE_PAGES_PER_CYCLE = min(
     max(
-        int(os.getenv("CRM_SYNC_MESSAGE_PAGES_PER_CYCLE", "25")),
+        int(os.getenv("CRM_SYNC_MESSAGE_PAGES_PER_CYCLE", "5")),
         1,
     ),
     100,
 )
 CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE = min(
     max(
-        int(os.getenv("CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE", "2")),
+        int(os.getenv("CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE", "1")),
         1,
     ),
     10,
@@ -202,6 +217,22 @@ CRM_SYNC_BACKFILL_INTERVAL = max(
         int(os.getenv("CRM_SYNC_BACKFILL_INTERVAL", "30")),
         POLL_INTERVAL,
     ),
+)
+PROVIDER_MONTHLY_CREDIT_LIMIT = max(
+    0,
+    int(os.getenv("PROVIDER_MONTHLY_CREDIT_LIMIT", "20000")),
+)
+PROVIDER_DAILY_READ_CREDIT_LIMIT = max(
+    0,
+    int(os.getenv("PROVIDER_DAILY_READ_CREDIT_LIMIT", "50")),
+)
+PROVIDER_MONTHLY_SEND_RESERVE = max(
+    0,
+    int(os.getenv("PROVIDER_MONTHLY_SEND_RESERVE", "15000")),
+)
+PROVIDER_MONTHLY_EMERGENCY_RESERVE = max(
+    0,
+    int(os.getenv("PROVIDER_MONTHLY_EMERGENCY_RESERVE", "2000")),
 )
 FAN_ALLOWLIST = {
     fan_id.strip()
@@ -338,6 +369,23 @@ else:
 state_repo = ConversationStateRepository(database_engine)
 state_repo.ensure_creator(CREATOR_ID)
 runtime_monitor = RuntimeMonitor()
+provider_credit_governor = None
+if FANSLY_PROVIDER == "fanslyapi":
+    provider_credit_governor = ProviderCreditGovernor(
+        database_engine,
+        creator_id=CREATOR_ID,
+        settings=ProviderCreditSettings(
+            monthly_limit=PROVIDER_MONTHLY_CREDIT_LIMIT,
+            daily_read_limit=PROVIDER_DAILY_READ_CREDIT_LIMIT,
+            monthly_send_reserve=PROVIDER_MONTHLY_SEND_RESERVE,
+            monthly_emergency_reserve=(
+                PROVIDER_MONTHLY_EMERGENCY_RESERVE
+            ),
+        ),
+    )
+    attach_governor = getattr(client, "attach_credit_governor", None)
+    if callable(attach_governor):
+        attach_governor(provider_credit_governor)
 
 # ─── Startup Auth Validation ───────────────────────────
 
@@ -523,6 +571,7 @@ dashboard = DashboardServer(
     crm_sync=crm_sync,
     ai_settings=ai_settings,
     chat_guidance=chat_guidance,
+    credit_governor=provider_credit_governor,
     onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
     inbound_wakeup=reply_wakeup,
 )
@@ -557,19 +606,25 @@ def run_reply_worker(worker_number: int) -> None:
     while running and bot is not None:
         runtime_monitor.poll_started()
         try:
-            had_activity = bool(
-                bot.poll_and_process(
-                    max_chats=MAX_MESSAGES_PER_POLL,
-                    reconcile=False,
-                    outreach=False,
+            with provider_worker(f"reply-worker-{worker_number}"):
+                had_activity = bool(
+                    bot.poll_and_process(
+                        max_chats=MAX_MESSAGES_PER_POLL,
+                        reconcile=False,
+                        outreach=False,
+                    )
                 )
-            )
             consecutive_failures = 0
             runtime_monitor.poll_succeeded(had_activity=had_activity)
             wait_seconds = (
                 0 if had_activity else REPLY_WORKER_IDLE_SECONDS
             )
-        except (AuthError, PaymentRequiredError) as error:
+        except (
+            AuthError,
+            PaymentRequiredError,
+            ProviderBudgetExceeded,
+            ProviderCircuitOpen,
+        ) as error:
             consecutive_failures = 0
             _disable_bot_for_provider_error(error)
             wait_seconds = REPLY_WORKER_IDLE_SECONDS
@@ -600,11 +655,20 @@ def run_reply_worker(worker_number: int) -> None:
 def run_reconciliation_worker() -> None:
     """Recover missed events using a bounded provider poll."""
     while running and bot is not None:
+        if not bot.enabled:
+            sleep_with_interrupt(RECONCILIATION_INTERVAL)
+            continue
         try:
-            _, ingested = bot.reconcile_provider()
+            with provider_worker("provider-reconciliation"):
+                _, ingested = bot.reconcile_provider()
             if ingested:
                 reply_wakeup.set()
-        except (AuthError, PaymentRequiredError) as error:
+        except (
+            AuthError,
+            PaymentRequiredError,
+            ProviderBudgetExceeded,
+            ProviderCircuitOpen,
+        ) as error:
             _disable_bot_for_provider_error(error)
         except Exception:
             logger.exception("Provider reconciliation failed")
@@ -613,13 +677,10 @@ def run_reconciliation_worker() -> None:
 
 def run_crm_worker() -> None:
     """Keep the CRM cache fresh independently from message delivery."""
-    first_cycle = True
     while running and crm_sync is not None:
         try:
-            if first_cycle:
-                crm_sync.refresh_chat_index()
-                first_cycle = False
-            result = crm_sync.sync_cycle()
+            with provider_worker("crm-backfill"):
+                result = crm_sync.sync_cycle()
             backfill_pending = bool(
                 result.remaining_chats > 0
                 or not result.discovery_complete
@@ -634,6 +695,18 @@ def run_crm_worker() -> None:
                     "CRM history backfill pending; continuing in %ss",
                     wait_seconds,
                 )
+        except (
+            AuthError,
+            PaymentRequiredError,
+            ProviderBudgetExceeded,
+            ProviderCircuitOpen,
+        ) as error:
+            runtime_monitor.provider_blocked(error)
+            logger.warning(
+                "CRM provider-history sync paused: %s",
+                type(error).__name__,
+            )
+            wait_seconds = CRM_SYNC_INTERVAL
         except Exception:
             logger.exception("CRM provider-history sync failed")
             wait_seconds = CRM_SYNC_INTERVAL
@@ -643,14 +716,23 @@ def run_crm_worker() -> None:
 def run_outreach_worker() -> None:
     """Schedule proactive online and stalled work outside the reply path."""
     while running and bot is not None:
+        if not bot.enabled:
+            sleep_with_interrupt(5)
+            continue
         try:
-            had_activity = bool(bot.poll_presence_outreach())
-            had_activity = bool(
-                bot.poll_stalled_outreach()
-            ) or had_activity
+            with provider_worker("proactive-outreach"):
+                had_activity = bool(bot.poll_presence_outreach())
+                had_activity = bool(
+                    bot.poll_stalled_outreach()
+                ) or had_activity
             if had_activity:
                 reply_wakeup.set()
-        except (AuthError, PaymentRequiredError) as error:
+        except (
+            AuthError,
+            PaymentRequiredError,
+            ProviderBudgetExceeded,
+            ProviderCircuitOpen,
+        ) as error:
             _disable_bot_for_provider_error(error)
         except Exception:
             logger.exception("Proactive outreach scan failed")
@@ -659,7 +741,11 @@ def run_outreach_worker() -> None:
 
 def run_webhook_registration() -> None:
     """Register the signed Fansly message webhook without console access."""
-    if FANSLY_PROVIDER != "fanslyapi" or not api_ok:
+    if (
+        not WEBHOOK_REGISTRATION_ENABLED
+        or FANSLY_PROVIDER != "fanslyapi"
+        or not api_ok
+    ):
         return
     if not ONLYFANSAPI_WEBHOOK_URL:
         logger.warning(
@@ -678,10 +764,11 @@ def run_webhook_registration() -> None:
         )
         return
     try:
-        webhook = ensure_webhook(
-            ONLYFANSAPI_WEBHOOK_URL,
-            ONLYFANSAPI_WEBHOOK_SECRET,
-        )
+        with provider_worker("webhook-registration"):
+            webhook = ensure_webhook(
+                ONLYFANSAPI_WEBHOOK_URL,
+                ONLYFANSAPI_WEBHOOK_SECRET,
+            )
         logger.info(
             "OnlyFansAPI Fansly webhook active: id=%s event=%s",
             webhook.get("id", "unknown"),
@@ -714,14 +801,16 @@ else:
         REPLY_WORKER_COUNT,
         RECONCILIATION_INTERVAL,
     )
-    _start_background_worker(
-        "webhook-registration",
-        run_webhook_registration,
-    )
-    _start_background_worker(
-        "provider-reconciliation",
-        run_reconciliation_worker,
-    )
+    if WEBHOOK_REGISTRATION_ENABLED:
+        _start_background_worker(
+            "webhook-registration",
+            run_webhook_registration,
+        )
+    if RECOVERY_RECONCILIATION_ENABLED:
+        _start_background_worker(
+            "provider-reconciliation",
+            run_reconciliation_worker,
+        )
     _start_background_worker("proactive-outreach", run_outreach_worker)
     for worker_index in range(2, REPLY_WORKER_COUNT + 1):
         _start_background_worker(

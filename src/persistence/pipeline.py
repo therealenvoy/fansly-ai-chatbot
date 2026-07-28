@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import Engine, and_, case, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -17,6 +17,7 @@ from .schema import (
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
     PROCESSED_PLATFORM_MESSAGES,
+    FAN_CONTACT_POLICIES,
     utcnow,
 )
 
@@ -31,6 +32,8 @@ OUTBOX_SENDING = "sending"
 OUTBOX_SENT = "sent"
 OUTBOX_DELIVERY_UNKNOWN = "delivery_unknown"
 OUTBOX_BLOCKED_UNSUPPORTED = "blocked_unsupported"
+OUTBOX_BLOCKED_POLICY = "blocked_policy"
+OUTBOX_BLOCKED_PROVIDER = "blocked_provider"
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,11 @@ class OutboxMessageRecord:
     created_at: datetime
     sent_at: datetime | None
     last_error: str | None
+    trigger_source: str
+    service_role: str
+    permit_status: str
+    permit_expires_at: datetime | None
+    contact_policy_version: int
 
 
 class MessageProcessingRepository:
@@ -254,6 +262,19 @@ class MessageProcessingRepository:
             "attempt_count": 0,
             "created_at": utcnow(),
         }
+        policy_version = 0
+        with self.engine.connect() as connection:
+            policy_version = int(
+                connection.execute(
+                    select(FAN_CONTACT_POLICIES.c.version).where(
+                        and_(
+                            FAN_CONTACT_POLICIES.c.creator_id == inbound.creator_id,
+                            FAN_CONTACT_POLICIES.c.fan_id == inbound.fan_id,
+                        )
+                    )
+                ).scalar_one_or_none() or 0
+            )
+        values.update(trigger_source=inbound.trigger_kind, service_role="conversation_reply", permit_status="approved", permit_expires_at=utcnow() + timedelta(minutes=15), contact_policy_version=policy_version)
         stmt = self._insert(OUTBOX_MESSAGES).values(**values)
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["inbound_message_id"]
@@ -329,12 +350,40 @@ class MessageProcessingRepository:
         provider response.
         """
         with self.engine.begin() as conn:
+            now = utcnow()
             row = conn.execute(
                 select(OUTBOX_MESSAGES)
                 .where(OUTBOX_MESSAGES.c.id == outbox_id)
                 .with_for_update()
             ).mappings().first()
             if row is None or row["status"] != OUTBOX_PENDING:
+                return None
+            policy = conn.execute(
+                select(FAN_CONTACT_POLICIES).where(
+                    and_(
+                        FAN_CONTACT_POLICIES.c.creator_id == row["creator_id"],
+                        FAN_CONTACT_POLICIES.c.fan_id == row["fan_id"],
+                    )
+                )
+            ).mappings().first()
+            permit_expires_at = row["permit_expires_at"]
+            paused_until = policy["paused_until"] if policy else None
+            compare_now = now
+            if permit_expires_at is not None and permit_expires_at.tzinfo is None:
+                compare_now = now.replace(tzinfo=None)
+            policy_block = (
+                row["permit_status"] != "approved"
+                or permit_expires_at is None
+                or permit_expires_at <= compare_now
+                or (policy is not None and bool(policy["do_not_contact"]))
+                or (paused_until is not None and paused_until > compare_now)
+                or int(row["contact_policy_version"] or 0) != int(policy["version"] if policy else 0)
+            )
+            if policy_block:
+                conn.execute(update(OUTBOX_MESSAGES).where(OUTBOX_MESSAGES.c.id == outbox_id).values(status=OUTBOX_BLOCKED_POLICY, permit_status="revoked", last_error="send permit rejected by current contact policy"))
+                conn.execute(update(INBOUND_MESSAGES).where(INBOUND_MESSAGES.c.id == row["inbound_message_id"]).values(status=INBOUND_COMPLETED, completed_at=now, locked_at=None, last_error=None))
+                inbound = conn.execute(select(INBOUND_MESSAGES).where(INBOUND_MESSAGES.c.id == row["inbound_message_id"])).mappings().one()
+                self._insert_processed(conn, inbound, now)
                 return None
             result = conn.execute(
                 update(OUTBOX_MESSAGES)
@@ -506,6 +555,45 @@ class MessageProcessingRepository:
                 )
             ).mappings().one()
         return self._inbound(released)
+
+    def mark_provider_blocked(
+        self,
+        outbox_id: int,
+        error: str,
+    ) -> OutboxMessageRecord:
+        """Record a confirmed non-send without creating a duplicate-send risk."""
+        with self.engine.begin() as conn:
+            outbox = conn.execute(
+                select(OUTBOX_MESSAGES)
+                .where(OUTBOX_MESSAGES.c.id == outbox_id)
+                .with_for_update()
+            ).mappings().one()
+            if outbox["status"] != OUTBOX_SENDING:
+                raise RuntimeError(
+                    f"Outbox {outbox_id} is {outbox['status']}, not sending"
+                )
+            conn.execute(
+                update(OUTBOX_MESSAGES)
+                .where(OUTBOX_MESSAGES.c.id == outbox_id)
+                .values(
+                    status=OUTBOX_BLOCKED_PROVIDER,
+                    permit_status="revoked",
+                    last_error=self._error(error),
+                )
+            )
+            conn.execute(
+                update(INBOUND_MESSAGES)
+                .where(INBOUND_MESSAGES.c.id == outbox["inbound_message_id"])
+                .values(
+                    status=INBOUND_FAILED,
+                    locked_at=None,
+                    last_error="provider confirmed message was not sent",
+                )
+            )
+            updated = conn.execute(
+                select(OUTBOX_MESSAGES).where(OUTBOX_MESSAGES.c.id == outbox_id)
+            ).mappings().one()
+        return self._outbox(updated)
 
     def mark_delivery_unknown(
         self,
@@ -920,4 +1008,9 @@ class MessageProcessingRepository:
             created_at=row["created_at"],
             sent_at=row["sent_at"],
             last_error=row["last_error"],
+            trigger_source=row["trigger_source"],
+            service_role=row["service_role"],
+            permit_status=row["permit_status"],
+            permit_expires_at=row["permit_expires_at"],
+            contact_policy_version=int(row["contact_policy_version"] or 0),
         )

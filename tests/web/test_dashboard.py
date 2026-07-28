@@ -796,30 +796,9 @@ class TestCrmConversationHistory:
             for index in range(5)
         ]
 
-    def test_empty_inbox_primes_provider_index_before_returning(self, db_url):
+    def test_empty_inbox_never_reads_provider_during_navigation(self, db_url):
         bot = _make_bot(db_url)
         sync = MagicMock()
-
-        def _prime():
-            bot.state_repo.ensure_conversation(
-                bot.creator_id,
-                "fan-live",
-                "chat-live",
-                display_name="Live Fan",
-                username="live_fan",
-            )
-            CrmSyncRepository(bot.state_repo.engine).discover_chat(
-                creator_id=bot.creator_id,
-                chat_id="chat-live",
-                fan_id="fan-live",
-                provider_head_message_id="message-live",
-            )
-            result = MagicMock()
-            result.discovered_chats = 1
-            result.has_more = True
-            return result
-
-        sync.refresh_chat_index.side_effect = _prime
         server = DashboardServer(
             bot,
             port=0,
@@ -844,15 +823,15 @@ class TestCrmConversationHistory:
             thread.join(timeout=2)
 
         assert status == 200
-        assert body["total"] == 1
+        assert body["total"] == 0
         assert body["has_more"] is False
-        assert body["provider_primed"] is True
+        assert body["provider_primed"] is False
         assert body["live_sync_available"] is True
-        assert body["fans"][0]["username"] == "live_fan"
-        sync.refresh_chat_index.assert_called_once_with()
+        assert body["fans"] == []
+        sync.refresh_chat_index.assert_not_called()
         sync.hydrate_recent.assert_not_called()
 
-    def test_opening_conversation_hydrates_recent_messages_on_demand(
+    def test_opening_conversation_reads_only_stored_messages(
         self,
         db_url,
     ):
@@ -871,24 +850,14 @@ class TestCrmConversationHistory:
             provider_head_message_id="message-live",
         )
         sync = MagicMock()
-
-        def _hydrate(fan_id):
-            assert fan_id == "fan-live"
-            bot.message_store.save_message(
-                fan_id,
-                bot.creator_id,
-                "fan",
-                "loaded when opened",
-                message_id="message-live",
-                chat_id="chat-live",
-            )
-            result = MagicMock()
-            result.found = True
-            result.requested_pages = 1
-            result.inserted_messages = 1
-            return result
-
-        sync.hydrate_recent.side_effect = _hydrate
+        bot.message_store.save_message(
+            "fan-live",
+            bot.creator_id,
+            "fan",
+            "already stored",
+            message_id="message-live",
+            chat_id="chat-live",
+        )
         server = DashboardServer(
             bot,
             port=0,
@@ -913,11 +882,11 @@ class TestCrmConversationHistory:
             thread.join(timeout=2)
 
         assert status == 200
-        assert body["live_hydrated"] is True
+        assert body["live_hydrated"] is False
         assert body["live_sync_available"] is True
         assert body["live_refresh_error"] is None
-        assert body["messages"][0]["content"] == "loaded when opened"
-        sync.hydrate_recent.assert_called_once_with("fan-live")
+        assert body["messages"][0]["content"] == "already stored"
+        sync.hydrate_recent.assert_not_called()
 
 
 class TestDashboardSecurity:

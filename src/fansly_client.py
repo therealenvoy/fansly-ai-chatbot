@@ -25,6 +25,14 @@ class AuthError(FanslyClientError):
     """Provider authentication or authorization failed."""
 
 
+class ProviderRequestError(FanslyClientError):
+    """A provider request failed without exposing its URL or response body."""
+
+
+class ProviderDeliveryUnknownError(ProviderRequestError):
+    """A non-idempotent request timed out after its delivery became unknown."""
+
+
 class UnsupportedProviderFeature(FanslyClientError):
     """The selected provider does not document the requested capability."""
 

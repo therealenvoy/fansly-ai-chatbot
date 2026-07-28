@@ -1019,6 +1019,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/sequences": return self._seq_create(b)
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_update(p.rsplit("/",1)[-1], b)
         if p=="/api/bot/toggle": return self._bot_toggle(b)
+        if p=="/api/provider/credits/reset": return self._provider_credit_reset(b)
         if p=="/api/brain/settings": return self._brain_settings_save(b)
         if p=="/api/brain/rollback": return self._brain_rollback(b)
         if p=="/api/brain/reviews": return self._brain_review_save(b)
@@ -1278,24 +1279,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         provider_primed=False
         provider_refresh_error=None
-        if (
-            page.total == 0
-            and offset == 0
-            and not search
-            and self.crm_sync is not None
-        ):
-            try:
-                self.crm_sync.refresh_chat_index()
-                provider_primed=True
-                page=repository.conversation_page(
-                    self.creator_id,
-                    limit=limit,
-                    offset=offset,
-                    search=search,
-                )
-            except Exception as error:
-                logger.exception("Live CRM chat-index refresh failed")
-                provider_refresh_error=type(error).__name__
         purchases = self._purchase_totals()
         notes={note.fan_id:note for note in self._list_notes()}
         fans = []
@@ -1360,7 +1343,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "provider_refresh_error":provider_refresh_error,
             "discovery_complete":discovery_complete,
             "live_sync_available":self.crm_sync is not None,
-            "source":"durable_state_with_live_overlay",
+            "source":"durable_local_state",
         })
 
     def _conv_detail(self, fan_id, query=None):
@@ -1390,18 +1373,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self.j({"error":"invalid message pagination"},400)
         live_hydrated=False
         live_refresh_error=None
-        if message_offset == 0 and self.crm_sync is not None:
-            try:
-                hydration=self.crm_sync.hydrate_recent(fan_id)
-                live_hydrated=bool(
-                    getattr(hydration,"requested_pages",0)
-                )
-            except Exception as error:
-                logger.exception(
-                    "Live CRM hydration failed for fan %s",
-                    fan_id,
-                )
-                live_refresh_error=type(error).__name__
         history_page=message_store.get_history_page(
             fan_id,
             self.creator_id,
@@ -2974,6 +2945,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError) as error:
             return self.j({"error": str(error)}, 400)
 
+    def _provider_credit_reset(self, body: str):
+        governor = self.server.credit_governor
+        if governor is None:
+            return self.j(
+                {"error": "provider credit control is unavailable"},
+                503,
+            )
+        try:
+            data = json.loads(body or "{}")
+        except json.JSONDecodeError:
+            return self.j({"error": "invalid JSON payload"}, 400)
+        if data.get("confirmation") != "RESET_PROVIDER_CREDIT_CIRCUIT":
+            return self.j(
+                {"error": "explicit reset confirmation is required"},
+                400,
+            )
+        governor.reset_circuit()
+        self.server.provider_error = None
+        return self.j({"status": "reset", "circuit_open": False})
+
     def _operations(self):
         pipeline_counts = {}
         crm_sync = {}
@@ -2995,6 +2986,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if self.server.runtime_monitor is not None
             else {}
         )
+        credit_control = {}
+        governor = self.server.credit_governor
+        if governor is not None:
+            try:
+                credit_control = governor.snapshot()
+            except Exception:
+                logger.exception("Failed to load provider credit status")
+                credit_control = {"status": "unavailable"}
         return self.j({
             "runtime":runtime,
             "database_ready":self._database_ready(),
@@ -3023,6 +3022,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
             "pipeline":pipeline_counts,
             "crm_sync":crm_sync,
+            "provider_credit":credit_control,
         })
 
     def _pers_get(self,q):
@@ -3616,6 +3616,7 @@ class DashboardServer:
         crm_sync=None,
         ai_settings=None,
         chat_guidance=None,
+        credit_governor=None,
     ):
         hosts = {"localhost", "127.0.0.1", "::1"}
         if allowed_hosts is None:
@@ -3656,6 +3657,7 @@ class DashboardServer:
         self.server.crm_sync = crm_sync
         self.server.ai_settings = ai_settings
         self.server.chat_guidance = chat_guidance
+        self.server.credit_governor = credit_governor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
             if bot is not None and hasattr(bot, "persona_loader")

@@ -328,6 +328,21 @@ CONVERSATION_DECISIONS = Table(
     ),
 )
 
+FAN_CONTACT_POLICIES = Table(
+    "fan_contact_policies",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("fan_id", String(128), primary_key=True),
+    Column("do_not_contact", Boolean, nullable=False, default=False),
+    Column("paused_until", DateTime(timezone=True), nullable=True),
+    Column("cooldown_until", DateTime(timezone=True), nullable=True),
+    Column("version", Integer, nullable=False, default=1),
+    Column("source", String(64), nullable=False),
+    Column("reason", String(128), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+
 OUTBOX_MESSAGES = Table(
     "outbox_messages",
     metadata,
@@ -354,6 +369,11 @@ OUTBOX_MESSAGES = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
     Column("sent_at", DateTime(timezone=True), nullable=True),
     Column("last_error", Text, nullable=True),
+    Column("trigger_source", String(32), nullable=False, default="legacy"),
+    Column("service_role", String(32), nullable=False, default="conversation_reply"),
+    Column("permit_status", String(32), nullable=False, default="unverified"),
+    Column("permit_expires_at", DateTime(timezone=True), nullable=True),
+    Column("contact_policy_version", Integer, nullable=False, default=0),
     UniqueConstraint("inbound_message_id", name="uq_outbox_inbound_message"),
     UniqueConstraint(
         "creator_id",
@@ -471,6 +491,73 @@ MEDIA_ASSETS = Table(
     ),
 )
 
+PROVIDER_CREDIT_EVENTS = Table(
+    "provider_credit_events",
+    metadata,
+    Column(
+        "id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("operation", String(64), nullable=False),
+    Column("worker", String(64), nullable=False),
+    Column("request_class", String(32), nullable=False),
+    Column("method", String(8), nullable=False),
+    Column("result", String(32), nullable=False),
+    Column("status_code", Integer, nullable=True),
+    Column("reserved_credits", Integer, nullable=False, default=0),
+    Column("used_credits", Integer, nullable=True),
+    Column("balance", Integer, nullable=True),
+    Column("retry_count", Integer, nullable=False, default=0),
+    Column("detail_code", String(64), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+PROVIDER_CREDIT_BUDGETS = Table(
+    "provider_credit_budgets",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("provider", String(32), primary_key=True),
+    Column("period_kind", String(16), primary_key=True),
+    Column("period_start", DateTime(timezone=True), primary_key=True),
+    Column("request_class", String(32), primary_key=True),
+    Column("credit_limit", Integer, nullable=False),
+    Column("used_credits", Integer, nullable=False, default=0),
+    Column("reserved_credits", Integer, nullable=False, default=0),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+PROVIDER_CREDIT_RESERVATIONS = Table(
+    "provider_credit_reservations",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("operation", String(64), nullable=False),
+    Column("worker", String(64), nullable=False),
+    Column("request_class", String(32), nullable=False),
+    Column("reserved_credits", Integer, nullable=False),
+    Column("used_credits", Integer, nullable=True),
+    Column("status", String(16), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("finalized_at", DateTime(timezone=True), nullable=True),
+)
+
+PROVIDER_CIRCUIT_BREAKERS = Table(
+    "provider_circuit_breakers",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("provider", String(32), primary_key=True),
+    Column("is_open", Boolean, nullable=False, default=False),
+    Column("reason_code", String(64), nullable=True),
+    Column("opened_at", DateTime(timezone=True), nullable=True),
+    Column("operator_reset_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
 Index(
     "ix_inbound_pending_order",
     INBOUND_MESSAGES.c.creator_id,
@@ -486,6 +573,12 @@ Index(
     OUTBOX_MESSAGES.c.status,
     OUTBOX_MESSAGES.c.created_at,
     OUTBOX_MESSAGES.c.id,
+)
+Index(
+    "ix_outbox_permit_status",
+    OUTBOX_MESSAGES.c.creator_id,
+    OUTBOX_MESSAGES.c.permit_status,
+    OUTBOX_MESSAGES.c.created_at,
 )
 Index(
     "ix_conversation_decision_fan_time",
@@ -538,6 +631,24 @@ Index(
     FAN_PRESENCE.c.creator_id,
     FAN_PRESENCE.c.status,
     FAN_PRESENCE.c.last_outreach_at,
+)
+
+Index(
+    "ix_provider_credit_event_time",
+    PROVIDER_CREDIT_EVENTS.c.creator_id,
+    PROVIDER_CREDIT_EVENTS.c.created_at,
+)
+Index(
+    "ix_provider_credit_event_operation",
+    PROVIDER_CREDIT_EVENTS.c.creator_id,
+    PROVIDER_CREDIT_EVENTS.c.operation,
+    PROVIDER_CREDIT_EVENTS.c.result,
+)
+Index(
+    "ix_provider_credit_reservation_status",
+    PROVIDER_CREDIT_RESERVATIONS.c.creator_id,
+    PROVIDER_CREDIT_RESERVATIONS.c.status,
+    PROVIDER_CREDIT_RESERVATIONS.c.created_at,
 )
 
 

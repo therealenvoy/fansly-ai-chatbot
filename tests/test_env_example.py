@@ -34,6 +34,12 @@ REQUIRED_VARS = [
     "REPLY_WORKER_COUNT",
     "REPLY_WORKER_IDLE_SECONDS",
     "RECONCILIATION_INTERVAL",
+    "RECOVERY_RECONCILIATION_ENABLED",
+    "WEBHOOK_REGISTRATION_ENABLED",
+    "PROVIDER_MONTHLY_CREDIT_LIMIT",
+    "PROVIDER_DAILY_READ_CREDIT_LIMIT",
+    "PROVIDER_MONTHLY_SEND_RESERVE",
+    "PROVIDER_MONTHLY_EMERGENCY_RESERVE",
     "REPLY_DELAY_MIN_SECONDS",
     "REPLY_DELAY_MAX_SECONDS",
     "PROCESSING_RETRY_BASE_SECONDS",
@@ -115,7 +121,9 @@ class TestEnvExampleContent:
 
         assert "FANSLY_PROVIDER=fanslyapi" in content
         assert "BOT_MODE=conversation" in content
-        assert "ENABLE_ONLINE_OUTREACH=true" in content
+        assert "ENABLE_ONLINE_OUTREACH=false" in content
+        assert "CRM_SYNC_ENABLED=false" in content
+        assert "RECOVERY_RECONCILIATION_ENABLED=false" in content
         assert "DEEPSEEK_MODEL=deepseek-v4-flash" in content
 
     def test_env_file_structure(self):
