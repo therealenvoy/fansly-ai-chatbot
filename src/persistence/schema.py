@@ -328,6 +328,32 @@ CONVERSATION_DECISIONS = Table(
     ),
 )
 
+PROVIDER_WEBHOOK_EVENTS = Table(
+    "provider_webhook_events",
+    metadata,
+    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("event_key", String(64), nullable=False),
+    Column("provider_event_id", String(128), nullable=True),
+    Column("event_name", String(96), nullable=False),
+    Column("schema_version", String(32), nullable=True),
+    Column("platform_message_id", String(128), nullable=True),
+    Column("chat_id", String(128), nullable=True),
+    Column("direction", String(16), nullable=False),
+    Column("source_class", String(32), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("error_category", String(64), nullable=True),
+    Column("provider_created_at", DateTime(timezone=True), nullable=True),
+    Column("received_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("processed_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint(
+        "creator_id",
+        "event_key",
+        name="uq_provider_webhook_event_key",
+    ),
+)
+
+
 FAN_CONTACT_POLICIES = Table(
     "fan_contact_policies",
     metadata,
@@ -573,6 +599,17 @@ Index(
     OUTBOX_MESSAGES.c.status,
     OUTBOX_MESSAGES.c.created_at,
     OUTBOX_MESSAGES.c.id,
+)
+Index(
+    "ix_provider_webhook_event_status",
+    PROVIDER_WEBHOOK_EVENTS.c.creator_id,
+    PROVIDER_WEBHOOK_EVENTS.c.status,
+    PROVIDER_WEBHOOK_EVENTS.c.received_at,
+)
+Index(
+    "ix_provider_webhook_event_message",
+    PROVIDER_WEBHOOK_EVENTS.c.creator_id,
+    PROVIDER_WEBHOOK_EVENTS.c.platform_message_id,
 )
 Index(
     "ix_outbox_permit_status",

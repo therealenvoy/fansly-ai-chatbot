@@ -21,6 +21,7 @@ import shutil
 import threading
 from pathlib import Path
 
+from .service_role import ServiceRole
 from dotenv import load_dotenv
 
 from .fansly_client import AuthError, PaymentRequiredError
@@ -88,6 +89,7 @@ def _env_bool(name: str, default: bool) -> bool:
 # ─── Config ────────────────────────────────────────────
 
 FANSLY_PROVIDER = os.getenv("FANSLY_PROVIDER", "apifansly").strip().lower()
+SERVICE_ROLE = ServiceRole.parse(os.getenv("SERVICE_ROLE", "all"))
 API_KEY = (
     os.getenv("APIFANSLY_API_KEY", "")
     if FANSLY_PROVIDER == "apifansly"
@@ -584,7 +586,10 @@ def run_server():
 
 
 server_thread = threading.Thread(target=run_server, daemon=True)
-server_thread.start()
+if SERVICE_ROLE.serves_api:
+    server_thread.start()
+else:
+    logger.info("Dashboard/webhook server disabled for role %s", SERVICE_ROLE.value)
 
 # ─── Poll Loop with Backoff ────────────────────────────
 
@@ -795,33 +800,36 @@ if bot is None:
     logger.info("Dashboard-only mode active; Fansly polling is disabled")
 else:
     logger.info(
-        "Starting Fansly Bot for creator '%s': %s reply workers, %ss "
+        "Starting Fansly Bot for creator '%s': role=%s, %s reply workers, %ss "
         "reconciliation",
         CREATOR_ID,
+        SERVICE_ROLE.value,
         REPLY_WORKER_COUNT,
         RECONCILIATION_INTERVAL,
     )
-    if WEBHOOK_REGISTRATION_ENABLED:
+    if SERVICE_ROLE.runs_scheduler and WEBHOOK_REGISTRATION_ENABLED:
         _start_background_worker(
             "webhook-registration",
             run_webhook_registration,
         )
-    if RECOVERY_RECONCILIATION_ENABLED:
+    if SERVICE_ROLE.runs_scheduler and RECOVERY_RECONCILIATION_ENABLED:
         _start_background_worker(
             "provider-reconciliation",
             run_reconciliation_worker,
         )
-    _start_background_worker("proactive-outreach", run_outreach_worker)
-    for worker_index in range(2, REPLY_WORKER_COUNT + 1):
-        _start_background_worker(
-            f"reply-worker-{worker_index}",
-            lambda index=worker_index: run_reply_worker(index),
-        )
+    if SERVICE_ROLE.runs_scheduler:
+        _start_background_worker("proactive-outreach", run_outreach_worker)
+    if SERVICE_ROLE.runs_reply_workers:
+        for worker_index in range(2, REPLY_WORKER_COUNT + 1):
+            _start_background_worker(
+                f"reply-worker-{worker_index}",
+                lambda index=worker_index: run_reply_worker(index),
+            )
 
-if crm_sync is not None:
+if crm_sync is not None and SERVICE_ROLE.runs_scheduler:
     _start_background_worker("crm-sync", run_crm_worker)
 
-if bot is not None:
+if bot is not None and SERVICE_ROLE.runs_reply_workers:
     run_reply_worker(1)
 else:
     while running:

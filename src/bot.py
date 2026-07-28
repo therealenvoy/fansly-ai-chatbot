@@ -18,6 +18,7 @@ from .fansly_client import (
 )
 from .provider_credit import ProviderBudgetExceeded, ProviderCircuitOpen
 from .contact_policy import ContactPolicyRepository, is_opt_out_message
+from .webhooks.repository import WebhookEventRepository
 from .conversation.llm import DeepSeekChatResponder
 from .conversation.brain import ConversationDecision
 from .conversation.mode import BotMode, ConversationPolicy
@@ -227,6 +228,9 @@ class FanslyBot:
             self.state_repo.engine
         )
         self.contact_policy_repo = ContactPolicyRepository(
+            self.state_repo.engine
+        )
+        self.webhook_event_repo = WebhookEventRepository(
             self.state_repo.engine
         )
         self.purchase_repo = PurchaseRepository(self.state_repo.engine)
@@ -530,42 +534,23 @@ class FanslyBot:
         """Persist one signed provider event and enqueue it idempotently."""
         if not self._fan_allowed(event.fan_id):
             return False
-        self.state_repo.ensure_conversation(
-            self.creator_id,
-            event.fan_id,
-            event.chat_id,
-            display_name=event.display_name,
-            username=event.username,
-        )
-        if self.message_store is not None:
-            self.message_store.save_message(
-                event.fan_id,
-                self.creator_id,
-                "fan",
-                event.content,
-                event.platform_message_id,
-                chat_id=event.chat_id,
-                attachments=list(event.attachments),
-                created_at=event.provider_created_at,
-            )
-        inbound_record, created = self.processing_repo.insert_inbound(
+        result = self.webhook_event_repo.ingest_received(
             creator_id=self.creator_id,
-            platform_message_id=event.platform_message_id,
-            fan_id=event.fan_id,
-            chat_id=event.chat_id,
-            content=event.content,
-            provider_created_at=event.provider_created_at,
-            trigger_kind="unread",
             available_at=self._reply_available_at(
                 event.platform_message_id
             ),
+            event=event,
         )
-        if created:
-            self._attribute_inbound_outcome(
-                inbound_record,
-                event.provider_created_at,
+        if result.created and result.inbound_message_id is not None:
+            inbound_record = self.processing_repo.get_inbound(
+                result.inbound_message_id
             )
-        return created
+            if inbound_record is not None:
+                self._attribute_inbound_outcome(
+                    inbound_record,
+                    event.provider_created_at,
+                )
+        return result.created
 
     def _attribute_inbound_outcome(
         self,

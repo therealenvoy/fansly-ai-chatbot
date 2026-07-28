@@ -4,6 +4,7 @@ Sidebar navigation, Linear-dark aesthetic, proper UX hierarchy per section.
 """
 import base64
 import binascii
+import hashlib
 import hmac
 import json
 import logging
@@ -1026,6 +1027,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/brain/experiments": return self._brain_experiments_save(b)
         self.j({"error":"not found"},404)
 
+    def _record_webhook_dead_letter(
+        self,
+        raw: bytes,
+        event_name: str,
+        category: str,
+    ) -> None:
+        repository = getattr(
+            getattr(self, "bot", None),
+            "webhook_event_repo",
+            None,
+        )
+        if repository is None:
+            return
+        try:
+            repository.record_dead_letter(
+                creator_id=self.server.creator_id,
+                event_key=hashlib.sha256(raw).hexdigest(),
+                event_name=event_name or "unknown",
+                error_category=category,
+            )
+        except Exception:
+            logger.exception("Failed to persist normalized webhook dead letter")
+
     def _onlyfansapi_fansly_webhook(self):
         """Authenticate and enqueue one OnlyFansAPI Fansly message event."""
         if not self._host_is_allowed():
@@ -1051,11 +1075,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
+            self._record_webhook_dead_letter(
+                raw,
+                "unknown",
+                "invalid_json",
+            )
             return self.j({"error": "invalid JSON payload"}, 400)
         if not isinstance(payload, dict):
             return self.j({"error": "invalid webhook payload"}, 400)
         event_name = str(payload.get("event") or "").strip()
         if event_name not in FANSLY_MESSAGE_EVENTS:
+            self._record_webhook_dead_letter(
+                raw,
+                event_name,
+                "unsupported_event",
+            )
             return self.j({"accepted": False, "ignored": True}, 202)
         if self.bot is None:
             return self.j({"error": "bot is unavailable"}, 503)
@@ -1072,6 +1106,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             created = self.bot.ingest_webhook_message(event)
         except InvalidWebhookEvent as exc:
             reason = str(exc)
+            self._record_webhook_dead_letter(
+                raw,
+                event_name,
+                reason.replace(" ", "_")[:64],
+            )
             if reason == "creator-authored message":
                 return self.j(
                     {"accepted": False, "ignored": True},

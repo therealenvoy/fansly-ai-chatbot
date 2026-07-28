@@ -69,7 +69,7 @@ def _text(*values: Any) -> str:
 
 def _provider_datetime(value: Any) -> datetime:
     if value is None or value == "":
-        return datetime.now(timezone.utc)
+        raise InvalidWebhookEvent("missing provider timestamp")
     if isinstance(value, datetime):
         result = value
     elif isinstance(value, (int, float)):
@@ -102,6 +102,10 @@ class OnlyFansApiFanslyMessage:
     attachments: tuple[dict, ...] = ()
     username: str | None = None
     display_name: str | None = None
+    event_key: str = ""
+    event_name: str = "fansly.messages.received"
+    provider_event_id: str | None = None
+    schema_version: str | None = None
 
     @classmethod
     def from_payload(
@@ -117,6 +121,15 @@ class OnlyFansApiFanslyMessage:
         event_name = _text(payload.get("event"))
         if event_name not in FANSLY_MESSAGE_EVENTS:
             raise InvalidWebhookEvent("unsupported event")
+        provider_event_id = _text(
+            payload.get("event_id"),
+            payload.get("eventId"),
+            payload.get("webhook_id"),
+        )
+        schema_version = _text(
+            payload.get("version"),
+            payload.get("schema_version"),
+        )
 
         account_id = _text(
             payload.get("account_id"),
@@ -198,7 +211,21 @@ class OnlyFansApiFanslyMessage:
             sender.get("name"),
             envelope.get("displayName"),
         )
+        stable_material = "\0".join(
+            (
+                event_name,
+                account_id,
+                platform_message_id,
+            )
+        )
+        event_key = hashlib.sha256(
+            stable_material.encode("utf-8")
+        ).hexdigest()
         return cls(
+            event_key=event_key,
+            event_name=event_name,
+            provider_event_id=provider_event_id or None,
+            schema_version=schema_version or None,
             platform_message_id=platform_message_id,
             account_id=account_id,
             chat_id=chat_id,

@@ -222,6 +222,15 @@ class MessageProcessingRepository:
             ).mappings().one()
         return self._inbound(claimed_row)
 
+    def get_inbound(self, inbound_message_id: int) -> InboundMessageRecord | None:
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                select(INBOUND_MESSAGES).where(
+                    INBOUND_MESSAGES.c.id == inbound_message_id
+                )
+            ).mappings().first()
+        return self._inbound(row) if row else None
+
     def get_outbox_for_inbound(
         self,
         inbound_message_id: int,
