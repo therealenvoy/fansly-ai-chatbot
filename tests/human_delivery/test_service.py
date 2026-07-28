@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, insert
+from sqlalchemy import create_engine, event, insert
 
 from src.human_delivery.guide import DEFAULT_CONVERSATION_GUIDE
 from src.human_delivery.service import HumanDeliveryService
@@ -46,6 +46,37 @@ def test_service_status_is_fail_closed_and_content_free():
         "deployment_ceiling_enforced": True,
     }
     assert "content" not in str(status)
+
+
+def test_service_status_uses_one_database_round_trip():
+    service = _service()
+    statements = []
+
+    def record_statement(*_args):
+        statements.append(1)
+
+    event.listen(
+        service.engine,
+        "before_cursor_execute",
+        record_statement,
+    )
+    try:
+        status = service.status()
+    finally:
+        event.remove(
+            service.engine,
+            "before_cursor_execute",
+            record_statement,
+        )
+
+    assert len(statements) == 1
+    assert status["documents"]["revision_count"] == 5
+    assert status["shadow_evidence"]["plans_by_status"] == {}
+    assert status["shadow_evidence"]["bubble_distribution"] == {
+        "1": 0,
+        "2": 0,
+        "3": 0,
+    }
 
 
 def test_save_and_activate_revision_never_claims_runtime_authority():

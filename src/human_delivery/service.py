@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 from typing import Mapping
 
-from sqlalchemy import and_, func, insert, select, update
+from sqlalchemy import (
+    String,
+    Text,
+    and_,
+    cast,
+    func,
+    insert,
+    literal,
+    select,
+    union_all,
+    update,
+)
 from sqlalchemy.engine import Engine
 
 from src.conversation.brain2_repository import FanMemoryV2Repository
@@ -17,6 +29,7 @@ from src.human_delivery.repository import (
     HumanResponsePlanRepository,
 )
 from src.human_delivery.schema import (
+    CONVERSATION_DOCUMENTS,
     CREATOR_FACTS,
     HUMAN_DELIVERY_REVIEWS,
     HUMAN_RESPONSE_BUBBLES,
@@ -75,76 +88,149 @@ class HumanDeliveryService:
         self.settings = settings
 
     def status(self) -> dict:
-        rows = self.documents.list_documents()
-        active = {
-            str(row["document_type"]): int(row["revision"])
-            for row in rows
-            if row["status"] == "active"
-        }
-        findings = [
-            dict(finding)
-            for row in rows
-            if row["status"] in {"active", "draft"}
-            for finding in (row.get("conflict_findings") or [])
-        ]
+        document_rows = select(
+            literal("document").label("kind"),
+            CONVERSATION_DOCUMENTS.c.document_type.label("key"),
+            CONVERSATION_DOCUMENTS.c.revision.label("count_value"),
+            CONVERSATION_DOCUMENTS.c.status.label("text_value"),
+            cast(
+                CONVERSATION_DOCUMENTS.c.conflict_findings,
+                Text,
+            ).label("payload"),
+        ).where(
+            CONVERSATION_DOCUMENTS.c.creator_id == self.creator_id
+        )
+        plan_status_rows = (
+            select(
+                literal("plan_status"),
+                HUMAN_RESPONSE_PLANS.c.status,
+                func.count(HUMAN_RESPONSE_PLANS.c.id),
+                literal(""),
+                literal(""),
+            )
+            .where(
+                HUMAN_RESPONSE_PLANS.c.creator_id == self.creator_id
+            )
+            .group_by(HUMAN_RESPONSE_PLANS.c.status)
+        )
+        bubble_status_rows = (
+            select(
+                literal("bubble_status"),
+                HUMAN_RESPONSE_BUBBLES.c.status,
+                func.count(HUMAN_RESPONSE_BUBBLES.c.id),
+                literal(""),
+                literal(""),
+            )
+            .select_from(
+                HUMAN_RESPONSE_BUBBLES.join(
+                    HUMAN_RESPONSE_PLANS,
+                    HUMAN_RESPONSE_BUBBLES.c.plan_id
+                    == HUMAN_RESPONSE_PLANS.c.id,
+                )
+            )
+            .where(
+                HUMAN_RESPONSE_PLANS.c.creator_id == self.creator_id
+            )
+            .group_by(HUMAN_RESPONSE_BUBBLES.c.status)
+        )
+        bubbles_per_plan_rows = (
+            select(
+                literal("bubbles_per_plan"),
+                cast(HUMAN_RESPONSE_PLANS.c.id, String),
+                func.count(HUMAN_RESPONSE_BUBBLES.c.id),
+                literal(""),
+                literal(""),
+            )
+            .select_from(
+                HUMAN_RESPONSE_PLANS.join(
+                    HUMAN_RESPONSE_BUBBLES,
+                    HUMAN_RESPONSE_PLANS.c.id
+                    == HUMAN_RESPONSE_BUBBLES.c.plan_id,
+                )
+            )
+            .where(
+                HUMAN_RESPONSE_PLANS.c.creator_id == self.creator_id
+            )
+            .group_by(HUMAN_RESPONSE_PLANS.c.id)
+        )
+        review_count_row = (
+            select(
+                literal("review_count"),
+                literal(""),
+                func.count(HUMAN_DELIVERY_REVIEWS.c.id),
+                literal(""),
+                literal(""),
+            )
+            .select_from(
+                HUMAN_DELIVERY_REVIEWS.join(
+                    HUMAN_RESPONSE_PLANS,
+                    HUMAN_DELIVERY_REVIEWS.c.plan_id
+                    == HUMAN_RESPONSE_PLANS.c.id,
+                )
+            )
+            .where(
+                HUMAN_RESPONSE_PLANS.c.creator_id == self.creator_id
+            )
+        )
+        active = {}
+        findings = []
+        plan_counts = {}
+        bubble_counts = {}
+        bubbles_per_plan = []
+        review_count = 0
+        revision_count = 0
+        with self.engine.connect() as connection:
+            status_rows = connection.execute(
+                union_all(
+                    document_rows,
+                    plan_status_rows,
+                    bubble_status_rows,
+                    bubbles_per_plan_rows,
+                    review_count_row,
+                )
+            ).mappings().all()
+        for row in status_rows:
+            kind = str(row["kind"])
+            if kind == "document":
+                revision_count += 1
+                if row["text_value"] == "active":
+                    active[str(row["key"])] = int(row["count_value"])
+                if row["text_value"] not in {"active", "draft"}:
+                    continue
+                try:
+                    parsed = json.loads(str(row["payload"] or "[]"))
+                except (TypeError, ValueError):
+                    parsed = []
+                if isinstance(parsed, list):
+                    findings.extend(
+                        dict(finding)
+                        for finding in parsed
+                        if isinstance(finding, dict)
+                    )
+            elif kind == "plan_status":
+                plan_counts[str(row["key"])] = int(row["count_value"])
+            elif kind == "bubble_status":
+                bubble_counts[str(row["key"])] = int(row["count_value"])
+            elif kind == "bubbles_per_plan":
+                bubbles_per_plan.append(int(row["count_value"]))
+            elif kind == "review_count":
+                review_count = int(row["count_value"])
         severity_counts = Counter(
             str(finding.get("severity") or "unknown")
             for finding in findings
         )
-        with self.engine.connect() as connection:
-            plan_counts = dict(
-                connection.execute(
-                    select(
-                        HUMAN_RESPONSE_PLANS.c.status,
-                        func.count(HUMAN_RESPONSE_PLANS.c.id),
-                    )
-                    .where(
-                        HUMAN_RESPONSE_PLANS.c.creator_id
-                        == self.creator_id
-                    )
-                    .group_by(HUMAN_RESPONSE_PLANS.c.status)
-                ).all()
-            )
-            bubble_counts = dict(
-                connection.execute(
-                    select(
-                        HUMAN_RESPONSE_BUBBLES.c.status,
-                        func.count(HUMAN_RESPONSE_BUBBLES.c.id),
-                    )
-                    .select_from(
-                        HUMAN_RESPONSE_BUBBLES.join(
-                            HUMAN_RESPONSE_PLANS,
-                            HUMAN_RESPONSE_BUBBLES.c.plan_id
-                            == HUMAN_RESPONSE_PLANS.c.id,
-                        )
-                    )
-                    .where(
-                        HUMAN_RESPONSE_PLANS.c.creator_id
-                        == self.creator_id
-                    )
-                    .group_by(HUMAN_RESPONSE_BUBBLES.c.status)
-                ).all()
-            )
-            review_count = int(
-                connection.execute(
-                    select(func.count(HUMAN_DELIVERY_REVIEWS.c.id))
-                    .select_from(
-                        HUMAN_DELIVERY_REVIEWS.join(
-                            HUMAN_RESPONSE_PLANS,
-                            HUMAN_DELIVERY_REVIEWS.c.plan_id
-                            == HUMAN_RESPONSE_PLANS.c.id,
-                        )
-                    )
-                    .where(
-                        HUMAN_RESPONSE_PLANS.c.creator_id
-                        == self.creator_id
-                    )
-                ).scalar_one()
-            )
+        bubble_distribution = {"1": 0, "2": 0, "3": 0}
+        for count in bubbles_per_plan:
+            bubble_distribution[str(min(max(count, 1), 3))] += 1
+        average_bubbles = (
+            round(sum(bubbles_per_plan) / len(bubbles_per_plan), 3)
+            if bubbles_per_plan
+            else 0.0
+        )
         return {
             "settings": self.settings.safe_status(),
             "documents": {
-                "revision_count": len(rows),
+                "revision_count": revision_count,
                 "active_revisions": active,
                 "finding_counts": dict(severity_counts),
             },
@@ -157,12 +243,8 @@ class HumanDeliveryService:
                     str(key): int(value)
                     for key, value in bubble_counts.items()
                 },
-                "bubble_distribution": self.plans.metrics(
-                    creator_id=self.creator_id
-                )["bubble_distribution"],
-                "average_bubbles": self.plans.metrics(
-                    creator_id=self.creator_id
-                )["average_bubbles"],
+                "bubble_distribution": bubble_distribution,
+                "average_bubbles": average_bubbles,
                 "blinded_reviews": review_count,
                 "model_powered_shadow_enabled": bool(
                     self.settings.shadow_authority
