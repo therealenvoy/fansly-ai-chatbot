@@ -164,3 +164,28 @@ def test_probe_rejects_model_not_exposed_by_account(store, monkeypatch):
             api_key="deepseek-secret-value-with-enough-length",
             model="deepseek-v4-flash",
         )
+
+
+
+def test_save_applies_runtime_key_and_model_to_strategic_analyzer(
+    store,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        MagicMock(return_value=_successful_models_response()),
+    )
+    service, _, _ = _service(store)
+    analyzer = MagicMock()
+    service.strategic_analyzer = analyzer
+
+    service.save(
+        api_key="deepseek-secret-value-with-enough-length",
+        model="deepseek-v4-pro",
+    )
+
+    analyzer.configure.assert_called_once_with(
+        api_key="deepseek-secret-value-with-enough-length",
+        model="deepseek-v4-pro",
+    )

@@ -17,7 +17,11 @@ from .conversation.llm import DeepSeekChatResponder
 from .conversation.brain import ConversationDecision
 from .conversation.mode import BotMode, ConversationPolicy
 from .conversation.repository import ConversationDecisionRepository
-from .conversation.brain2 import ConversationQualityGate
+from .conversation.authority import (
+    AutomaticRollbackEvaluator,
+    BrainAuthorityRouter,
+)
+from .conversation.brain2 import BrainRuntimeSettings, ConversationQualityGate
 from .conversation.brain2_repository import (
     ConversationEpisodeRepository,
     ConversationOutcomeRepository,
@@ -97,6 +101,7 @@ class FanslyBot:
         bot_mode: BotMode | str = BotMode.FULL_PPV,
         chat_responder: DeepSeekChatResponder | None = None,
         shadow_brain_service=None,
+        advanced_brain_service=None,
         brain_settings_service=None,
         episode_service=None,
         memory_extraction_service=None,
@@ -154,7 +159,10 @@ class FanslyBot:
         self.bot_mode = BotMode.parse(bot_mode)
         self.chat_responder = chat_responder
         self.shadow_brain_service = shadow_brain_service
+        self.advanced_brain_service = advanced_brain_service
         self.brain_settings_service = brain_settings_service
+        self.brain_authority_router = BrainAuthorityRouter()
+        self.brain_auto_rollback = AutomaticRollbackEvaluator()
         self.episode_service = episode_service
         self.chat_guidance = chat_guidance
         self.enable_unread_replies = bool(enable_unread_replies)
@@ -2100,7 +2108,91 @@ class FanslyBot:
         context["recent_tactics"] = [
             item.decision.tactic for item in recent_decisions
         ]
-        decision = self.chat_responder.decide(**context)
+        runtime_settings = (
+            self.brain_settings_service.snapshot()
+            if self.brain_settings_service is not None
+            else BrainRuntimeSettings()
+        )
+        authority_selection = self.brain_authority_router.select(
+            settings=runtime_settings,
+            creator_id=self.creator_id,
+            fan_id=fan_id,
+        )
+        requested_authority = authority_selection.authority
+        execution = {
+            "authority": "current",
+            "brain_version": "current-v1",
+            "route": None,
+            "experiment_id": authority_selection.experiment_id,
+            "variant": "control",
+            "provider_attempts": 0,
+            "model_calls": 0,
+            "retry_calls": 0,
+            "repair_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "latency_ms": 0,
+            "estimated_cost": 0.0,
+            "fallback_used": False,
+            "fallback_reason": None,
+            "gate_results": {},
+        }
+        decision = None
+        advanced_outcome = None
+        if requested_authority == "advanced" and self.advanced_brain_service is not None:
+            advanced_outcome = self.advanced_brain_service.decide(
+                fan_id=fan_id,
+                trigger_kind=trigger_kind,
+                context=context,
+            )
+            if advanced_outcome.succeeded:
+                decision = advanced_outcome.decision
+                execution.update(
+                    authority="advanced",
+                    brain_version=runtime_settings.version,
+                    route=advanced_outcome.route,
+                    variant="advanced",
+                    provider_attempts=advanced_outcome.provider_attempts,
+                    model_calls=advanced_outcome.model_calls,
+                    retry_calls=advanced_outcome.retry_calls,
+                    repair_calls=advanced_outcome.repair_calls,
+                    prompt_tokens=advanced_outcome.prompt_tokens,
+                    completion_tokens=advanced_outcome.completion_tokens,
+                    total_tokens=advanced_outcome.total_tokens,
+                    latency_ms=advanced_outcome.latency_ms,
+                    estimated_cost=advanced_outcome.estimated_cost,
+                    gate_results={
+                        "advanced": "approved",
+                        "reason_codes": list(advanced_outcome.gate_reason_codes),
+                    },
+                )
+            else:
+                execution.update(
+                    fallback_used=True,
+                    fallback_reason=advanced_outcome.fallback_reason,
+                    route=advanced_outcome.route,
+                    provider_attempts=advanced_outcome.provider_attempts,
+                    model_calls=advanced_outcome.model_calls,
+                    retry_calls=advanced_outcome.retry_calls,
+                    repair_calls=advanced_outcome.repair_calls,
+                    prompt_tokens=advanced_outcome.prompt_tokens,
+                    completion_tokens=advanced_outcome.completion_tokens,
+                    total_tokens=advanced_outcome.total_tokens,
+                    latency_ms=advanced_outcome.latency_ms,
+                    estimated_cost=advanced_outcome.estimated_cost,
+                    gate_results={
+                        "advanced": "rejected",
+                        "reason_codes": list(advanced_outcome.gate_reason_codes),
+                    },
+                )
+        elif requested_authority == "advanced":
+            execution.update(
+                fallback_used=True,
+                fallback_reason="advanced_service_unavailable",
+            )
+        if decision is None:
+            decision = self.chat_responder.decide(**context)
         recent_creator_messages: list[str] = []
         if self.message_store is not None:
             try:
@@ -2115,7 +2207,7 @@ class FanslyBot:
                 ]
             except Exception:
                 logger.exception("Failed to load creator repetition context")
-        if decision is None:
+        if decision is None and requested_authority != "advanced":
             fallback = self._safe_conversation_fallback(
                 trigger_kind=trigger_kind,
                 fan_message=context.get("fan_message"),
@@ -2132,46 +2224,92 @@ class FanslyBot:
                 )
         if decision is None:
             return None
-        gate = self.brain_quality_gate.evaluate(
-            decision.final_message,
-            recent_creator_messages=recent_creator_messages,
-            question_streak=int(brain_state["question_streak"]),
-            pet_name_streak=int(brain_state["pet_name_streak"]),
-            pet_names=tuple(self.persona.pet_names),
-            hard_boundaries=(
-                list(self.persona.content_boundaries)
-                + [
-                    memory["display_value"]
-                    for memory in memories
-                    if memory["memory_type"] == "boundary"
-                    and memory["status"] == "active"
-                ]
-            ),
-            max_length=500,
+        hard_boundaries = (
+            list(self.persona.content_boundaries)
+            + [
+                memory["display_value"]
+                for memory in memories
+                if memory["memory_type"] == "boundary"
+                and memory["status"] == "active"
+            ]
         )
-        if not gate.approved:
-            logger.warning(
-                "Conversation quality gate rejected %s: %s",
-                fan_id,
-                gate.reason_codes,
+        while True:
+            gate = self.brain_quality_gate.evaluate(
+                decision.final_message,
+                recent_creator_messages=recent_creator_messages,
+                question_streak=int(brain_state["question_streak"]),
+                pet_name_streak=int(brain_state["pet_name_streak"]),
+                pet_names=tuple(self.persona.pet_names),
+                hard_boundaries=hard_boundaries,
+                max_length=500,
             )
-            return None
-        approved = self._approve_conversation_text(
-            fan_id,
-            decision.final_message,
-        )
-        if not approved:
-            return None
+            approved = (
+                self._approve_conversation_text(fan_id, decision.final_message)
+                if gate.approved
+                else None
+            )
+            if gate.approved and approved:
+                break
+            if execution["authority"] != "advanced":
+                logger.warning(
+                    "Conversation decision rejected by final gates: %s",
+                    gate.reason_codes or ("content_or_style_rejected",),
+                )
+                return None
+            fallback_reason = (
+                "advanced_quality_gate_rejected"
+                if not gate.approved
+                else "advanced_content_or_style_rejected"
+            )
+            execution.update(
+                authority="current",
+                brain_version="current-v1",
+                variant="control",
+                fallback_used=True,
+                fallback_reason=fallback_reason,
+                gate_results={
+                    "advanced": "rejected",
+                    "reason_codes": list(gate.reason_codes),
+                },
+            )
+            decision = self.chat_responder.decide(**context)
+            if decision is None:
+                return None
         approved_decision = decision.with_approved_message(approved)
+        current_decision_id = None
         if inbound_id is not None:
-            self.conversation_decision_repo.save(
+            current_decision_id = self.conversation_decision_repo.save(
                 inbound_message_id=inbound_id,
                 creator_id=self.creator_id,
                 fan_id=fan_id,
                 trigger_kind=trigger_kind,
                 decision=approved_decision,
-                model=self.chat_responder.model,
+                model=(
+                    advanced_outcome.model
+                    if execution["authority"] == "advanced" and advanced_outcome is not None
+                    else self.chat_responder.model
+                ),
+                execution=execution,
             )
+        if (
+            requested_authority == "advanced"
+            and runtime_settings.auto_rollback
+            and self.brain_settings_service is not None
+        ):
+            try:
+                rollback_reason = self.brain_auto_rollback.evaluate(
+                    self.conversation_decision_repo.latest_execution_attempts(
+                        creator_id=self.creator_id,
+                        limit=100,
+                    )
+                )
+                if rollback_reason:
+                    self.brain_settings_service.rollback(
+                        actor="system",
+                        reason=rollback_reason,
+                    )
+            except Exception:
+                logger.exception("Automatic Brain rollback evaluation failed")
         recent_objectives = (
             [approved_decision.objective]
             + list(brain_state["recent_objectives"] or [])
@@ -2249,6 +2387,7 @@ class FanslyBot:
                     inbound_id=inbound_id,
                     fan_id=fan_id,
                     trigger_kind=trigger_kind,
+                    current_decision_id=current_decision_id,
                     context={
                         "fan_message": context.get("fan_message"),
                         "history": context.get("history"),

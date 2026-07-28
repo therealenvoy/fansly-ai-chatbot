@@ -17,6 +17,20 @@ def _integer(value, default: int, low: int, high: int) -> int:
     return min(max(parsed, low), high)
 
 
+def _boolean(value, default: bool) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _decimal(value, default: float, low: float, high: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return min(max(parsed, low), high)
+
+
 @dataclass(frozen=True)
 class BrainRuntimeSettings:
     mode: str = "current"
@@ -29,6 +43,12 @@ class BrainRuntimeSettings:
     max_output_tokens: int = 800
     json_repair_attempts: int = 1
     outcome_window_hours: int = 24
+    allow_advanced_send: bool = False
+    live_percent: int = 0
+    max_live_percent: int = 0
+    auto_rollback: bool = True
+    live_timeout_seconds: float = 8.0
+    max_daily_cost: float = 0.0
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, object]):
@@ -61,6 +81,24 @@ class BrainRuntimeSettings:
             ),
             outcome_window_hours=_integer(
                 values.get("BRAIN_OUTCOME_WINDOW_HOURS"), 24, 1, 168
+            ),
+            allow_advanced_send=_boolean(
+                values.get("BRAIN_ALLOW_ADVANCED_SEND"), False
+            ),
+            live_percent=_integer(
+                values.get("BRAIN_LIVE_PERCENT"), 0, 0, 100
+            ),
+            max_live_percent=_integer(
+                values.get("BRAIN_MAX_LIVE_PERCENT"), 0, 0, 100
+            ),
+            auto_rollback=_boolean(
+                values.get("BRAIN_AUTO_ROLLBACK"), True
+            ),
+            live_timeout_seconds=_decimal(
+                values.get("BRAIN_LIVE_TIMEOUT_SECONDS"), 8.0, 1.0, 30.0
+            ),
+            max_daily_cost=_decimal(
+                values.get("BRAIN_MAX_DAILY_COST"), 0.0, 0.0, 100_000.0
             ),
         )
 

@@ -21,6 +21,24 @@ class StoredConversationDecision:
     trigger_kind: str
     decision: ConversationDecision
     model: str
+    authority: str = "current"
+    brain_version: str = "current-v1"
+    route: str | None = None
+    experiment_id: str | None = None
+    variant: str | None = None
+    provider_attempts: int = 0
+    model_calls: int = 0
+    retry_calls: int = 0
+    repair_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    latency_ms: int = 0
+    estimated_cost: float = 0.0
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    gate_results: dict | None = None
+    safety_rejection_reason: str | None = None
 
 
 class ConversationDecisionRepository:
@@ -38,8 +56,10 @@ class ConversationDecisionRepository:
         trigger_kind: str,
         decision: ConversationDecision,
         model: str,
-    ) -> None:
+        execution: dict | None = None,
+    ) -> int:
         now = utcnow()
+        execution = execution or {}
         values = {
             "inbound_message_id": inbound_message_id,
             "creator_id": creator_id,
@@ -55,6 +75,24 @@ class ConversationDecisionRepository:
             "final_message": decision.final_message,
             "confidence": decision.confidence,
             "model": model,
+            "authority": str(execution.get("authority") or "current"),
+            "brain_version": str(execution.get("brain_version") or "current-v1"),
+            "route": execution.get("route"),
+            "experiment_id": execution.get("experiment_id"),
+            "variant": execution.get("variant"),
+            "provider_attempts": int(execution.get("provider_attempts") or 0),
+            "model_calls": int(execution.get("model_calls") or 0),
+            "retry_calls": int(execution.get("retry_calls") or 0),
+            "repair_calls": int(execution.get("repair_calls") or 0),
+            "prompt_tokens": int(execution.get("prompt_tokens") or 0),
+            "completion_tokens": int(execution.get("completion_tokens") or 0),
+            "total_tokens": int(execution.get("total_tokens") or 0),
+            "latency_ms": int(execution.get("latency_ms") or 0),
+            "estimated_cost": float(execution.get("estimated_cost") or 0.0),
+            "fallback_used": bool(execution.get("fallback_used")),
+            "fallback_reason": execution.get("fallback_reason"),
+            "gate_results": execution.get("gate_results") or {},
+            "safety_rejection_reason": execution.get("safety_rejection_reason"),
             "created_at": now,
             "updated_at": now,
         }
@@ -73,11 +111,35 @@ class ConversationDecisionRepository:
                 "final_message": excluded.final_message,
                 "confidence": excluded.confidence,
                 "model": excluded.model,
+                "authority": excluded.authority,
+                "brain_version": excluded.brain_version,
+                "route": excluded.route,
+                "experiment_id": excluded.experiment_id,
+                "variant": excluded.variant,
+                "provider_attempts": excluded.provider_attempts,
+                "model_calls": excluded.model_calls,
+                "retry_calls": excluded.retry_calls,
+                "repair_calls": excluded.repair_calls,
+                "prompt_tokens": excluded.prompt_tokens,
+                "completion_tokens": excluded.completion_tokens,
+                "total_tokens": excluded.total_tokens,
+                "latency_ms": excluded.latency_ms,
+                "estimated_cost": excluded.estimated_cost,
+                "fallback_used": excluded.fallback_used,
+                "fallback_reason": excluded.fallback_reason,
+                "gate_results": excluded.gate_results,
+                "safety_rejection_reason": excluded.safety_rejection_reason,
                 "updated_at": now,
             },
         )
         with self.engine.begin() as connection:
             connection.execute(statement)
+            decision_id = connection.execute(
+                select(CONVERSATION_DECISIONS.c.id).where(
+                    CONVERSATION_DECISIONS.c.inbound_message_id == inbound_message_id
+                )
+            ).scalar_one()
+        return int(decision_id)
 
     def get(
         self,
@@ -115,6 +177,24 @@ class ConversationDecisionRepository:
                 confidence=float(row["confidence"]),
             ),
             model=str(row["model"]),
+            authority=str(row["authority"] or "current"),
+            brain_version=str(row["brain_version"] or "current-v1"),
+            route=row["route"],
+            experiment_id=row["experiment_id"],
+            variant=row["variant"],
+            provider_attempts=int(row["provider_attempts"] or 0),
+            model_calls=int(row["model_calls"] or 0),
+            retry_calls=int(row["retry_calls"] or 0),
+            repair_calls=int(row["repair_calls"] or 0),
+            prompt_tokens=int(row["prompt_tokens"] or 0),
+            completion_tokens=int(row["completion_tokens"] or 0),
+            total_tokens=int(row["total_tokens"] or 0),
+            latency_ms=int(row["latency_ms"] or 0),
+            estimated_cost=float(row["estimated_cost"] or 0),
+            fallback_used=bool(row["fallback_used"]),
+            fallback_reason=row["fallback_reason"],
+            gate_results=dict(row["gate_results"] or {}),
+            safety_rejection_reason=row["safety_rejection_reason"],
         )
 
     def latest_for_fan(
@@ -161,6 +241,36 @@ class ConversationDecisionRepository:
             )
             for row in rows
         ]
+
+    def latest_execution_attempts(
+        self,
+        *,
+        creator_id: str,
+        limit: int = 100,
+    ) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    CONVERSATION_DECISIONS.c.authority,
+                    CONVERSATION_DECISIONS.c.fallback_used,
+                    CONVERSATION_DECISIONS.c.fallback_reason,
+                    CONVERSATION_DECISIONS.c.route,
+                    CONVERSATION_DECISIONS.c.latency_ms,
+                    CONVERSATION_DECISIONS.c.gate_results,
+                )
+                .where(
+                    and_(
+                        CONVERSATION_DECISIONS.c.creator_id == creator_id,
+                        (
+                            (CONVERSATION_DECISIONS.c.authority == "advanced")
+                            | (CONVERSATION_DECISIONS.c.fallback_used.is_(True))
+                        ),
+                    )
+                )
+                .order_by(CONVERSATION_DECISIONS.c.created_at.desc())
+                .limit(max(1, min(int(limit), 500)))
+            ).mappings().all()
+        return [dict(row) for row in rows]
 
     def _insert(self):
         if self.engine.dialect.name == "postgresql":

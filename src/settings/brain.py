@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Mapping
 
 from src.conversation.brain2 import BrainRuntimeSettings
+from src.conversation.brain2_repository import BrainConfigurationAuditRepository
 from src.settings.store import SettingsStore
 
 
@@ -47,6 +49,13 @@ _FIELDS = {
         "brain.outcome_window_hours",
         "BRAIN_OUTCOME_WINDOW_HOURS",
     ),
+    "live_percent": ("brain.live_percent", "BRAIN_LIVE_PERCENT"),
+    "auto_rollback": ("brain.auto_rollback", "BRAIN_AUTO_ROLLBACK"),
+    "live_timeout_seconds": (
+        "brain.live_timeout_seconds",
+        "BRAIN_LIVE_TIMEOUT_SECONDS",
+    ),
+    "max_daily_cost": ("brain.max_daily_cost", "BRAIN_MAX_DAILY_COST"),
 }
 
 
@@ -61,6 +70,7 @@ class BrainSettingsService:
         self.settings_store = settings_store
         self.environment = environment
         self.shadow_runtime = shadow_runtime
+        self.audit = BrainConfigurationAuditRepository(settings_store.engine)
 
     def snapshot(self) -> BrainRuntimeSettings:
         values = dict(self.environment)
@@ -70,7 +80,14 @@ class BrainSettingsService:
                 values[environment_key] = stored
         return BrainRuntimeSettings.from_mapping(values)
 
-    def save(self, updates: dict) -> BrainRuntimeSettings:
+    def save(
+        self,
+        updates: dict,
+        *,
+        actor: str = "crm",
+        reason: str | None = None,
+        _event_type: str = "settings_changed",
+    ) -> BrainRuntimeSettings:
         if not isinstance(updates, dict):
             raise BrainSettingsError("brain settings must be a JSON object")
         unknown = set(updates) - set(_FIELDS)
@@ -79,6 +96,7 @@ class BrainSettingsService:
                 f"unknown brain setting: {sorted(unknown)[0]}"
             )
         current = self.snapshot()
+        previous_values = asdict(current)
         merged = {
             field: getattr(current, field)
             for field in _FIELDS
@@ -94,9 +112,24 @@ class BrainSettingsService:
             ).lower()
             == "true"
         )
+        try:
+            requested_live = int(merged["live_percent"])
+        except (TypeError, ValueError) as exc:
+            raise BrainSettingsError("live_percent must be an integer") from exc
+        maximum_live = int(self.environment.get("BRAIN_MAX_LIVE_PERCENT", 0))
+        if requested_live < 0 or requested_live > 100:
+            raise BrainSettingsError("live_percent must be between 0 and 100")
         if mode == "advanced" and not allow_advanced:
             raise BrainSettingsError(
                 "advanced live authority is disabled by the deployment guard"
+            )
+        if requested_live > 0 and (mode != "advanced" or not allow_advanced):
+            raise BrainSettingsError(
+                "live_percent requires advanced mode and the deployment guard"
+            )
+        if requested_live > maximum_live:
+            raise BrainSettingsError(
+                "live_percent exceeds the deployment ceiling"
             )
         maximum_shadow = int(
             self.environment.get(
@@ -114,10 +147,13 @@ class BrainSettingsService:
             raise BrainSettingsError(
                 "shadow_sample_percent exceeds the deployment ceiling"
             )
-        environment_values = {
-            environment_key: merged[field]
-            for field, (_, environment_key) in _FIELDS.items()
-        }
+        environment_values = dict(self.environment)
+        environment_values.update(
+            {
+                environment_key: merged[field]
+                for field, (_, environment_key) in _FIELDS.items()
+            }
+        )
         validated = BrainRuntimeSettings.from_mapping(
             environment_values
         )
@@ -142,4 +178,25 @@ class BrainSettingsService:
         self.settings_store.set_many(database_values)
         if self.shadow_runtime is not None:
             self.shadow_runtime.update_settings(validated)
+        self.audit.record(
+            creator_id=self.settings_store.creator_id,
+            event_type=_event_type,
+            actor=str(actor)[:64],
+            previous_values=previous_values,
+            new_values=asdict(validated),
+            reason=(str(reason)[:256] if reason else None),
+        )
         return validated
+
+    def rollback(
+        self,
+        *,
+        actor: str = "crm",
+        reason: str = "manual rollback",
+    ) -> BrainRuntimeSettings:
+        return self.save(
+            {"mode": "current", "live_percent": 0},
+            actor=actor,
+            reason=reason,
+            _event_type="rollback",
+        )

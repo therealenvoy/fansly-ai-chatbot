@@ -3,12 +3,15 @@ import json
 from unittest.mock import MagicMock
 
 import httpx
+import pytest
 
 from sqlalchemy import func, select
 
 from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.shadow import (
+    CONTRACT_EXAMPLES,
     DeepSeekStrategicAnalyzer,
+    ProviderContractError,
     ShadowBrainService,
     StrategicResult,
 )
@@ -289,3 +292,373 @@ def test_fast_analyzer_serializes_durable_datetime_state(monkeypatch):
     assert result.model_calls == 1
     assert result.selected_candidate == "hey, how are you?"
     assert "updated_at" in post.call_args.kwargs["json"]["messages"][1]["content"]
+
+
+
+def _provider_response(content, *, finish_reason="stop", usage=None):
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    response.status_code = 200
+    response.json.return_value = {
+        "choices": [
+            {
+                "finish_reason": finish_reason,
+                "message": {"content": content},
+            }
+        ],
+        "usage": usage
+        or {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+        },
+    }
+    return response
+
+
+def _fast_payload(**changes):
+    payload = {
+        "fan_state": "engaged",
+        "objective": "maintain",
+        "tactic": "direct_answer",
+        "open_thread": None,
+        "confidence": 0.8,
+        "message": "hey, how are you?",
+    }
+    payload.update(changes)
+    return json.dumps(payload)
+
+
+def test_fast_contract_uses_json_mode_and_exact_schema_example(monkeypatch):
+    post = MagicMock(return_value=_provider_response(_fast_payload()))
+    monkeypatch.setattr(httpx, "post", post)
+
+    DeepSeekStrategicAnalyzer(
+        api_key="secret",
+        model="deepseek-v4-flash",
+    ).analyze_fast({"fan_message": "hey"})
+
+    request = post.call_args.kwargs["json"]
+    assert request["response_format"] == {"type": "json_object"}
+    assert '"fan_state"' in request["messages"][0]["content"]
+    assert '"message"' in request["messages"][0]["content"]
+
+
+def test_fast_contract_classifies_empty_output_and_retries_once(monkeypatch):
+    post = MagicMock(
+        side_effect=[
+            _provider_response(""),
+            _provider_response(""),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == "fast_output_empty"
+    assert error.value.diagnostic.attempt_count == 2
+    assert post.call_count == 2
+
+
+def test_fast_contract_classifies_truncation_and_retries_once(monkeypatch):
+    post = MagicMock(
+        side_effect=[
+            _provider_response('{"message":"hel', finish_reason="length"),
+            _provider_response('{"message":"hel', finish_reason="length"),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == "output_truncated"
+    assert error.value.diagnostic.finish_reason == "length"
+    assert post.call_count == 2
+
+
+def test_fast_contract_rejects_prefixed_or_trailing_prose(monkeypatch):
+    post = MagicMock(
+        return_value=_provider_response("Here is JSON: " + _fast_payload())
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == "fast_json_invalid"
+    assert post.call_count == 1
+
+
+def test_fast_contract_repairs_valid_json_with_schema_errors_once(monkeypatch):
+    post = MagicMock(
+        side_effect=[
+            _provider_response(_fast_payload(confidence="high")),
+            _provider_response(_fast_payload(confidence=0.8)),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    result = DeepSeekStrategicAnalyzer(
+        api_key="secret",
+        model="deepseek-v4-flash",
+    ).analyze_fast({"fan_message": "hey"})
+
+    assert result.selected_candidate == "hey, how are you?"
+    assert result.provider_attempts == 2
+    assert result.repair_calls == 1
+    assert post.call_count == 2
+
+
+def test_fast_contract_does_not_loop_when_schema_repair_fails(monkeypatch):
+    post = MagicMock(
+        side_effect=[
+            _provider_response(_fast_payload(confidence="high")),
+            _provider_response(_fast_payload(confidence="still-high")),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == "fast_schema_invalid"
+    assert error.value.diagnostic.attempt_count == 2
+    assert post.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        (httpx.TimeoutException("timeout"), "provider_timeout"),
+        (429, "provider_rate_limited"),
+        (503, "provider_server_error"),
+    ],
+)
+def test_retryable_provider_failures_retry_once(
+    monkeypatch,
+    failure,
+    expected,
+):
+    if isinstance(failure, int):
+        failed = MagicMock(spec=httpx.Response)
+        failed.status_code = failure
+        failed.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "provider error",
+            request=httpx.Request("POST", "https://api.deepseek.com"),
+            response=httpx.Response(failure),
+        )
+        failure = failed
+    post = MagicMock(side_effect=[failure, failure])
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+            retry_jitter_seconds=0,
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == expected
+    assert error.value.diagnostic.attempt_count == 2
+    assert post.call_count == 2
+
+
+def test_candidates_contract_requires_exact_styles_and_count(monkeypatch):
+    planner = {
+        "fan_emotion": "neutral",
+        "fan_energy": "medium",
+        "fan_intent": "chat",
+        "relationship_stage": "new",
+        "evidence_labels": [],
+        "confidence": 0.8,
+        "objective": "maintain",
+        "tactic": "direct_answer",
+        "active_thread": None,
+        "must_reference": [],
+        "must_avoid": [],
+        "target_length": "short",
+        "candidate_styles": [
+            "warm_attentive",
+            "playful_light",
+            "direct_confident",
+        ],
+        "risk_flags": [],
+    }
+    invalid = {
+        "candidates": [
+            {"style": "warm_attentive", "message": "one"},
+            {"style": "playful_light", "message": "two"},
+        ]
+    }
+    post = MagicMock(
+        side_effect=[
+            _provider_response(json.dumps(planner)),
+            _provider_response(json.dumps(invalid)),
+            _provider_response(json.dumps(invalid)),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze({"fan_message": "hey"})
+
+    assert error.value.code == "candidates_schema_invalid"
+    assert post.call_count == 3
+
+
+def test_judge_contract_rejects_out_of_range_winner():
+    analyzer = DeepSeekStrategicAnalyzer(
+        api_key="secret",
+        model="deepseek-v4-flash",
+    )
+    with pytest.raises(ProviderContractError) as error:
+        analyzer._validate_contract(
+            "judge",
+            {
+                "scores": [],
+                "hard_failures": [],
+                "winner": 3,
+                "confidence": 0.8,
+                "all_rejected": False,
+            },
+            context={"candidate_count": 3},
+        )
+
+    assert error.value.code == "judge_schema_invalid"
+
+
+
+def test_strategic_provider_attempts_never_exceed_per_turn_budget(monkeypatch):
+    planner = CONTRACT_EXAMPLES["planner"]
+    invalid_candidates = {"candidates": []}
+    valid_candidates = CONTRACT_EXAMPLES["candidates"]
+    invalid_judge = {
+        "scores": [],
+        "hard_failures": [],
+        "winner": 9,
+        "confidence": 0.8,
+        "all_rejected": False,
+    }
+    post = MagicMock(
+        side_effect=[
+            _provider_response(json.dumps(planner)),
+            _provider_response(json.dumps(invalid_candidates)),
+            _provider_response(json.dumps(valid_candidates)),
+            _provider_response(json.dumps(invalid_judge)),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze(
+            {
+                "fan_message": "hey",
+                "_max_provider_attempts_per_turn": 4,
+            }
+        )
+
+    assert error.value.code == "per_turn_call_cap"
+    assert post.call_count == 4
+
+
+
+def test_schema_repair_can_be_disabled_per_turn(monkeypatch):
+    post = MagicMock(
+        return_value=_provider_response(_fast_payload(confidence="high"))
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze_fast(
+            {
+                "fan_message": "hey",
+                "_json_repair_attempts": 0,
+            }
+        )
+
+    assert error.value.code == "fast_schema_invalid"
+    assert post.call_count == 1
+
+
+
+def test_one_provider_call_never_retries_and_repairs(monkeypatch):
+    post = MagicMock(
+        side_effect=[
+            httpx.TimeoutException("timeout"),
+            _provider_response(_fast_payload(confidence="high")),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+            retry_jitter_seconds=0,
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == "fast_schema_invalid"
+    assert post.call_count == 2
+
+
+
+def test_provider_network_error_retries_once(monkeypatch):
+    post = MagicMock(
+        side_effect=[
+            httpx.ConnectError("connection failed"),
+            httpx.ConnectError("connection failed"),
+        ]
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+            retry_jitter_seconds=0,
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == "provider_network_error"
+    assert post.call_count == 2
+
+
+def test_unexpected_finish_reason_is_classified_before_parsing(monkeypatch):
+    post = MagicMock(
+        return_value=_provider_response(
+            _fast_payload(),
+            finish_reason="content_filter",
+        )
+    )
+    monkeypatch.setattr(httpx, "post", post)
+
+    with pytest.raises(ProviderContractError) as error:
+        DeepSeekStrategicAnalyzer(
+            api_key="secret",
+            model="deepseek-v4-flash",
+        ).analyze_fast({"fan_message": "hey"})
+
+    assert error.value.code == "provider_content_filtered"
+    assert error.value.diagnostic.finish_reason == "content_filter"

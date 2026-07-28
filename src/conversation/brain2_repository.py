@@ -14,6 +14,10 @@ from src.conversation.brain2_schema import (
     BRAIN_EXPERIMENT_EVENTS,
     BRAIN_EXPERIMENTS,
     BRAIN_SHADOW_RUNS,
+    BRAIN_COST_BUCKETS,
+    BRAIN_CONFIGURATION_EVENTS,
+    BRAIN_COMPARISON_PAIRS,
+    BRAIN_BLINDED_REVIEWS,
     BRAIN_USAGE_BUCKETS,
     CONVERSATION_EPISODES,
     CONVERSATION_OUTCOMES,
@@ -746,6 +750,7 @@ class ShadowRunRepository(_Repository):
         brain_version: str,
         route: str,
         router: dict,
+        current_decision_id: int | None = None,
     ) -> tuple[int, bool]:
         values = {
             "inbound_message_id": inbound_message_id,
@@ -755,6 +760,8 @@ class ShadowRunRepository(_Repository):
             "status": "queued",
             "route": route,
             "router": router,
+            "current_decision_id": current_decision_id,
+            "planned_model_calls": 1 if route == "fast" else 3,
             "gate": {},
             "model_calls": 0,
             "latency_ms": 0,
@@ -776,6 +783,17 @@ class ShadowRunRepository(_Repository):
                     )
                 )
             ).scalar_one()
+            if current_decision_id is not None:
+                connection.execute(
+                    update(BRAIN_SHADOW_RUNS)
+                    .where(
+                        and_(
+                            BRAIN_SHADOW_RUNS.c.id == run_id,
+                            BRAIN_SHADOW_RUNS.c.current_decision_id.is_(None),
+                        )
+                    )
+                    .values(current_decision_id=current_decision_id)
+                )
         return int(run_id), created
 
     def complete(
@@ -788,6 +806,13 @@ class ShadowRunRepository(_Repository):
         gate: dict,
         selected_candidate: str | None,
         model_calls: int,
+        provider_attempts: int = 0,
+        retry_calls: int = 0,
+        repair_calls: int = 0,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        estimated_cost: float = 0.0,
         latency_ms: int,
     ) -> None:
         with self.engine.begin() as connection:
@@ -802,10 +827,47 @@ class ShadowRunRepository(_Repository):
                     gate=gate,
                     selected_candidate=selected_candidate,
                     model_calls=model_calls,
+                    provider_attempts=provider_attempts,
+                    retry_calls=retry_calls,
+                    repair_calls=repair_calls,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    estimated_cost=estimated_cost,
+                    fallback_used=bool(gate.get("fallback_used")),
+                    gate_rejected=not bool(gate.get("approved")),
                     latency_ms=latency_ms,
                     completed_at=utcnow(),
                 )
             )
+            run = connection.execute(
+                select(BRAIN_SHADOW_RUNS).where(BRAIN_SHADOW_RUNS.c.id == run_id)
+            ).mappings().one()
+            if run["current_decision_id"] is not None:
+                left = (
+                    "advanced"
+                    if int.from_bytes(
+                        hashlib.sha256(f"{run_id}:blind".encode()).digest()[:8],
+                        "big",
+                    )
+                    % 2
+                    == 0
+                    else "current"
+                )
+                statement = self._insert(BRAIN_COMPARISON_PAIRS).values(
+                    creator_id=run["creator_id"],
+                    shadow_run_id=run_id,
+                    current_decision_id=run["current_decision_id"],
+                    left_source=left,
+                    right_source="current" if left == "advanced" else "advanced",
+                    status="pending",
+                    created_at=utcnow(),
+                )
+                connection.execute(
+                    statement.on_conflict_do_nothing(
+                        index_elements=["shadow_run_id"]
+                    )
+                )
 
     def mark_capped(self, run_id: int) -> None:
         with self.engine.begin() as connection:
@@ -819,7 +881,20 @@ class ShadowRunRepository(_Repository):
                 )
             )
 
-    def fail(self, run_id: int, *, error_code: str, latency_ms: int) -> None:
+    def fail(
+        self,
+        run_id: int,
+        *,
+        error_code: str,
+        latency_ms: int,
+        error_stage: str | None = None,
+        provider_diagnostic: dict | None = None,
+        provider_attempts: int = 0,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        estimated_cost: float = 0.0,
+    ) -> None:
         with self.engine.begin() as connection:
             connection.execute(
                 update(BRAIN_SHADOW_RUNS)
@@ -827,10 +902,188 @@ class ShadowRunRepository(_Repository):
                 .values(
                     status="failed",
                     error_code=str(error_code)[:128],
+                    error_stage=(str(error_stage)[:32] if error_stage else None),
+                    provider_diagnostic=provider_diagnostic or {},
+                    provider_attempts=provider_attempts,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    estimated_cost=estimated_cost,
                     latency_ms=latency_ms,
                     completed_at=utcnow(),
                 )
             )
+
+
+class BrainCostCapRepository(_Repository):
+    def reserve(
+        self,
+        *,
+        creator_id: str,
+        estimated_cost: float,
+        daily_limit: float,
+        now: datetime | None = None,
+    ) -> bool:
+        cost = max(0.0, float(estimated_cost))
+        if daily_limit <= 0:
+            return True
+        current = _aware(now or utcnow())
+        day = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        with self.engine.begin() as connection:
+            statement = self._insert(BRAIN_COST_BUCKETS).values(
+                creator_id=creator_id,
+                bucket_start=day,
+                used_cost=0.0,
+                limit_snapshot=float(daily_limit),
+                updated_at=utcnow(),
+            ).on_conflict_do_nothing(
+                index_elements=["creator_id", "bucket_start"]
+            )
+            connection.execute(statement)
+            row = connection.execute(
+                select(BRAIN_COST_BUCKETS)
+                .where(
+                    and_(
+                        BRAIN_COST_BUCKETS.c.creator_id == creator_id,
+                        BRAIN_COST_BUCKETS.c.bucket_start == day,
+                    )
+                )
+                .with_for_update()
+            ).mappings().one()
+            if float(row["used_cost"] or 0) + cost > float(daily_limit):
+                return False
+            connection.execute(
+                update(BRAIN_COST_BUCKETS)
+                .where(
+                    and_(
+                        BRAIN_COST_BUCKETS.c.creator_id == creator_id,
+                        BRAIN_COST_BUCKETS.c.bucket_start == day,
+                    )
+                )
+                .values(
+                    used_cost=float(row["used_cost"] or 0) + cost,
+                    limit_snapshot=float(daily_limit),
+                    updated_at=utcnow(),
+                )
+            )
+        return True
+
+
+class BrainConfigurationAuditRepository(_Repository):
+    def record(
+        self,
+        *,
+        creator_id: str,
+        event_type: str,
+        actor: str,
+        previous_values: dict,
+        new_values: dict,
+        reason: str | None = None,
+    ) -> int:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                self._insert(BRAIN_CONFIGURATION_EVENTS).values(
+                    creator_id=creator_id,
+                    event_type=event_type,
+                    actor=actor,
+                    previous_values=previous_values,
+                    new_values=new_values,
+                    reason=reason,
+                    created_at=utcnow(),
+                )
+            )
+            return int(result.inserted_primary_key[0])
+
+    def recent(self, *, creator_id: str, limit: int = 50) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(BRAIN_CONFIGURATION_EVENTS)
+                .where(BRAIN_CONFIGURATION_EVENTS.c.creator_id == creator_id)
+                .order_by(desc(BRAIN_CONFIGURATION_EVENTS.c.created_at))
+                .limit(max(1, min(int(limit), 200)))
+            ).mappings().all()
+        return [dict(row) for row in rows]
+
+
+class BrainBlindedReviewRepository(_Repository):
+    SCORE_FIELDS = frozenset(
+        {
+            "relevance", "history_consistency", "memory_consistency",
+            "persona_fit", "specificity", "naturalness", "energy_matching",
+            "momentum", "repetition", "question_balance", "reply_likelihood",
+            "boundary_compliance", "conversation_only_compliance",
+        }
+    )
+
+    def save_review(
+        self,
+        *,
+        pair_id: int,
+        creator_id: str,
+        reviewer: str,
+        scores: dict,
+        winner: str,
+        hard_failures: list[str],
+    ) -> int:
+        if winner not in {"left", "right", "tie"}:
+            raise ValueError("invalid_review_winner")
+        if set(scores) != self.SCORE_FIELDS:
+            raise ValueError("invalid_review_score_fields")
+        normalized = {}
+        for field, values in scores.items():
+            if not isinstance(values, dict) or set(values) != {"left", "right"}:
+                raise ValueError("invalid_review_scores")
+            normalized[field] = {
+                side: min(max(float(value), 0.0), 10.0)
+                for side, value in values.items()
+            }
+        now = utcnow()
+        statement = self._insert(BRAIN_BLINDED_REVIEWS).values(
+            pair_id=pair_id,
+            creator_id=creator_id,
+            reviewer=reviewer,
+            scores=normalized,
+            winner=winner,
+            hard_failures=[str(item)[:128] for item in hard_failures[:20]],
+            created_at=now,
+            updated_at=now,
+        )
+        excluded = statement.excluded
+        statement = statement.on_conflict_do_update(
+            index_elements=["pair_id", "reviewer"],
+            set_={
+                "scores": excluded.scores,
+                "winner": excluded.winner,
+                "hard_failures": excluded.hard_failures,
+                "updated_at": now,
+            },
+        )
+        with self.engine.begin() as connection:
+            pair = connection.execute(
+                select(BRAIN_COMPARISON_PAIRS).where(
+                    and_(
+                        BRAIN_COMPARISON_PAIRS.c.id == pair_id,
+                        BRAIN_COMPARISON_PAIRS.c.creator_id == creator_id,
+                    )
+                )
+            ).mappings().first()
+            if pair is None:
+                raise ValueError("review_pair_not_found")
+            connection.execute(statement)
+            review_id = connection.execute(
+                select(BRAIN_BLINDED_REVIEWS.c.id).where(
+                    and_(
+                        BRAIN_BLINDED_REVIEWS.c.pair_id == pair_id,
+                        BRAIN_BLINDED_REVIEWS.c.reviewer == reviewer,
+                    )
+                )
+            ).scalar_one()
+            connection.execute(
+                update(BRAIN_COMPARISON_PAIRS)
+                .where(BRAIN_COMPARISON_PAIRS.c.id == pair_id)
+                .values(status="reviewed")
+            )
+        return int(review_id)
 
 
 def _aware(value: datetime) -> datetime:

@@ -154,7 +154,20 @@ BRAIN_SHADOW_RUNS = Table(
     Column("judge", JSON),
     Column("gate", JSON, nullable=False, default=dict),
     Column("selected_candidate", Text),
+    Column("current_decision_id", ID, ForeignKey("conversation_decisions.id")),
+    Column("planned_model_calls", Integer, nullable=False, default=0),
     Column("model_calls", Integer, nullable=False, default=0),
+    Column("provider_attempts", Integer, nullable=False, default=0),
+    Column("retry_calls", Integer, nullable=False, default=0),
+    Column("repair_calls", Integer, nullable=False, default=0),
+    Column("prompt_tokens", Integer, nullable=False, default=0),
+    Column("completion_tokens", Integer, nullable=False, default=0),
+    Column("total_tokens", Integer, nullable=False, default=0),
+    Column("estimated_cost", Float, nullable=False, default=0.0),
+    Column("fallback_used", Boolean, nullable=False, default=False),
+    Column("gate_rejected", Boolean, nullable=False, default=False),
+    Column("error_stage", String(32)),
+    Column("provider_diagnostic", JSON, nullable=False, default=dict),
     Column("latency_ms", Integer, nullable=False, default=0),
     Column("error_code", String(128)),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
@@ -221,6 +234,62 @@ BRAIN_USAGE_BUCKETS = Table(
     Column("used_calls", Integer, nullable=False, default=0),
     Column("limit_snapshot", Integer, nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+
+BRAIN_COST_BUCKETS = Table(
+    "brain_cost_buckets",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("bucket_start", DateTime(timezone=True), primary_key=True),
+    Column("used_cost", Float, nullable=False, default=0.0),
+    Column("limit_snapshot", Float, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+BRAIN_CONFIGURATION_EVENTS = Table(
+    "brain_configuration_events",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("event_type", String(32), nullable=False),
+    Column("actor", String(64), nullable=False),
+    Column("previous_values", JSON, nullable=False, default=dict),
+    Column("new_values", JSON, nullable=False, default=dict),
+    Column("reason", String(256)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+BRAIN_COMPARISON_PAIRS = Table(
+    "brain_comparison_pairs",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("shadow_run_id", ID, ForeignKey("brain_shadow_runs.id"), nullable=False),
+    Column("current_decision_id", ID, ForeignKey("conversation_decisions.id"), nullable=False),
+    Column("left_source", String(16), nullable=False),
+    Column("right_source", String(16), nullable=False),
+    Column("status", String(32), nullable=False, default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "shadow_run_id",
+        name="uq_brain_comparison_shadow_run",
+    ),
+)
+
+BRAIN_BLINDED_REVIEWS = Table(
+    "brain_blinded_reviews",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("pair_id", ID, ForeignKey("brain_comparison_pairs.id"), nullable=False),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("reviewer", String(64), nullable=False),
+    Column("scores", JSON, nullable=False),
+    Column("winner", String(16), nullable=False),
+    Column("hard_failures", JSON, nullable=False, default=list),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint("pair_id", "reviewer", name="uq_brain_blinded_review_reviewer"),
 )
 
 Index(

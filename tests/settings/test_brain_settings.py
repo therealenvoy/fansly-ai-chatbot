@@ -1,6 +1,7 @@
 import pytest
 
 from src.conversation.brain2 import BrainRuntimeSettings
+from src.conversation.brain2_repository import BrainConfigurationAuditRepository
 from src.persistence.database import create_database_engine
 from src.persistence.schema import metadata
 from src.settings.brain import BrainSettingsError, BrainSettingsService
@@ -81,3 +82,56 @@ def test_safe_default_keeps_current_live_authority():
     service, _, _ = _service()
 
     assert service.snapshot() == BrainRuntimeSettings()
+
+
+
+def test_live_percentage_requires_guard_advanced_mode_and_ceiling():
+    service, _, _ = _service(
+        {
+            "BRAIN_ALLOW_ADVANCED_SEND": "true",
+            "BRAIN_MAX_LIVE_PERCENT": "5",
+        }
+    )
+    with pytest.raises(BrainSettingsError):
+        service.save({"mode": "shadow", "live_percent": 1})
+    with pytest.raises(BrainSettingsError):
+        service.save({"mode": "advanced", "live_percent": 6})
+
+    saved = service.save({"mode": "advanced", "live_percent": 5})
+    assert saved.live_percent == 5
+    assert saved.max_live_percent == 5
+    assert saved.allow_advanced_send is True
+
+
+def test_rollback_is_immediate_persistent_and_audited():
+    service, store, runtime = _service(
+        {
+            "BRAIN_ALLOW_ADVANCED_SEND": "true",
+            "BRAIN_MAX_LIVE_PERCENT": "10",
+        }
+    )
+    service.save({"mode": "advanced", "live_percent": 5}, actor="operator")
+
+    rolled_back = service.rollback(
+        actor="operator",
+        reason="manual kill switch",
+    )
+
+    assert rolled_back.mode == "current"
+    assert rolled_back.live_percent == 0
+    assert runtime.settings == rolled_back
+    fresh = BrainSettingsService(
+        settings_store=store,
+        environment={
+            "BRAIN_ALLOW_ADVANCED_SEND": "true",
+            "BRAIN_MAX_LIVE_PERCENT": "10",
+        },
+    ).snapshot()
+    assert fresh.mode == "current"
+    assert fresh.live_percent == 0
+    events = BrainConfigurationAuditRepository(store.engine).recent(
+        creator_id=store.creator_id
+    )
+    assert events[0]["event_type"] == "rollback"
+    assert events[0]["reason"] == "manual kill switch"
+    assert "DASHBOARD_PASSWORD" not in str(events)

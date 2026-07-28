@@ -109,6 +109,7 @@ class DeepSeekSettingsService:
         environment_model: str | None = None,
         chat_responder=None,
         fact_extractor=None,
+        strategic_analyzer=None,
         timeout: float = 15.0,
     ):
         self.settings_store = settings_store
@@ -121,6 +122,7 @@ class DeepSeekSettingsService:
         self.model = normalize_deepseek_model(stored_model)
         self.chat_responder = chat_responder
         self.fact_extractor = fact_extractor
+        self.strategic_analyzer = strategic_analyzer
         self.timeout = timeout
         self._lock = threading.RLock()
         self._last_checked_at: datetime | None = None
@@ -141,7 +143,11 @@ class DeepSeekSettingsService:
     def apply_runtime(self) -> None:
         with self._lock:
             api_key, _ = self.active_api_key()
-            for client in (self.chat_responder, self.fact_extractor):
+            for client in (
+                self.chat_responder,
+                self.fact_extractor,
+                self.strategic_analyzer,
+            ):
                 if client is None:
                     continue
                 configure = getattr(client, "configure", None)

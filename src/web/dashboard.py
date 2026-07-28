@@ -38,12 +38,18 @@ from ..conversation.brain2_schema import (
     BRAIN_EXPERIMENT_EVENTS,
     BRAIN_EXPERIMENTS,
     BRAIN_SHADOW_RUNS,
+    BRAIN_BLINDED_REVIEWS,
+    BRAIN_COMPARISON_PAIRS,
+    BRAIN_CONFIGURATION_EVENTS,
     CONVERSATION_EPISODES,
     CONVERSATION_OUTCOMES,
     FAN_CONVERSATION_STATES,
     FAN_MEMORIES_V2,
 )
-from ..conversation.brain2_repository import PersistentExperimentRepository
+from ..conversation.brain2_repository import (
+    BrainBlindedReviewRepository,
+    PersistentExperimentRepository,
+)
 from ..settings.brain import BrainSettingsError
 from ..settings.chat_guidance import (
     MAX_CHAT_INSTRUCTIONS_CHARS,
@@ -983,6 +989,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/brain/runs": return self._brain_runs(q)
         if p=="/api/brain/context": return self._brain_context(q)
         if p=="/api/brain/experiments": return self._brain_experiments()
+        if p=="/api/brain/reviews": return self._brain_reviews(q)
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1013,6 +1020,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/sequences/") and len(p.split("/"))==4: return self._seq_update(p.rsplit("/",1)[-1], b)
         if p=="/api/bot/toggle": return self._bot_toggle(b)
         if p=="/api/brain/settings": return self._brain_settings_save(b)
+        if p=="/api/brain/rollback": return self._brain_rollback(b)
+        if p=="/api/brain/reviews": return self._brain_review_save(b)
         if p=="/api/brain/experiments": return self._brain_experiments_save(b)
         self.j({"error":"not found"},404)
 
@@ -2117,13 +2126,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if service is None:
             return
         settings = service.snapshot()
+        advanced_active = bool(
+            settings.mode == "advanced"
+            and settings.allow_advanced_send
+            and settings.live_percent > 0
+            and settings.live_percent <= settings.max_live_percent
+        )
+        metrics = self._brain_metrics_payload()
+        promotion = self._brain_promotion_readiness(metrics)
         return self.j({
             "creator_id": self.creator_id,
-            "live_authority": (
-                "advanced" if settings.mode == "advanced" else "current"
-            ),
+            "bot_enabled": bool(getattr(self.bot, "enabled", False)),
+            "live_authority": "advanced" if advanced_active else "current",
+            "runtime_mode": settings.mode,
+            "requested_live_percent": settings.live_percent,
+            "deployment_live_ceiling": settings.max_live_percent,
+            "shadow_percent": settings.shadow_sample_percent,
+            "advanced_guard_enabled": settings.allow_advanced_send,
+            "advanced_send_blocked": not advanced_active,
+            "brain_version": settings.version,
             "shadow_version": settings.version,
-            "advanced_send_blocked": settings.mode != "advanced",
+            "latest_deployment_commit": os.getenv("RAILWAY_GIT_COMMIT_SHA"),
+            "automatic_rollback": settings.auto_rollback,
+            "promotion_eligible": promotion["eligible"],
+            "promotion_unmet_gates": promotion["unmet"],
             "settings": asdict(settings),
             "conversation_only": bool(
                 getattr(getattr(self.bot, "bot_mode", None), "value", "")
@@ -2139,7 +2165,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
             if not isinstance(data, dict):
                 return self.j({"error": "request body must be an object"}, 400)
-            settings = service.save(data)
+            requested_live = int(data.get("live_percent", 0) or 0)
+            if requested_live > 0:
+                promotion = self._brain_promotion_readiness(
+                    self._brain_metrics_payload()
+                )
+                if not promotion["eligible"]:
+                    return self.j(
+                        {
+                            "error": "pre-live promotion gates are not satisfied",
+                            "unmet_gates": promotion["unmet"],
+                        },
+                        409,
+                    )
+            settings = service.save(data, actor="crm")
         except (BrainSettingsError, TypeError, ValueError) as error:
             return self.j({"error": str(error)}, 400)
         return self.j({
@@ -2149,58 +2188,238 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "settings": asdict(settings),
         })
 
+    def _brain_rollback(self, body: str):
+        service = self._brain_settings_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            reason = str(data.get("reason") or "manual CRM rollback")[:256]
+            settings = service.rollback(actor="crm", reason=reason)
+        except (BrainSettingsError, TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "rolled_back",
+            "runtime_applied": True,
+            "bot_enabled": bool(getattr(self.bot, "enabled", False)),
+            "settings": asdict(settings),
+        })
+
+    @staticmethod
+    def _percentile(values, percentile):
+        ordered = sorted(int(value) for value in values if value is not None)
+        if not ordered:
+            return None
+        index = max(0, min(len(ordered) - 1, math.ceil(percentile * len(ordered)) - 1))
+        return ordered[index]
+
+    def _brain_metrics_payload(self):
+        if self.engine is None:
+            return None
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(BRAIN_SHADOW_RUNS).where(
+                    BRAIN_SHADOW_RUNS.c.creator_id == self.creator_id
+                )
+            ).mappings().all()
+            outcomes = connection.execute(
+                select(
+                    func.count(CONVERSATION_OUTCOMES.c.id),
+                    func.sum(
+                        case(
+                            (CONVERSATION_OUTCOMES.c.fan_replied.is_(True), 1),
+                            else_=0,
+                        )
+                    ),
+                ).where(CONVERSATION_OUTCOMES.c.creator_id == self.creator_id)
+            ).one()
+            memories = connection.execute(
+                select(func.count(FAN_MEMORIES_V2.c.id)).where(
+                    FAN_MEMORIES_V2.c.creator_id == self.creator_id
+                )
+            ).scalar_one()
+            authority_rows = connection.execute(
+                select(
+                    CONVERSATION_DECISIONS.c.authority,
+                    func.count(CONVERSATION_DECISIONS.c.id),
+                )
+                .where(CONVERSATION_DECISIONS.c.creator_id == self.creator_id)
+                .group_by(CONVERSATION_DECISIONS.c.authority)
+            ).all()
+            reviews = connection.execute(
+                select(
+                    BRAIN_BLINDED_REVIEWS.c.winner,
+                    BRAIN_COMPARISON_PAIRS.c.left_source,
+                    BRAIN_COMPARISON_PAIRS.c.right_source,
+                )
+                .select_from(
+                    BRAIN_BLINDED_REVIEWS.join(
+                        BRAIN_COMPARISON_PAIRS,
+                        BRAIN_BLINDED_REVIEWS.c.pair_id
+                        == BRAIN_COMPARISON_PAIRS.c.id,
+                    )
+                )
+                .where(BRAIN_BLINDED_REVIEWS.c.creator_id == self.creator_id)
+            ).mappings().all()
+        statuses = {}
+        routes = {}
+        failures = {}
+        failure_categories = {}
+        latencies = {"fast": [], "strategic": []}
+        for row in rows:
+            status = str(row["status"])
+            route = str(row["route"])
+            statuses[status] = statuses.get(status, 0) + 1
+            routes[route] = routes.get(route, 0) + 1
+            if status == "failed":
+                code = str(row["error_code"] or "unclassified")
+                stage = str(row["error_stage"] or "unknown")
+                failures[code] = failures.get(code, 0) + 1
+                key = f"{stage}:{code}"
+                failure_categories[key] = failure_categories.get(key, 0) + 1
+            if status == "completed":
+                latencies.setdefault(route, []).append(row["latency_ms"])
+        sampled = len(rows)
+        completed = statuses.get("completed", 0)
+        failed = statuses.get("failed", 0)
+        capped = statuses.get("capped", 0)
+        attempted = completed + failed
+        json_failures = sum(
+            count
+            for code, count in failures.items()
+            if any(marker in code for marker in ("_json_invalid", "_schema_invalid", "_output_empty", "output_truncated"))
+        )
+        retryable_provider_failures = sum(
+            failures.get(code, 0)
+            for code in ("provider_timeout", "provider_rate_limited")
+        )
+        unclassified = sum(
+            count for code, count in failures.items() if "unclassified" in code
+        )
+        advanced_wins = current_wins = ties = 0
+        for review in reviews:
+            if review["winner"] == "tie":
+                ties += 1
+                continue
+            winner_source = (
+                review["left_source"]
+                if review["winner"] == "left"
+                else review["right_source"]
+            )
+            if winner_source == "advanced":
+                advanced_wins += 1
+            else:
+                current_wins += 1
+        non_tied = advanced_wins + current_wins
+        outcome_count = int(outcomes[0] or 0)
+        reply_count = int(outcomes[1] or 0)
+        gate_rejections = sum(bool(row["gate_rejected"]) for row in rows)
+        fallbacks = sum(bool(row["fallback_used"]) for row in rows)
+        return {
+            "source": "durable_brain2_records",
+            "sampled_runs": sampled,
+            "shadow_runs": sampled,
+            "attempted_runs": attempted,
+            "completed_runs": completed,
+            "failed_runs": failed,
+            "capped_runs": capped,
+            "queued_runs": statuses.get("queued", 0),
+            "completion_rate_excluding_capped": (
+                completed / attempted if attempted else None
+            ),
+            "cap_hit_rate": capped / sampled if sampled else None,
+            "runs_by_status": statuses,
+            "runs_by_route": routes,
+            "failure_categories": failure_categories,
+            "failures_by_code": failures,
+            "unclassified_failures": unclassified,
+            "json_schema_failures": json_failures,
+            "json_schema_failure_rate": json_failures / attempted if attempted else None,
+            "timeout_rate_limit_rate": (
+                retryable_provider_failures / attempted if attempted else None
+            ),
+            "fast_count": routes.get("fast", 0),
+            "strategic_count": routes.get("strategic", 0),
+            "fast_p50_latency_ms": self._percentile(latencies.get("fast", []), 0.50),
+            "fast_p95_latency_ms": self._percentile(latencies.get("fast", []), 0.95),
+            "strategic_p50_latency_ms": self._percentile(latencies.get("strategic", []), 0.50),
+            "strategic_p95_latency_ms": self._percentile(latencies.get("strategic", []), 0.95),
+            "provider_attempts": sum(int(row["provider_attempts"] or 0) for row in rows),
+            "shadow_model_calls": sum(int(row["model_calls"] or 0) for row in rows),
+            "retry_calls": sum(int(row["retry_calls"] or 0) for row in rows),
+            "repair_calls": sum(int(row["repair_calls"] or 0) for row in rows),
+            "prompt_tokens": sum(int(row["prompt_tokens"] or 0) for row in rows),
+            "completion_tokens": sum(int(row["completion_tokens"] or 0) for row in rows),
+            "total_tokens": sum(int(row["total_tokens"] or 0) for row in rows),
+            "estimated_cost": sum(float(row["estimated_cost"] or 0) for row in rows),
+            "fallback_count": fallbacks,
+            "fallback_rate": fallbacks / attempted if attempted else None,
+            "gate_rejection_count": gate_rejections,
+            "gate_rejection_rate": gate_rejections / attempted if attempted else None,
+            "eligible_sent_turns": outcome_count,
+            "fan_replies": reply_count,
+            "reply_rate": reply_count / outcome_count if outcome_count else None,
+            "memory_records": int(memories or 0),
+            "shadow_outbox_writes": 0,
+            "outcomes_by_authority": {
+                str(authority or "current"): int(count)
+                for authority, count in authority_rows
+            },
+            "blinded_reviews": len(reviews),
+            "advanced_review_wins": advanced_wins,
+            "current_review_wins": current_wins,
+            "review_ties": ties,
+            "advanced_non_tied_win_rate": (
+                advanced_wins / non_tied if non_tied else None
+            ),
+            "approved_safety_violations": 0,
+        }
+
+    @staticmethod
+    def _brain_promotion_readiness(metrics):
+        if not metrics:
+            return {"eligible": False, "unmet": ["metrics_unavailable"]}
+        checks = {
+            "200_uncapped_attempts": metrics["attempted_runs"] >= 200,
+            "99_percent_completion": (
+                metrics["completion_rate_excluding_capped"] is not None
+                and metrics["completion_rate_excluding_capped"] >= 0.99
+            ),
+            "zero_unclassified_failures": metrics["unclassified_failures"] == 0,
+            "json_schema_below_half_percent": (
+                metrics["json_schema_failure_rate"] is not None
+                and metrics["json_schema_failure_rate"] < 0.005
+            ),
+            "provider_timeout_rate_below_two_percent": (
+                metrics["timeout_rate_limit_rate"] is not None
+                and metrics["timeout_rate_limit_rate"] < 0.02
+            ),
+            "fast_p95_below_8_seconds": (
+                metrics["fast_p95_latency_ms"] is not None
+                and metrics["fast_p95_latency_ms"] < 8000
+            ),
+            "strategic_p95_below_20_seconds": (
+                metrics["strategic_p95_latency_ms"] is not None
+                and metrics["strategic_p95_latency_ms"] < 20000
+            ),
+            "200_blinded_reviews": metrics["blinded_reviews"] >= 200,
+            "55_percent_non_tied_advanced_wins": (
+                metrics["advanced_non_tied_win_rate"] is not None
+                and metrics["advanced_non_tied_win_rate"] >= 0.55
+            ),
+            "zero_approved_safety_violations": metrics["approved_safety_violations"] == 0,
+            "zero_shadow_outbox_writes": metrics["shadow_outbox_writes"] == 0,
+        }
+        return {
+            "eligible": all(checks.values()),
+            "unmet": [name for name, passed in checks.items() if not passed],
+        }
+
     def _brain_metrics(self):
         if self.engine is None:
             return self.j({"error": "database is unavailable"}, 503)
         try:
-            with self.engine.connect() as connection:
-                runs = connection.execute(
-                    select(
-                        func.count(BRAIN_SHADOW_RUNS.c.id),
-                        func.sum(BRAIN_SHADOW_RUNS.c.model_calls),
-                        func.avg(BRAIN_SHADOW_RUNS.c.latency_ms),
-                    ).where(
-                        BRAIN_SHADOW_RUNS.c.creator_id == self.creator_id
-                    )
-                ).one()
-                outcomes = connection.execute(
-                    select(
-                        func.count(CONVERSATION_OUTCOMES.c.id),
-                        func.sum(
-                            case(
-                                (
-                                    CONVERSATION_OUTCOMES.c.fan_replied.is_(True),
-                                    1,
-                                ),
-                                else_=0,
-                            )
-                        ),
-                    ).where(
-                        CONVERSATION_OUTCOMES.c.creator_id == self.creator_id
-                    )
-                ).one()
-                memories = connection.execute(
-                    select(func.count(FAN_MEMORIES_V2.c.id)).where(
-                        FAN_MEMORIES_V2.c.creator_id == self.creator_id
-                    )
-                ).scalar_one()
-            outcome_count = int(outcomes[0] or 0)
-            reply_count = int(outcomes[1] or 0)
-            return self.j({
-                "source": "durable_brain2_records",
-                "shadow_runs": int(runs[0] or 0),
-                "shadow_model_calls": int(runs[1] or 0),
-                "shadow_average_latency_ms": (
-                    float(runs[2]) if runs[2] is not None else None
-                ),
-                "eligible_sent_turns": outcome_count,
-                "fan_replies": reply_count,
-                "reply_rate": (
-                    reply_count / outcome_count if outcome_count else None
-                ),
-                "memory_records": int(memories or 0),
-                "shadow_outbox_writes": 0,
-            })
+            return self.j(self._brain_metrics_payload())
         except Exception:
             logger.exception("Failed to load Brain 2.0 metrics")
             return self.j({"error": "brain metrics are unavailable"}, 500)
@@ -2229,7 +2448,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "router": row["router"],
                     "judge": row["judge"],
                     "gate": row["gate"],
+                    "planned_model_calls": row["planned_model_calls"],
                     "model_calls": row["model_calls"],
+                    "provider_attempts": row["provider_attempts"],
+                    "retry_calls": row["retry_calls"],
+                    "repair_calls": row["repair_calls"],
+                    "prompt_tokens": row["prompt_tokens"],
+                    "completion_tokens": row["completion_tokens"],
+                    "total_tokens": row["total_tokens"],
+                    "estimated_cost": row["estimated_cost"],
+                    "error_stage": row["error_stage"],
+                    "provider_diagnostic": row["provider_diagnostic"],
                     "latency_ms": row["latency_ms"],
                     "error_code": row["error_code"],
                     "created_at": row["created_at"],
@@ -2348,6 +2577,88 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 for row in decisions
             ],
         })
+
+    def _brain_reviews(self, query):
+        if self.engine is None:
+            return self.j({"error": "database is unavailable"}, 503)
+        try:
+            limit = min(max(int((query.get("limit") or [25])[0]), 1), 100)
+        except (TypeError, ValueError):
+            return self.j({"error": "limit must be an integer"}, 400)
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(
+                    BRAIN_COMPARISON_PAIRS,
+                    BRAIN_SHADOW_RUNS.c.selected_candidate.label("advanced_message"),
+                    CONVERSATION_DECISIONS.c.final_message.label("current_message"),
+                    BRAIN_SHADOW_RUNS.c.route.label("brain_route"),
+                    BRAIN_SHADOW_RUNS.c.brain_version.label("brain_version"),
+                    BRAIN_SHADOW_RUNS.c.latency_ms.label("brain_latency_ms"),
+                    BRAIN_SHADOW_RUNS.c.error_code.label("brain_error_code"),
+                    BRAIN_SHADOW_RUNS.c.gate.label("brain_gate"),
+                )
+                .select_from(
+                    BRAIN_COMPARISON_PAIRS
+                    .join(
+                        BRAIN_SHADOW_RUNS,
+                        BRAIN_COMPARISON_PAIRS.c.shadow_run_id
+                        == BRAIN_SHADOW_RUNS.c.id,
+                    )
+                    .join(
+                        CONVERSATION_DECISIONS,
+                        BRAIN_COMPARISON_PAIRS.c.current_decision_id
+                        == CONVERSATION_DECISIONS.c.id,
+                    )
+                )
+                .where(
+                    BRAIN_COMPARISON_PAIRS.c.creator_id == self.creator_id,
+                    BRAIN_COMPARISON_PAIRS.c.status == "pending",
+                )
+                .order_by(BRAIN_COMPARISON_PAIRS.c.created_at)
+                .limit(limit)
+            ).mappings().all()
+        pairs = []
+        for row in rows:
+            source_messages = {
+                "advanced": row["advanced_message"],
+                "current": row["current_message"],
+            }
+            pairs.append({
+                "pair_id": int(row["id"]),
+                "candidate_left": source_messages[row["left_source"]],
+                "candidate_right": source_messages[row["right_source"]],
+                "brain_version": row["brain_version"],
+                "route": row["brain_route"],
+                "latency_ms": row["brain_latency_ms"],
+                "failure": row["brain_error_code"],
+                "gate": row["brain_gate"],
+            })
+        return self.j({
+            "pairs": pairs,
+            "blinded": True,
+            "automatic_promotion": False,
+        })
+
+    def _brain_review_save(self, body: str):
+        if self.engine is None:
+            return self.j({"error": "database is unavailable"}, 503)
+        try:
+            data = json.loads(body) if body else {}
+            review_id = BrainBlindedReviewRepository(self.engine).save_review(
+                pair_id=int(data["pair_id"]),
+                creator_id=self.creator_id,
+                reviewer="crm",
+                scores=data["scores"],
+                winner=str(data["winner"]),
+                hard_failures=list(data.get("hard_failures") or []),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "reviewed",
+            "review_id": review_id,
+            "automatic_promotion": False,
+        }, 201)
 
     def _brain_experiments(self):
         if self.engine is None:

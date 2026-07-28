@@ -52,6 +52,7 @@ from .crm.sync import CrmSyncService
 from .persistence.crm import CrmSyncRepository
 from .conversation.llm import DeepSeekChatResponder
 from .conversation.mode import BotMode
+from .conversation.advanced import AdvancedBrainDecisionService
 from .conversation.brain2 import BrainRuntimeSettings
 from .conversation.brain2_episodes import ConversationEpisodeService
 from .conversation.brain2_repository import ConversationEpisodeRepository
@@ -289,15 +290,16 @@ chat_responder = DeepSeekChatResponder(
     json_repair_attempts=int(os.getenv("BRAIN_JSON_REPAIR_ATTEMPTS", "1")),
 )
 brain_runtime_settings = BrainRuntimeSettings.from_mapping(os.environ)
+strategic_analyzer = DeepSeekStrategicAnalyzer(
+    api_key=deepseek_api_key,
+    model=ai_settings.model,
+    max_output_tokens=brain_runtime_settings.max_output_tokens,
+)
 shadow_brain_service = ShadowBrainService(
     engine=database_engine,
     creator_id=CREATOR_ID,
     settings=brain_runtime_settings,
-    analyzer=DeepSeekStrategicAnalyzer(
-        api_key=deepseek_api_key,
-        model=ai_settings.model,
-        max_output_tokens=brain_runtime_settings.max_output_tokens,
-    ),
+    analyzer=strategic_analyzer,
 )
 brain_settings_service = BrainSettingsService(
     settings_store=settings_store,
@@ -305,6 +307,12 @@ brain_settings_service = BrainSettingsService(
     shadow_runtime=shadow_brain_service,
 )
 shadow_brain_service.update_settings(brain_settings_service.snapshot())
+advanced_brain_service = AdvancedBrainDecisionService(
+    engine=database_engine,
+    creator_id=CREATOR_ID,
+    analyzer=strategic_analyzer,
+    settings_provider=brain_settings_service.snapshot,
+)
 episode_service = ConversationEpisodeService(
     creator_id=CREATOR_ID,
     message_store=message_store,
@@ -312,6 +320,7 @@ episode_service = ConversationEpisodeService(
 )
 ai_settings.fact_extractor = fact_extractor
 ai_settings.chat_responder = chat_responder
+ai_settings.strategic_analyzer = strategic_analyzer
 if fact_extractor.enabled:
     logger.info(
         "DeepSeek enabled: model=%s source=%s",
@@ -392,6 +401,7 @@ if api_ok:
             bot_mode=BOT_MODE,
             chat_responder=chat_responder,
             shadow_brain_service=shadow_brain_service,
+            advanced_brain_service=advanced_brain_service,
             brain_settings_service=brain_settings_service,
             episode_service=episode_service,
             chat_guidance=chat_guidance,
@@ -729,6 +739,7 @@ else:
 if bot is not None and bot.memory_extraction_service is not None:
     bot.memory_extraction_service.shutdown()
 episode_service.shutdown()
+advanced_brain_service.shutdown()
 shadow_brain_service.shutdown()
 client.close()
 logger.info("Bot stopped.")
