@@ -84,8 +84,12 @@ class HumanDeliveryControlService:
 
     def snapshot(self) -> HumanDeliverySettings:
         values = dict(self.environment)
+        stored_values = self.settings_store.get_many_scoped(
+            database_key
+            for database_key, _ in _FIELDS.values()
+        )
         for _, (database_key, environment_key) in _FIELDS.items():
-            stored = self.settings_store.get_scoped(database_key)
+            stored = stored_values.get(database_key)
             if stored is not None:
                 values[environment_key] = stored
         requested = HumanDeliverySettings.from_mapping(values)

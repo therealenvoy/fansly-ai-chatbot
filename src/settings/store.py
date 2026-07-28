@@ -50,6 +50,27 @@ class SettingsStore:
         value = self._get_for_creator(self.creator_id, key)
         return value if value is not None else default
 
+    def get_many_scoped(self, keys) -> dict[str, str]:
+        """Read several creator-scoped values in one database round trip."""
+        normalized = tuple(dict.fromkeys(str(key) for key in keys))
+        if not normalized:
+            return {}
+        stmt = select(
+            CREATOR_SETTINGS.c.key,
+            CREATOR_SETTINGS.c.value,
+        ).where(
+            and_(
+                CREATOR_SETTINGS.c.creator_id == self.creator_id,
+                CREATOR_SETTINGS.c.key.in_(normalized),
+            )
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        return {
+            str(key): str(value)
+            for key, value in rows
+        }
+
     def set(self, key: str, value: str):
         self.set_many({key: value})
 

@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 
 from src.human_delivery.control import (
     HumanDeliveryControlError,
@@ -34,6 +34,36 @@ def test_database_request_cannot_override_disabled_deployment():
     assert settings.enabled is False
     assert settings.mode == "off"
     assert settings.live_percent == 0
+    assert settings.live_authority is False
+
+
+def test_snapshot_reads_all_database_overrides_in_one_round_trip():
+    store = _store()
+    control = HumanDeliveryControlService(
+        settings_store=store,
+        environment={"HUMAN_DELIVERY_ENABLED": "false"},
+    )
+    statements = []
+
+    def record_statement(*_args):
+        statements.append(1)
+
+    event.listen(
+        store.engine,
+        "before_cursor_execute",
+        record_statement,
+    )
+    try:
+        settings = control.snapshot()
+    finally:
+        event.remove(
+            store.engine,
+            "before_cursor_execute",
+            record_statement,
+        )
+
+    assert len(statements) == 1
+    assert settings.enabled is False
     assert settings.live_authority is False
 
 
