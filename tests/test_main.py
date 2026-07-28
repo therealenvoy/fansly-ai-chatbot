@@ -538,25 +538,33 @@ def test_crm_backfill_uses_dedicated_short_interval(
 # ═══════════════════════════════════════════════════════════════
 
 class TestCreditAwarenessLogging:
-    """Provider-aware startup logging should not mix billing models."""
+    """Webhook-first startup logging must not invent a polling baseline."""
 
-    def test_logs_estimated_monthly_requests(self, module, caplog):
+    def test_logs_bounded_webhook_recovery_policy(self, module, caplog):
         os.environ["POLL_INTERVAL"] = "300"
         importlib.reload(module)
 
         assert any(
-            "8,640/month" in r.message
-            and "APIFansly chat-list baseline" in r.message
+            "routine chat polling is disabled" in r.message
+            and "interval=21600s" in r.message
             for r in caplog.records
-        ), "Expected the APIFansly chat-list baseline in startup logs"
+        ), "Expected the bounded webhook recovery policy in startup logs"
 
-    def test_legacy_provider_warns_if_exceeding_basic_plan(self, module, caplog):
+    def test_poll_interval_no_longer_creates_a_fake_credit_baseline(
+        self,
+        module,
+        caplog,
+    ):
         os.environ["FANSLY_PROVIDER"] = "fanslyapi"
         os.environ["FANSLY_API_KEY"] = "legacy_test_key"
         os.environ["POLL_INTERVAL"] = "60"
         importlib.reload(module)
 
-        assert any(
-            "exceed the OnlyFansAPI Basic plan" in r.message
+        assert not any(
+            "OnlyFansAPI Basic plan" in r.message
             for r in caplog.records
-        ), "Expected warning about exceeding Basic plan credits"
+        )
+        assert any(
+            "routine chat polling is disabled" in r.message
+            for r in caplog.records
+        )
