@@ -1,0 +1,33 @@
+{
+  "catalog_version": "fansly-2026-07-28",
+  "provider": "OnlyFansAPI",
+  "product": "Fansly",
+  "credits_used_to_verify": 0,
+  "events": [
+    {"value": "fansly.messages.received", "description": "Fansly message received"},
+    {"value": "fansly.messages.sent", "description": "Fansly message sent"},
+    {"value": "fansly.messages.deleted", "description": "Fansly message deleted"},
+    {"value": "fansly.users.typing", "description": "Fansly user typing"},
+    {"value": "fansly.messages.read", "description": "Fansly messages read"},
+    {"value": "fansly.subscriptions.new", "description": "Fansly new subscription"},
+    {"value": "fansly.tips.received", "description": "Fansly tip received"},
+    {"value": "fansly.transactions.new", "description": "Fansly new transaction"},
+    {"value": "fansly.accounts.connected", "description": "Fansly account connected"},
+    {"value": "fansly.accounts.authentication_failed", "description": "Fansly account authentication failed"},
+    {"value": "fansly.followers.new", "description": "Fansly new follower"},
+    {"value": "fansly.followers.removed", "description": "Fansly follower removed"},
+    {"value": "fansly.subscriptions.expired", "description": "Fansly subscription expired"},
+    {"value": "fansly.posts.liked", "description": "Fansly post liked"},
+    {"value": "fansly.media.liked", "description": "Fansly media liked"},
+    {"value": "fansly.media.purchased", "description": "Fansly media purchased"},
+    {"value": "fansly.payouts.created", "description": "Fansly payout request created"},
+    {"value": "fansly.payouts.updated", "description": "Fansly payout request updated"},
+    {"value": "fansly.messages.reaction_added", "description": "Fansly message reaction added"},
+    {"value": "fansly.messages.reaction_removed", "description": "Fansly message reaction removed"},
+    {"value": "fansly.posts.created", "description": "Fansly post created"},
+    {"value": "fansly.posts.updated", "description": "Fansly post updated"},
+    {"value": "fansly.posts.deleted", "description": "Fansly post deleted"},
+    {"value": "fansly.posts.pinned", "description": "Fansly post pinned"},
+    {"value": "fansly.stories.purchased", "description": "Fansly story purchased"}
+  ]
+}
