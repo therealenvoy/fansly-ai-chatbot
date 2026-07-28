@@ -416,6 +416,72 @@ def test_controlled_launch_ingests_only_allowlisted_fans():
     ) == bot._chat_checkpoint(allowed)
 
 
+def test_recovery_chat_discovery_is_bounded_by_page_cap():
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        recovery_chat_pages_per_run=2,
+    )
+    first = _chat(
+        unread_count=0,
+        last_message_id="message-1",
+        chat_id="chat-1",
+        fan_id="fan-1",
+    )
+    second = _chat(
+        unread_count=0,
+        last_message_id="message-2",
+        chat_id="chat-2",
+        fan_id="fan-2",
+    )
+    bot.client.list_chats_page.side_effect = [
+        ([first], 100),
+        ([second], 200),
+        ([], None),
+    ]
+
+    bot.reconcile_provider()
+
+    assert bot.client.list_chats_page.call_count == 2
+    assert [
+        item.kwargs["offset"]
+        for item in bot.client.list_chats_page.call_args_list
+    ] == [0, 100]
+
+
+def test_recovery_message_read_is_bounded_and_advances_newest_head():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        recovery_message_pages_per_chat=1,
+    )
+    chat = _chat(
+        unread_count=2,
+        last_message_id="message-2",
+    )
+    bot.client.list_messages.return_value = (
+        [_message(2)],
+        "older-page",
+    )
+
+    inserted, complete = bot._ingest_chat_messages(chat)
+
+    assert inserted == 1
+    assert complete is True
+    bot.client.list_messages.assert_called_once_with(
+        "chat-a",
+        limit=100,
+        cursor=None,
+    )
+    checkpoint, provider_cursor = (
+        bot.state_repo.get_conversation_checkpoint(
+            "creator-a",
+            "chat-a",
+        )
+    )
+    assert checkpoint == "message-2"
+    assert provider_cursor is None
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+
+
 def test_first_scan_processes_only_the_provider_unread_window():
     engine, bot = _bot()
     chat = _chat(unread_count=2, last_message_id="message-5")

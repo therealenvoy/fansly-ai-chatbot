@@ -35,6 +35,8 @@ REQUIRED_VARS = [
     "REPLY_WORKER_IDLE_SECONDS",
     "RECONCILIATION_INTERVAL",
     "RECOVERY_RECONCILIATION_ENABLED",
+    "RECOVERY_CHAT_PAGES_PER_RUN",
+    "RECOVERY_MESSAGE_PAGES_PER_CHAT",
     "WEBHOOK_REGISTRATION_ENABLED",
     "WEBHOOK_EVENT_PROFILE",
     "PROVIDER_MONTHLY_CREDIT_LIMIT",
@@ -125,6 +127,9 @@ class TestEnvExampleContent:
         assert "ENABLE_ONLINE_OUTREACH=false" in content
         assert "CRM_SYNC_ENABLED=false" in content
         assert "RECOVERY_RECONCILIATION_ENABLED=false" in content
+        assert "RECONCILIATION_INTERVAL=21600" in content
+        assert "RECOVERY_CHAT_PAGES_PER_RUN=2" in content
+        assert "RECOVERY_MESSAGE_PAGES_PER_CHAT=5" in content
         assert "DEEPSEEK_MODEL=deepseek-v4-flash" in content
 
     def test_env_file_structure(self):

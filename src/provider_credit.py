@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Engine, and_, insert, select, update
+from sqlalchemy import Engine, and_, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from .persistence.schema import (
@@ -438,10 +438,63 @@ class ProviderCreditGovernor:
                 }
                 for row in rows
             ]
+            usage_rows = connection.execute(
+                select(
+                    PROVIDER_CREDIT_EVENTS.c.worker,
+                    PROVIDER_CREDIT_EVENTS.c.request_class,
+                    func.count(PROVIDER_CREDIT_EVENTS.c.id).label(
+                        "request_count"
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            PROVIDER_CREDIT_EVENTS.c.used_credits
+                        ),
+                        0,
+                    ).label("used_credits"),
+                )
+                .where(
+                    and_(
+                        PROVIDER_CREDIT_EVENTS.c.creator_id
+                        == self.creator_id,
+                        PROVIDER_CREDIT_EVENTS.c.provider
+                        == self.provider,
+                        PROVIDER_CREDIT_EVENTS.c.created_at
+                        >= _month_start(now),
+                    )
+                )
+                .group_by(
+                    PROVIDER_CREDIT_EVENTS.c.worker,
+                    PROVIDER_CREDIT_EVENTS.c.request_class,
+                )
+            ).mappings().all()
+        usage_by_class = {
+            "provider_read": {"requests": 0, "credits": 0},
+            "provider_send": {"requests": 0, "credits": 0},
+            "registration_control": {"requests": 0, "credits": 0},
+            "reconciliation": {"requests": 0, "credits": 0},
+        }
+        for row in usage_rows:
+            request_class = row["request_class"]
+            if row["worker"] == "provider-reconciliation":
+                category = "reconciliation"
+            elif request_class in {"send", "emergency"}:
+                category = "provider_send"
+            elif request_class == "control":
+                category = "registration_control"
+            else:
+                category = "provider_read"
+            usage_by_class[category]["requests"] += int(
+                row["request_count"]
+            )
+            usage_by_class[category]["credits"] += int(
+                row["used_credits"]
+            )
         return {
             "provider": self.provider,
             "circuit_open": self.is_circuit_open(),
             "budgets": budgets,
+            "usage_period": "current_month",
+            "usage_by_class": usage_by_class,
         }
 
     def _budget_rows(

@@ -105,3 +105,46 @@ def test_zero_credit_control_call_can_run_while_circuit_is_open():
     )
 
     assert reservation.credits == 0
+
+
+def test_snapshot_separates_read_send_control_and_reconciliation_usage():
+    _, governor = _governor()
+    calls = (
+        ("reply-worker-1", "fansly.messages.list", "read", 1),
+        ("reply-worker-1", "fansly.messages.send", "send", 1),
+        ("webhook-registration", "webhooks.list", "control", 0),
+        (
+            "provider-reconciliation",
+            "fansly.chats.list",
+            "read",
+            1,
+        ),
+    )
+    for worker, operation, request_class, credits in calls:
+        with provider_worker(worker):
+            reservation = governor.reserve(
+                operation,
+                request_class=request_class,
+                credits=credits,
+                allow_when_open=True,
+            )
+        governor.finalize(
+            reservation,
+            method="POST" if request_class == "send" else "GET",
+            result="success",
+            status_code=200,
+            used_credits=credits,
+        )
+
+    usage = governor.snapshot()["usage_by_class"]
+
+    assert usage["provider_read"] == {"requests": 1, "credits": 1}
+    assert usage["provider_send"] == {"requests": 1, "credits": 1}
+    assert usage["registration_control"] == {
+        "requests": 1,
+        "credits": 0,
+    }
+    assert usage["reconciliation"] == {
+        "requests": 1,
+        "credits": 1,
+    }

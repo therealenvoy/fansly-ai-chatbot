@@ -139,6 +139,8 @@ class FanslyBot:
         reply_delay_max_seconds: int = 0,
         processing_retry_base_seconds: int = 5,
         processing_retry_max_seconds: int = 60,
+        recovery_chat_pages_per_run: int = 2,
+        recovery_message_pages_per_chat: int = 2,
     ):
         self.client = client
         self.persona_loader = persona_loader
@@ -229,6 +231,14 @@ class FanslyBot:
         self.processing_retry_max_seconds = max(
             self.processing_retry_base_seconds,
             int(processing_retry_max_seconds),
+        )
+        self.recovery_chat_pages_per_run = min(
+            max(1, int(recovery_chat_pages_per_run)),
+            10,
+        )
+        self.recovery_message_pages_per_chat = min(
+            max(1, int(recovery_message_pages_per_chat)),
+            10,
         )
         self._presence_offset = 0
         self._last_presence_poll_at: datetime | None = None
@@ -469,22 +479,23 @@ class FanslyBot:
             self.creator_id,
             cursor_scope,
         )
-        chats, next_checkpoint = (
+        chats, next_checkpoint, discovery_complete = (
             self._fetch_incremental_chats(checkpoint)
             if self.enable_unread_replies
-            else ([], checkpoint)
+            else ([], checkpoint, True)
         )
         ingested = 0
-        scan_complete = True
+        scan_complete = discovery_complete
         for chat in chats:
             try:
-                ingested += self._ingest_chat_messages(chat)
+                inserted, chat_complete = self._ingest_chat_messages(
+                    chat
+                )
+                ingested += inserted
+                scan_complete = scan_complete and chat_complete
             except Exception:
                 scan_complete = False
-                logger.exception(
-                    "Failed to ingest changed chat %s",
-                    chat.chat_id,
-                )
+                logger.exception("Failed to ingest one changed chat")
         if scan_complete and next_checkpoint is not None:
             self.state_repo.set_poll_cursor(
                 self.creator_id,
@@ -1001,34 +1012,78 @@ class FanslyBot:
     def _fetch_incremental_chats(
         self,
         checkpoint: str | None,
-    ) -> tuple[list[ChatInfo], str | None]:
+    ) -> tuple[list[ChatInfo], str | None, bool]:
         """Fetch newest pages only until the previous durable chat head."""
         if self.bot_mode == BotMode.CONVERSATION:
             unread: list[ChatInfo] = []
             offset: int | str | None = 0
-            while offset is not None:
-                page, offset = self.client.list_chats_page(
+            pages = 0
+            next_checkpoint: str | None = None
+            reached_checkpoint = False
+            while (
+                offset is not None
+                and pages < self.recovery_chat_pages_per_run
+                and not reached_checkpoint
+            ):
+                page, next_offset = self.client.list_chats_page(
                     limit=100,
                     offset=offset,
                     order="unread",
                 )
-                unread.extend(
-                    chat
-                    for chat in page
-                    if chat.unread_count > 0
-                    and self._fan_allowed(chat.partner_account_id)
+                pages += 1
+                for chat in page:
+                    if not self._fan_allowed(
+                        chat.partner_account_id
+                    ):
+                        continue
+                    current = self._chat_checkpoint(chat)
+                    if next_checkpoint is None:
+                        next_checkpoint = current
+                    if checkpoint is not None and current == checkpoint:
+                        reached_checkpoint = True
+                    if (
+                        chat.unread_count > 0
+                        and self.state_repo.conversation_changed(
+                            self.creator_id,
+                            chat.chat_id,
+                            chat.last_message_id,
+                        )
+                    ):
+                        unread.append(chat)
+                    if reached_checkpoint:
+                        break
+                offset = next_offset
+            if (
+                checkpoint is not None
+                and not reached_checkpoint
+                and offset is not None
+            ):
+                logger.warning(
+                    "Recovery chat gap exceeded the %s-page cap; "
+                    "advancing the durable head after the bounded window",
+                    self.recovery_chat_pages_per_run,
                 )
-            return unread, checkpoint
+            return (
+                unread,
+                next_checkpoint or checkpoint,
+                True,
+            )
         changed: list[ChatInfo] = []
         offset: int | None = 0
         next_checkpoint: str | None = None
         reached_checkpoint = False
-        while offset is not None and not reached_checkpoint:
+        pages = 0
+        while (
+            offset is not None
+            and not reached_checkpoint
+            and pages < self.recovery_chat_pages_per_run
+        ):
             page, offset = self.client.list_chats_page(
                 limit=100,
                 offset=offset,
                 order="newest",
             )
+            pages += 1
             for chat in page:
                 if not self._fan_allowed(chat.partner_account_id):
                     continue
@@ -1051,7 +1106,17 @@ class FanslyBot:
                     changed.append(chat)
                 if reached_checkpoint:
                     break
-        return changed, next_checkpoint
+        if (
+            checkpoint is not None
+            and not reached_checkpoint
+            and offset is not None
+        ):
+            logger.warning(
+                "Recovery chat gap exceeded the %s-page cap; "
+                "advancing the durable head after the bounded window",
+                self.recovery_chat_pages_per_run,
+            )
+        return changed, next_checkpoint, True
 
     @staticmethod
     def _chat_checkpoint(chat: ChatInfo) -> str:
@@ -1060,7 +1125,10 @@ class FanslyBot:
             separators=(",", ":"),
         )
 
-    def _ingest_chat_messages(self, chat: ChatInfo) -> int:
+    def _ingest_chat_messages(
+        self,
+        chat: ChatInfo,
+    ) -> tuple[int, bool]:
         """Fetch unseen messages, sort them, and insert inbound rows once."""
         fan_id = chat.partner_account_id
         self.state_repo.ensure_conversation(
@@ -1069,9 +1137,11 @@ class FanslyBot:
             chat.chat_id,
             display_name=chat.partner_display_name,
         )
-        known_message_id, _ = self.state_repo.get_conversation_checkpoint(
-            self.creator_id,
-            chat.chat_id,
+        known_message_id, resume_cursor = (
+            self.state_repo.get_conversation_checkpoint(
+                self.creator_id,
+                chat.chat_id,
+            )
         )
 
         if (
@@ -1083,7 +1153,7 @@ class FanslyBot:
                 chat.chat_id,
                 last_platform_message_id=chat.last_message_id,
             )
-            return 0
+            return 0, True
 
         # First observation of an already-read chat establishes a baseline;
         # it must not trigger replies to historical messages.
@@ -1093,19 +1163,22 @@ class FanslyBot:
                 chat.chat_id,
                 last_platform_message_id=chat.last_message_id,
             )
-            return 0
+            return 0, True
 
         unseen: list[MessageInfo] = []
-        cursor: str | None = None
+        cursor: str | None = resume_cursor
         seen_cursors: set[str] = set()
         found_checkpoint = False
         unread_fan_messages = 0
-        while True:
+        pages = 0
+        scan_complete = False
+        while pages < self.recovery_message_pages_per_chat:
             messages, next_cursor = self.client.list_messages(
                 chat.chat_id,
                 limit=100,
                 cursor=cursor,
             )
+            pages += 1
             for message in messages:
                 if (
                     known_message_id is not None
@@ -1117,20 +1190,32 @@ class FanslyBot:
                 if message.is_from_fan:
                     unread_fan_messages += 1
             if found_checkpoint or not next_cursor:
-                cursor = next_cursor
+                cursor = None
+                scan_complete = True
                 break
             if (
                 known_message_id is None
                 and unread_fan_messages >= chat.unread_count
             ):
-                cursor = next_cursor
+                cursor = None
+                scan_complete = True
                 break
             if next_cursor in seen_cursors:
-                raise RuntimeError(
-                    f"Repeated message cursor for chat {chat.chat_id}"
-                )
+                raise RuntimeError("Repeated provider message cursor")
             seen_cursors.add(next_cursor)
             cursor = next_cursor
+
+        if (
+            not scan_complete
+            and self.bot_mode == BotMode.CONVERSATION
+        ):
+            logger.warning(
+                "Recovery message gap exceeded the %s-page cap; "
+                "keeping only the newest bounded window",
+                self.recovery_message_pages_per_chat,
+            )
+            scan_complete = True
+            cursor = None
 
         unseen.sort(
             key=lambda message: (
@@ -1221,17 +1306,25 @@ class FanslyBot:
             self.creator_id,
             chat.chat_id,
             last_platform_message_id=(
-                chat.last_message_id
-                or (newest.message_id if newest else known_message_id)
+                (
+                    chat.last_message_id
+                    or (
+                        newest.message_id
+                        if newest
+                        else known_message_id
+                    )
+                )
+                if scan_complete
+                else known_message_id
             ),
-            provider_cursor=cursor,
+            provider_cursor=(None if scan_complete else cursor),
             last_activity_at=(
                 self._provider_datetime(newest.created_at)
                 if newest
                 else None
             ),
         )
-        return inserted
+        return inserted, scan_complete
 
     @staticmethod
     def _provider_datetime(timestamp: float) -> datetime:

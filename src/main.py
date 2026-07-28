@@ -49,7 +49,6 @@ from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
 from .operations import RuntimeMonitor
-from .credit_budget import BASIC_MONTHLY_CREDITS, estimate_minimum_monthly_requests
 from .provider_credit import (
     ProviderBudgetExceeded,
     ProviderCircuitOpen,
@@ -120,6 +119,22 @@ RECOVERY_RECONCILIATION_ENABLED = _env_bool(
 WEBHOOK_REGISTRATION_ENABLED = _env_bool(
     "WEBHOOK_REGISTRATION_ENABLED",
     False,
+)
+RECOVERY_CHAT_PAGES_PER_RUN = min(
+    max(1, int(os.getenv("RECOVERY_CHAT_PAGES_PER_RUN", "2"))),
+    10,
+)
+RECOVERY_MESSAGE_PAGES_PER_CHAT = min(
+    max(
+        1,
+        int(
+            os.getenv(
+                "RECOVERY_MESSAGE_PAGES_PER_CHAT",
+                "5",
+            )
+        ),
+    ),
+    10,
 )
 WEBHOOK_EVENT_PROFILE = os.getenv(
     "WEBHOOK_EVENT_PROFILE",
@@ -486,6 +501,12 @@ if api_ok:
             processing_retry_max_seconds=(
                 PROCESSING_RETRY_MAX_SECONDS
             ),
+            recovery_chat_pages_per_run=(
+                RECOVERY_CHAT_PAGES_PER_RUN
+            ),
+            recovery_message_pages_per_chat=(
+                RECOVERY_MESSAGE_PAGES_PER_CHAT
+            ),
         )
         bot_enabled_str = settings_store.get(
             "bot_enabled",
@@ -514,28 +535,14 @@ if bot is None:
 
 # ─── Credit Awareness ──────────────────────────────────
 
-if FANSLY_PROVIDER == "fanslyapi":
-    estimated_monthly = estimate_minimum_monthly_requests(POLL_INTERVAL)
-    logger.info(
-        "Estimated OnlyFansAPI request baseline (30 days, no idle "
-        f"backoff): ~{estimated_monthly:,}/month at "
-        f"{POLL_INTERVAL}s interval"
-    )
-    if estimated_monthly > BASIC_MONTHLY_CREDITS:
-        logger.warning(
-            f"At ~{estimated_monthly:,} baseline requests/month, this "
-            f"configuration can exceed the OnlyFansAPI Basic plan "
-            f"({BASIC_MONTHLY_CREDITS:,} credits/month)."
-        )
-else:
-    estimated_chat_polls = (
-        30 * 24 * 60 * 60 // max(POLL_INTERVAL, 1)
-    )
-    logger.info(
-        "Estimated APIFansly chat-list baseline (30 days, no idle "
-        f"backoff): ~{estimated_chat_polls:,}/month before message reads, "
-        "vault reads, and sends"
-    )
+logger.info(
+    "Webhook-first provider mode: routine chat polling is disabled; "
+    "recovery=%s interval=%ss chat_pages=%s message_pages=%s",
+    RECOVERY_RECONCILIATION_ENABLED,
+    RECONCILIATION_INTERVAL,
+    RECOVERY_CHAT_PAGES_PER_RUN,
+    RECOVERY_MESSAGE_PAGES_PER_CHAT,
+)
 
 # ─── Main Loop ─────────────────────────────────────────
 
@@ -760,6 +767,14 @@ def run_webhook_registration() -> None:
         or not api_ok
     ):
         return
+    if (
+        provider_credit_governor is not None
+        and provider_credit_governor.is_circuit_open()
+    ):
+        logger.warning(
+            "Automatic webhook registration skipped: provider circuit is open"
+        )
+        return
     if not ONLYFANSAPI_WEBHOOK_URL:
         logger.warning(
             "Automatic webhook registration skipped: RAILWAY_PUBLIC_DOMAIN is missing"
@@ -791,7 +806,7 @@ def run_webhook_registration() -> None:
     except Exception:
         logger.exception(
             "Automatic OnlyFansAPI Fansly webhook registration failed; "
-            "polling reconciliation remains active"
+            "registration remains unreconciled and recovery policy is unchanged"
         )
 
 
@@ -826,7 +841,10 @@ else:
             "provider-reconciliation",
             run_reconciliation_worker,
         )
-    if SERVICE_ROLE.runs_scheduler:
+    if (
+        SERVICE_ROLE.runs_scheduler
+        and (ENABLE_ONLINE_OUTREACH or ENABLE_STALLED_OUTREACH)
+    ):
         _start_background_worker("proactive-outreach", run_outreach_worker)
     if SERVICE_ROLE.runs_reply_workers:
         for worker_index in range(2, REPLY_WORKER_COUNT + 1):
