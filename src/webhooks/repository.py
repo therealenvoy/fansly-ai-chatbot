@@ -14,6 +14,7 @@ from src.persistence.schema import (
     CONVERSATIONS,
     CONTACT_CLAIMS,
     CREATOR_SETTINGS,
+    FAN_REVENUE_EVENTS,
     FANS,
     FAN_MESSAGES,
     INBOUND_MESSAGES,
@@ -28,6 +29,7 @@ from src.persistence.schema import (
 from .onlyfansapi import (
     OnlyFansApiFanslyAccountEvent,
     OnlyFansApiFanslyDeletedMessage,
+    OnlyFansApiFanslyDomainEvent,
     OnlyFansApiFanslyMessage,
     OnlyFansApiFanslyReadReceipt,
     OnlyFansApiFanslySentMessage,
@@ -896,6 +898,249 @@ class WebhookEventRepository:
                     index_elements=["creator_id", "event_key"]
                 )
                 connection.execute(alert)
+        return WebhookIngestResult(True, None)
+
+    def ingest_domain(
+        self,
+        *,
+        creator_id: str,
+        event: OnlyFansApiFanslyDomainEvent,
+    ) -> WebhookIngestResult:
+        """Project revenue/lifecycle state without creating contact work."""
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as connection:
+            if not self._insert_event(
+                connection,
+                creator_id=creator_id,
+                event=event,
+                platform_message_id=None,
+                chat_id=None,
+                direction="unknown",
+            ):
+                return WebhookIngestResult(False, None)
+
+            if event.fan_id:
+                self._ensure_fan(
+                    connection,
+                    creator_id=creator_id,
+                    fan_id=event.fan_id,
+                    now=now,
+                )
+
+            if event.event_name in {
+                "fansly.followers.new",
+                "fansly.followers.removed",
+                "fansly.subscriptions.new",
+                "fansly.subscriptions.expired",
+            }:
+                values: dict[str, object] = {"updated_at": now}
+                if event.event_name == "fansly.followers.new":
+                    values["is_follower"] = True
+                elif event.event_name == "fansly.followers.removed":
+                    values["is_follower"] = False
+                elif event.event_name == "fansly.subscriptions.new":
+                    values["is_subscriber"] = True
+                    values["subscription_expires_at"] = (
+                        event.subscription_expires_at
+                    )
+                else:
+                    values["is_subscriber"] = False
+                    values["subscription_expires_at"] = (
+                        event.subscription_expires_at
+                    )
+                connection.execute(
+                    update(FANS)
+                    .where(
+                        and_(
+                            FANS.c.creator_id == creator_id,
+                            FANS.c.fan_id == event.fan_id,
+                        )
+                    )
+                    .values(**values)
+                )
+                return WebhookIngestResult(True, None)
+
+            shared_reference = (
+                f"transaction:{event.provider_transaction_id}"
+                if event.provider_transaction_id
+                else (
+                    f"reference:{event.provider_reference_id}"
+                )
+            )
+            dedupe_key = hashlib.sha256(
+                shared_reference.encode("utf-8")
+            ).hexdigest()
+            revenue = self._insert(FAN_REVENUE_EVENTS).values(
+                creator_id=creator_id,
+                dedupe_key=dedupe_key,
+                event_name=event.event_name,
+                provider_event_key=event.event_key,
+                provider_transaction_id=event.provider_transaction_id,
+                provider_reference_id=event.provider_reference_id,
+                fan_id=event.fan_id,
+                amount_minor=event.amount_minor,
+                currency=event.currency,
+                ltv_applied=bool(event.fan_id),
+                tip_applied=(
+                    bool(event.fan_id)
+                    and event.event_name == "fansly.tips.received"
+                ),
+                purchase_applied=(
+                    bool(event.fan_id)
+                    and event.event_name
+                    in {
+                        "fansly.media.purchased",
+                        "fansly.stories.purchased",
+                    }
+                ),
+                provider_created_at=event.provider_created_at,
+                observed_at=now,
+            )
+            revenue = revenue.on_conflict_do_nothing(
+                index_elements=["creator_id", "dedupe_key"]
+            )
+            inserted = connection.execute(revenue).rowcount == 1
+            apply_ltv = inserted and bool(event.fan_id)
+            apply_tip = (
+                apply_ltv
+                and event.event_name == "fansly.tips.received"
+            )
+            apply_purchase = (
+                apply_ltv
+                and event.event_name
+                in {
+                    "fansly.media.purchased",
+                    "fansly.stories.purchased",
+                }
+            )
+            aggregate_amount = int(event.amount_minor or 0)
+            aggregate_fan_id = event.fan_id
+            if not inserted:
+                existing = connection.execute(
+                    select(FAN_REVENUE_EVENTS).where(
+                        and_(
+                            FAN_REVENUE_EVENTS.c.creator_id
+                            == creator_id,
+                            FAN_REVENUE_EVENTS.c.dedupe_key
+                            == dedupe_key,
+                        )
+                    )
+                ).mappings().one()
+                if (
+                    int(existing["amount_minor"]) != aggregate_amount
+                    or existing["currency"] != event.currency
+                ):
+                    connection.execute(
+                        update(PROVIDER_WEBHOOK_EVENTS)
+                        .where(
+                            and_(
+                                PROVIDER_WEBHOOK_EVENTS.c.creator_id
+                                == creator_id,
+                                PROVIDER_WEBHOOK_EVENTS.c.event_key
+                                == event.event_key,
+                            )
+                        )
+                        .values(
+                            status="dead_letter",
+                            error_category=(
+                                "conflicting_revenue_reference"
+                            ),
+                        )
+                    )
+                    return WebhookIngestResult(
+                        True,
+                        None,
+                        quarantined=True,
+                    )
+                if event.fan_id and not existing["fan_id"]:
+                    aggregate_fan_id = event.fan_id
+                elif event.fan_id == existing["fan_id"]:
+                    aggregate_fan_id = event.fan_id
+                else:
+                    aggregate_fan_id = existing["fan_id"]
+                apply_ltv = bool(
+                    aggregate_fan_id and not existing["ltv_applied"]
+                )
+                apply_tip = bool(
+                    aggregate_fan_id
+                    and event.event_name == "fansly.tips.received"
+                    and not existing["tip_applied"]
+                )
+                apply_purchase = bool(
+                    aggregate_fan_id
+                    and event.event_name
+                    in {
+                        "fansly.media.purchased",
+                        "fansly.stories.purchased",
+                    }
+                    and not existing["purchase_applied"]
+                )
+                if apply_ltv or apply_tip or apply_purchase:
+                    connection.execute(
+                        update(FAN_REVENUE_EVENTS)
+                        .where(
+                            and_(
+                                FAN_REVENUE_EVENTS.c.creator_id
+                                == creator_id,
+                                FAN_REVENUE_EVENTS.c.dedupe_key
+                                == dedupe_key,
+                            )
+                        )
+                        .values(
+                            fan_id=aggregate_fan_id,
+                            ltv_applied=(
+                                bool(existing["ltv_applied"])
+                                or apply_ltv
+                            ),
+                            tip_applied=(
+                                bool(existing["tip_applied"])
+                                or apply_tip
+                            ),
+                            purchase_applied=(
+                                bool(existing["purchase_applied"])
+                                or apply_purchase
+                            ),
+                        )
+                    )
+            if (
+                aggregate_fan_id
+                and (apply_ltv or apply_tip or apply_purchase)
+            ):
+                connection.execute(
+                    update(FANS)
+                    .where(
+                        and_(
+                            FANS.c.creator_id == creator_id,
+                            FANS.c.fan_id == aggregate_fan_id,
+                        )
+                    )
+                    .values(
+                        lifetime_value_minor=(
+                            FANS.c.lifetime_value_minor
+                            + (aggregate_amount if apply_ltv else 0)
+                        ),
+                        tip_total_minor=(
+                            FANS.c.tip_total_minor
+                            + (aggregate_amount if apply_tip else 0)
+                        ),
+                        purchase_count=(
+                            FANS.c.purchase_count
+                            + (1 if apply_purchase else 0)
+                        ),
+                        last_revenue_at=case(
+                            (
+                                or_(
+                                    FANS.c.last_revenue_at.is_(None),
+                                    FANS.c.last_revenue_at
+                                    <= event.provider_created_at,
+                                ),
+                                event.provider_created_at,
+                            ),
+                            else_=FANS.c.last_revenue_at,
+                        ),
+                        updated_at=now,
+                    )
+                )
         return WebhookIngestResult(True, None)
 
     def record_dead_letter(

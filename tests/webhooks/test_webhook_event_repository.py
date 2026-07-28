@@ -8,6 +8,8 @@ from src.persistence.database import create_database_engine
 from src.persistence.schema import (
     CONVERSATIONS,
     CREATOR_SETTINGS,
+    FAN_REVENUE_EVENTS,
+    FANS,
     FAN_MESSAGES,
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
@@ -23,6 +25,7 @@ from src.webhooks.onlyfansapi import (
     InvalidWebhookEvent,
     OnlyFansApiFanslyAccountEvent,
     OnlyFansApiFanslyDeletedMessage,
+    OnlyFansApiFanslyDomainEvent,
     OnlyFansApiFanslyMessage,
     OnlyFansApiFanslyReadReceipt,
     OnlyFansApiFanslySentMessage,
@@ -130,6 +133,43 @@ def _account_event(event_name, event_id):
             "event_id": event_id,
             "account_id": "account-a",
             "timestamp": "2026-07-28T00:04:00Z",
+        },
+        expected_account_id="account-a",
+    )
+
+
+def _domain_event(
+    event_name,
+    event_id,
+    *,
+    fan_id="fan-a",
+    transaction_id=None,
+    reference_id=None,
+    amount="12.34",
+):
+    payload = {
+        "id": reference_id or event_id,
+        "fanId": fan_id,
+        "createdAt": "2026-07-28T00:05:00Z",
+    }
+    if transaction_id is not None:
+        payload["transactionId"] = transaction_id
+    if event_name in {
+        "fansly.transactions.new",
+        "fansly.tips.received",
+        "fansly.media.purchased",
+        "fansly.stories.purchased",
+    }:
+        payload["amount"] = amount
+        payload["currency"] = "USD"
+    if fan_id is None:
+        payload.pop("fanId")
+    return OnlyFansApiFanslyDomainEvent.from_payload(
+        {
+            "event": event_name,
+            "event_id": event_id,
+            "account_id": "account-a",
+            "payload": payload,
         },
         expected_account_id="account-a",
     )
@@ -460,3 +500,138 @@ def test_connected_event_updates_visibility_without_resetting_circuit():
     assert state["connection_status"] == "connected"
     assert state["last_connected_at"] is not None
     assert circuit_open is True
+
+
+def test_lifecycle_events_update_fan_without_contact_work():
+    engine = _engine()
+    repository = WebhookEventRepository(engine)
+
+    for event_name, event_id in (
+        ("fansly.followers.new", "follow-new"),
+        ("fansly.subscriptions.new", "subscription-new"),
+        ("fansly.followers.removed", "follow-removed"),
+        ("fansly.subscriptions.expired", "subscription-expired"),
+    ):
+        result = repository.ingest_domain(
+            creator_id="creator-a",
+            event=_domain_event(event_name, event_id),
+        )
+        assert result.created is True
+
+    with engine.connect() as connection:
+        fan = connection.execute(select(FANS)).mappings().one()
+        inbound_count = connection.execute(
+            select(func.count(INBOUND_MESSAGES.c.id))
+        ).scalar_one()
+        outbox_count = connection.execute(
+            select(func.count(OUTBOX_MESSAGES.c.id))
+        ).scalar_one()
+    assert fan["is_follower"] is False
+    assert fan["is_subscriber"] is False
+    assert inbound_count == 0
+    assert outbox_count == 0
+
+
+def test_transaction_and_purchase_share_revenue_without_double_counting():
+    engine = _engine()
+    repository = WebhookEventRepository(engine)
+
+    repository.ingest_domain(
+        creator_id="creator-a",
+        event=_domain_event(
+            "fansly.transactions.new",
+            "transaction-event",
+            transaction_id="transaction-a",
+            reference_id="transaction-a",
+        ),
+    )
+    repository.ingest_domain(
+        creator_id="creator-a",
+        event=_domain_event(
+            "fansly.media.purchased",
+            "purchase-event",
+            transaction_id="transaction-a",
+            reference_id="media-a",
+        ),
+    )
+
+    with engine.connect() as connection:
+        fan = connection.execute(select(FANS)).mappings().one()
+        revenue_rows = connection.execute(
+            select(FAN_REVENUE_EVENTS)
+        ).mappings().all()
+        inbound_count = connection.execute(
+            select(func.count(INBOUND_MESSAGES.c.id))
+        ).scalar_one()
+        outbox_count = connection.execute(
+            select(func.count(OUTBOX_MESSAGES.c.id))
+        ).scalar_one()
+    assert fan["lifetime_value_minor"] == 1234
+    assert fan["purchase_count"] == 1
+    assert len(revenue_rows) == 1
+    assert revenue_rows[0]["ltv_applied"] is True
+    assert revenue_rows[0]["purchase_applied"] is True
+    assert inbound_count == 0
+    assert outbox_count == 0
+
+
+def test_unattributed_transaction_is_attributed_once_by_purchase():
+    engine = _engine()
+    repository = WebhookEventRepository(engine)
+
+    repository.ingest_domain(
+        creator_id="creator-a",
+        event=_domain_event(
+            "fansly.transactions.new",
+            "transaction-event",
+            fan_id=None,
+            transaction_id="transaction-a",
+            reference_id="transaction-a",
+        ),
+    )
+    purchase = _domain_event(
+        "fansly.media.purchased",
+        "purchase-event",
+        transaction_id="transaction-a",
+        reference_id="media-a",
+    )
+    for _ in range(10):
+        repository.ingest_domain(
+            creator_id="creator-a",
+            event=purchase,
+        )
+
+    with engine.connect() as connection:
+        fan = connection.execute(select(FANS)).mappings().one()
+        revenue = connection.execute(
+            select(FAN_REVENUE_EVENTS)
+        ).mappings().one()
+    assert fan["lifetime_value_minor"] == 1234
+    assert fan["purchase_count"] == 1
+    assert revenue["fan_id"] == "fan-a"
+
+
+def test_tip_replay_ten_times_applies_one_financial_effect():
+    engine = _engine()
+    repository = WebhookEventRepository(engine)
+    tip = _domain_event(
+        "fansly.tips.received",
+        "tip-event",
+        transaction_id="tip-transaction-a",
+    )
+
+    for _ in range(10):
+        result = repository.ingest_domain(
+            creator_id="creator-a",
+            event=tip,
+        )
+
+    assert result.created is False
+    with engine.connect() as connection:
+        fan = connection.execute(select(FANS)).mappings().one()
+        event_count = connection.execute(
+            select(func.count(PROVIDER_WEBHOOK_EVENTS.c.id))
+        ).scalar_one()
+    assert fan["lifetime_value_minor"] == 1234
+    assert fan["tip_total_minor"] == 1234
+    assert event_count == 1

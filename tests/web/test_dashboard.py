@@ -298,6 +298,10 @@ def _make_bot(db_url):
         True,
         None,
     )
+    bot.ingest_webhook_domain.return_value = WebhookIngestResult(
+        True,
+        None,
+    )
     bot.ai_settings = MagicMock()
     bot.ai_settings.status.return_value = {
         "provider": "DeepSeek",
@@ -576,6 +580,28 @@ class TestOnlyFansApiFanslyWebhook:
         assert status == 200
         assert body == {"accepted": True, "duplicate": False}
         bot.ingest_webhook_sent.assert_called_once()
+        bot.ingest_webhook_message.assert_not_called()
+
+    def test_signed_revenue_event_projects_without_contact_work(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = self._payload()
+        payload["event"] = "fansly.tips.received"
+        payload["payload"] = {
+            "id": "tip-1",
+            "fanId": "fan-1",
+            "amount": "12.34",
+            "currency": "USD",
+            "createdAt": 1_722_000_000,
+        }
+
+        status, body = _post_onlyfansapi_webhook(host, payload)
+
+        assert status == 200
+        assert body == {"accepted": True, "duplicate": False}
+        bot.ingest_webhook_domain.assert_called_once()
         bot.ingest_webhook_message.assert_not_called()
 
     def test_quarantine_database_failure_remains_retryable(

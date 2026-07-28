@@ -135,6 +135,13 @@ FANS = Table(
     Column("display_name", String(255), nullable=True),
     Column("username", String(255), nullable=True),
     Column("avatar_url", Text, nullable=True),
+    Column("is_follower", Boolean, nullable=False, default=False),
+    Column("is_subscriber", Boolean, nullable=False, default=False),
+    Column("subscription_expires_at", DateTime(timezone=True), nullable=True),
+    Column("lifetime_value_minor", BigInteger, nullable=False, default=0),
+    Column("tip_total_minor", BigInteger, nullable=False, default=0),
+    Column("purchase_count", Integer, nullable=False, default=0),
+    Column("last_revenue_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
@@ -732,6 +739,25 @@ PROVIDER_ALERTS = Table(
         "event_key",
         name="uq_provider_alert_event",
     ),
+)
+
+FAN_REVENUE_EVENTS = Table(
+    "fan_revenue_events",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("dedupe_key", String(64), primary_key=True),
+    Column("event_name", String(96), nullable=False),
+    Column("provider_event_key", String(64), nullable=False),
+    Column("provider_transaction_id", String(128), nullable=True),
+    Column("provider_reference_id", String(128), nullable=True),
+    Column("fan_id", String(128), nullable=True),
+    Column("amount_minor", BigInteger, nullable=False),
+    Column("currency", String(8), nullable=False),
+    Column("ltv_applied", Boolean, nullable=False, default=False),
+    Column("tip_applied", Boolean, nullable=False, default=False),
+    Column("purchase_applied", Boolean, nullable=False, default=False),
+    Column("provider_created_at", DateTime(timezone=True), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
 
 Index(

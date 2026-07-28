@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from .webhooks.onlyfansapi import (
         OnlyFansApiFanslyAccountEvent,
         OnlyFansApiFanslyDeletedMessage,
+        OnlyFansApiFanslyDomainEvent,
         OnlyFansApiFanslyMessage,
         OnlyFansApiFanslyReadReceipt,
         OnlyFansApiFanslySentMessage,
@@ -601,6 +602,16 @@ class FanslyBot:
         ):
             self.enabled = False
         return result
+
+    def ingest_webhook_domain(
+        self,
+        event: "OnlyFansApiFanslyDomainEvent",
+    ) -> "WebhookIngestResult":
+        """Project lifecycle or revenue facts without contact work."""
+        return self.webhook_event_repo.ingest_domain(
+            creator_id=self.creator_id,
+            event=event,
+        )
 
     def _attribute_inbound_outcome(
         self,

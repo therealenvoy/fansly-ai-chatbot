@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
 from typing import Any
@@ -685,4 +686,231 @@ class OnlyFansApiFanslyAccountEvent:
             schema_version=schema_version or None,
             account_id=account_id,
             provider_created_at=provider_created_at,
+        )
+
+
+DOMAIN_EVENT_NAMES = frozenset(
+    {
+        "fansly.transactions.new",
+        "fansly.tips.received",
+        "fansly.media.purchased",
+        "fansly.stories.purchased",
+        "fansly.subscriptions.new",
+        "fansly.subscriptions.expired",
+        "fansly.followers.new",
+        "fansly.followers.removed",
+    }
+)
+REVENUE_EVENT_NAMES = frozenset(
+    {
+        "fansly.transactions.new",
+        "fansly.tips.received",
+        "fansly.media.purchased",
+        "fansly.stories.purchased",
+    }
+)
+
+
+def _nested_text(value: dict, *paths: str) -> str:
+    values: list[Any] = []
+    for path in paths:
+        current: Any = value
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(part)
+        values.append(current)
+    return _text(*values)
+
+
+def _amount_minor(envelope: dict) -> int | None:
+    explicit_minor = _nested_text(
+        envelope,
+        "amountMinor",
+        "amount_minor",
+        "amountCents",
+        "amount_cents",
+        "transaction.amountMinor",
+        "transaction.amountCents",
+        "purchase.amountMinor",
+    )
+    if explicit_minor:
+        try:
+            return int(explicit_minor)
+        except ValueError as exc:
+            raise InvalidWebhookEvent("invalid minor amount") from exc
+    millis = _nested_text(
+        envelope,
+        "amountMillis",
+        "amount_millis",
+        "transaction.amountMillis",
+    )
+    if millis:
+        try:
+            value = Decimal(millis) / Decimal(10)
+        except InvalidOperation as exc:
+            raise InvalidWebhookEvent("invalid millis amount") from exc
+        if value != value.to_integral_value():
+            raise InvalidWebhookEvent("fractional minor amount")
+        return int(value)
+    major = _nested_text(
+        envelope,
+        "amount",
+        "price",
+        "transaction.amount",
+        "purchase.amount",
+        "media.price",
+        "story.price",
+    )
+    if not major:
+        return None
+    try:
+        value = Decimal(major) * Decimal(100)
+    except InvalidOperation as exc:
+        raise InvalidWebhookEvent("invalid major amount") from exc
+    if value != value.to_integral_value():
+        raise InvalidWebhookEvent("amount has more than two decimals")
+    return int(value)
+
+
+@dataclass(frozen=True)
+class OnlyFansApiFanslyDomainEvent:
+    account_id: str
+    provider_created_at: datetime
+    event_key: str
+    event_name: str
+    fan_id: str | None
+    provider_transaction_id: str | None
+    provider_reference_id: str
+    amount_minor: int | None
+    currency: str
+    subscription_expires_at: datetime | None = None
+    provider_event_id: str | None = None
+    schema_version: str | None = None
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict,
+        *,
+        expected_account_id: str,
+    ) -> "OnlyFansApiFanslyDomainEvent":
+        if not isinstance(payload, dict):
+            raise InvalidWebhookEvent("invalid webhook payload")
+        event_name = _text(payload.get("event"))
+        if event_name not in DOMAIN_EVENT_NAMES:
+            raise InvalidWebhookEvent("unsupported event")
+        account_id = _text(
+            payload.get("account_id"),
+            payload.get("accountId"),
+        )
+        _validate_account(account_id, expected_account_id)
+        provider_event_id = _text(
+            payload.get("event_id"),
+            payload.get("eventId"),
+            payload.get("webhook_id"),
+        )
+        schema_version = _text(
+            payload.get("version"),
+            payload.get("schema_version"),
+        )
+        envelope = _mapping(payload.get("payload")) or _mapping(
+            payload.get("data")
+        )
+        provider_created_at = _provider_datetime(
+            payload.get("timestamp")
+            if payload.get("timestamp") is not None
+            else (
+                envelope.get("createdAt")
+                if envelope.get("createdAt") is not None
+                else envelope.get("created_at")
+            )
+        )
+        fan_id = _nested_text(
+            envelope,
+            "fanId",
+            "fan_id",
+            "userId",
+            "subscriberId",
+            "followerId",
+            "fan.id",
+            "user.id",
+            "subscriber.id",
+            "follower.id",
+        )
+        transaction_id = _nested_text(
+            envelope,
+            "transactionId",
+            "transaction_id",
+            "transaction.id",
+            "purchase.transactionId",
+        )
+        reference_id = _nested_text(
+            envelope,
+            "purchaseId",
+            "purchase_id",
+            "subscriptionId",
+            "subscription_id",
+            "transaction.id",
+            "purchase.id",
+            "subscription.id",
+            "media.id",
+            "story.id",
+            "fan.id",
+            "user.id",
+            "id",
+        )
+        if not reference_id:
+            raise InvalidWebhookEvent("missing domain reference ID")
+        amount_minor = (
+            _amount_minor(envelope)
+            if event_name in REVENUE_EVENT_NAMES
+            else None
+        )
+        if event_name in REVENUE_EVENT_NAMES and amount_minor is None:
+            raise InvalidWebhookEvent("missing minor amount")
+        if (
+            event_name
+            not in {"fansly.transactions.new"}
+            and not fan_id
+        ):
+            raise InvalidWebhookEvent("missing fan ID")
+        currency = _nested_text(
+            envelope,
+            "currency",
+            "transaction.currency",
+            "purchase.currency",
+        ).upper() or "USD"
+        expires_raw = _nested_text(
+            envelope,
+            "expiresAt",
+            "expires_at",
+            "subscription.expiresAt",
+            "subscription.expires_at",
+        )
+        expires_at = (
+            _provider_datetime(expires_raw)
+            if expires_raw
+            else None
+        )
+        return cls(
+            event_key=_stable_event_key(
+                event_name,
+                account_id,
+                reference_id,
+                provider_created_at,
+                provider_event_id or None,
+            ),
+            event_name=event_name,
+            provider_event_id=provider_event_id or None,
+            schema_version=schema_version or None,
+            account_id=account_id,
+            provider_created_at=provider_created_at,
+            fan_id=fan_id or None,
+            provider_transaction_id=transaction_id or None,
+            provider_reference_id=reference_id,
+            amount_minor=amount_minor,
+            currency=currency[:8],
+            subscription_expires_at=expires_at,
         )

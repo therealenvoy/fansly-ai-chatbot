@@ -64,8 +64,10 @@ from ..webhooks.gateway import (
 )
 from ..webhooks.onlyfansapi import (
     InvalidWebhookEvent,
+    DOMAIN_EVENT_NAMES,
     OnlyFansApiFanslyAccountEvent,
     OnlyFansApiFanslyDeletedMessage,
+    OnlyFansApiFanslyDomainEvent,
     OnlyFansApiFanslyMessage,
     OnlyFansApiFanslyReadReceipt,
     OnlyFansApiFanslySentMessage,
@@ -1215,6 +1217,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     expected_account_id=expected_account_id,
                 )
                 result = self.bot.ingest_webhook_account(
+                    replace(
+                        event,
+                        event_key=envelope.event_key,
+                        provider_event_id=envelope.provider_event_id,
+                        schema_version=envelope.schema_version,
+                    )
+                )
+                created = result.created
+                quarantined = result.quarantined
+            elif event_name in DOMAIN_EVENT_NAMES:
+                event = OnlyFansApiFanslyDomainEvent.from_payload(
+                    delivery.payload,
+                    expected_account_id=expected_account_id,
+                )
+                result = self.bot.ingest_webhook_domain(
                     replace(
                         event,
                         event_key=envelope.event_key,

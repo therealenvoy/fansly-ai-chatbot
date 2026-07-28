@@ -57,27 +57,12 @@ def test_every_event_declares_complete_operational_metadata():
             assert spec.subscription_eligible is False
 
 
-def test_core_profile_is_14_events_but_only_ready_handlers_are_eligible():
+def test_core_profile_has_14_ready_and_eligible_handlers():
     assert len(CORE_V1_DESIRED_EVENTS) == 14
-    assert eligible_event_names(CORE_V1_PROFILE) == (
-        "fansly.accounts.authentication_failed",
-        "fansly.accounts.connected",
-        "fansly.messages.deleted",
-        "fansly.messages.read",
-        "fansly.messages.received",
-        "fansly.messages.sent",
-    )
-    assert set(profile_blockers(CORE_V1_PROFILE)) == (
+    assert set(eligible_event_names(CORE_V1_PROFILE)) == (
         CORE_V1_DESIRED_EVENTS
-        - {
-            "fansly.accounts.authentication_failed",
-            "fansly.accounts.connected",
-            "fansly.messages.deleted",
-            "fansly.messages.read",
-            "fansly.messages.received",
-            "fansly.messages.sent",
-        }
     )
+    assert profile_blockers(CORE_V1_PROFILE) == ()
 
 
 def test_unknown_profile_fails_closed():
