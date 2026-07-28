@@ -507,6 +507,60 @@ class TestOnlyFansApiFanslyWebhook:
         assert body == {"error": "webhook account mismatch"}
         bot.ingest_webhook_message.assert_not_called()
 
+    def test_unknown_signed_event_is_quarantined_after_account_check(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = self._payload()
+        payload["event"] = "fansly.future.event"
+
+        status, body = _post_onlyfansapi_webhook(host, payload)
+
+        assert status == 202
+        assert body == {
+            "accepted": False,
+            "quarantined": True,
+        }
+        bot.webhook_event_repo.record_dead_letter.assert_called_once()
+        bot.ingest_webhook_message.assert_not_called()
+
+    def test_planned_handler_is_not_subscribed_or_processed_early(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = self._payload()
+        payload["event"] = "fansly.messages.sent"
+
+        status, body = _post_onlyfansapi_webhook(host, payload)
+
+        assert status == 202
+        assert body["quarantined"] is True
+        kwargs = (
+            bot.webhook_event_repo.record_dead_letter.call_args.kwargs
+        )
+        assert kwargs["error_category"] == "handler_not_ready"
+        bot.ingest_webhook_message.assert_not_called()
+
+    def test_quarantine_database_failure_remains_retryable(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = self._payload()
+        payload["event"] = "fansly.future.event"
+        bot.webhook_event_repo.record_dead_letter.side_effect = (
+            RuntimeError("database unavailable")
+        )
+
+        status, body = _post_onlyfansapi_webhook(host, payload)
+
+        assert status == 503
+        assert body == {
+            "error": "webhook persistence unavailable"
+        }
+
 
 class TestBotStatusEndpoints:
     """/health and /api/bot/status must reflect the live in-memory state —

@@ -12,10 +12,6 @@ from typing import Any
 FANSLY_MESSAGE_EVENTS = frozenset(
     {
         "fansly.messages.received",
-        # The provider's generic event catalogue currently documents the
-        # unprefixed name while webhook configuration documents fansly.*.
-        # Account scoping still makes this form unambiguously Fansly.
-        "messages.received",
     }
 )
 

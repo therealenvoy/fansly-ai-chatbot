@@ -56,11 +56,15 @@ from ..settings.chat_guidance import (
     MAX_CHAT_INSTRUCTIONS_CHARS,
     ChatGuidanceError,
 )
+from ..webhooks.gateway import (
+    InvalidWebhookSignature,
+    PermanentWebhookSchemaError,
+    WebhookAccountMismatch,
+    validate_gateway_event,
+)
 from ..webhooks.onlyfansapi import (
-    FANSLY_MESSAGE_EVENTS,
     InvalidWebhookEvent,
     OnlyFansApiFanslyMessage,
-    verify_onlyfansapi_signature,
 )
 
 logger = logging.getLogger("fansly-bot.dashboard")
@@ -1029,29 +1033,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def _record_webhook_dead_letter(
         self,
-        raw: bytes,
+        event_key: str,
         event_name: str,
         category: str,
-    ) -> None:
+    ) -> bool:
         repository = getattr(
             getattr(self, "bot", None),
             "webhook_event_repo",
             None,
         )
         if repository is None:
-            return
+            return False
         try:
             repository.record_dead_letter(
                 creator_id=self.server.creator_id,
-                event_key=hashlib.sha256(raw).hexdigest(),
+                event_key=event_key,
                 event_name=event_name or "unknown",
                 error_category=category,
             )
+            return True
         except Exception:
             logger.exception("Failed to persist normalized webhook dead letter")
+            return False
 
     def _onlyfansapi_fansly_webhook(self):
-        """Authenticate and enqueue one OnlyFansAPI Fansly message event."""
+        """Authenticate, classify, and atomically project one Fansly event."""
         if not self._host_is_allowed():
             return self.j({"error": "invalid host"}, 400)
         signing_secret = self.server.onlyfansapi_webhook_secret
@@ -1066,36 +1072,72 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self.j({"error": "request body too large"}, 413)
         except ValueError:
             return self.j({"error": "invalid request body"}, 400)
-        if not verify_onlyfansapi_signature(
-            raw,
-            self.headers.get("Signature"),
-            signing_secret,
-        ):
-            return self.j({"error": "invalid signature"}, 401)
-        try:
-            payload = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self._record_webhook_dead_letter(
-                raw,
-                "unknown",
-                "invalid_json",
-            )
-            return self.j({"error": "invalid JSON payload"}, 400)
-        if not isinstance(payload, dict):
-            return self.j({"error": "invalid webhook payload"}, 400)
-        event_name = str(payload.get("event") or "").strip()
-        if event_name not in FANSLY_MESSAGE_EVENTS:
-            self._record_webhook_dead_letter(
-                raw,
-                event_name,
-                "unsupported_event",
-            )
-            return self.j({"accepted": False, "ignored": True}, 202)
         if self.bot is None:
             return self.j({"error": "bot is unavailable"}, 503)
         try:
+            delivery = validate_gateway_event(
+                raw,
+                self.headers,
+                signing_secret=signing_secret,
+                expected_account_id=str(
+                    getattr(self.client, "account_id", "")
+                ),
+            )
+        except InvalidWebhookSignature:
+            return self.j({"error": "invalid signature"}, 401)
+        except WebhookAccountMismatch:
+            return self.j({"error": "webhook account mismatch"}, 403)
+        except PermanentWebhookSchemaError as exc:
+            persisted = self._record_webhook_dead_letter(
+                hashlib.sha256(raw).hexdigest(),
+                "unknown",
+                exc.category,
+            )
+            if not persisted:
+                return self.j(
+                    {"error": "webhook persistence unavailable"},
+                    503,
+                )
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
+            )
+
+        envelope = delivery.envelope
+        event_name = envelope.event_name
+        if delivery.spec is None:
+            persisted = self._record_webhook_dead_letter(
+                envelope.event_key,
+                event_name,
+                "unknown_event",
+            )
+            if not persisted:
+                return self.j(
+                    {"error": "webhook persistence unavailable"},
+                    503,
+                )
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
+            )
+        if not delivery.spec.handler_ready:
+            persisted = self._record_webhook_dead_letter(
+                envelope.event_key,
+                event_name,
+                "handler_not_ready",
+            )
+            if not persisted:
+                return self.j(
+                    {"error": "webhook persistence unavailable"},
+                    503,
+                )
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
+            )
+        try:
             event = OnlyFansApiFanslyMessage.from_payload(
-                payload,
+                delivery.payload,
                 expected_account_id=str(
                     getattr(self.client, "account_id", "")
                 ),
@@ -1106,18 +1148,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             created = self.bot.ingest_webhook_message(event)
         except InvalidWebhookEvent as exc:
             reason = str(exc)
-            self._record_webhook_dead_letter(
-                raw,
+            persisted = self._record_webhook_dead_letter(
+                envelope.event_key,
                 event_name,
                 reason.replace(" ", "_")[:64],
             )
-            if reason == "creator-authored message":
+            if not persisted:
                 return self.j(
-                    {"accepted": False, "ignored": True},
-                    202,
+                    {"error": "webhook persistence unavailable"},
+                    503,
                 )
-            status = 403 if "account mismatch" in reason else 400
-            return self.j({"error": reason}, status)
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
+            )
         except Exception:
             logger.exception(
                 "OnlyFansAPI Fansly webhook processing failed"
