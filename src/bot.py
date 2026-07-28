@@ -83,6 +83,7 @@ if TYPE_CHECKING:
     from .persistence.state import ConversationStateRepository
     from .settings.chat_guidance import ChatGuidanceService
     from .webhooks.onlyfansapi import (
+        OnlyFansApiFanslyAccountEvent,
         OnlyFansApiFanslyDeletedMessage,
         OnlyFansApiFanslyMessage,
         OnlyFansApiFanslyReadReceipt,
@@ -585,6 +586,21 @@ class FanslyBot:
             creator_id=self.creator_id,
             event=event,
         )
+
+    def ingest_webhook_account(
+        self,
+        event: "OnlyFansApiFanslyAccountEvent",
+    ) -> "WebhookIngestResult":
+        result = self.webhook_event_repo.ingest_account(
+            creator_id=self.creator_id,
+            event=event,
+        )
+        if (
+            event.event_name
+            == "fansly.accounts.authentication_failed"
+        ):
+            self.enabled = False
+        return result
 
     def _attribute_inbound_outcome(
         self,

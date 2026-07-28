@@ -223,6 +223,8 @@ _SPECS = (
         "Fansly account connected",
         "account",
         "handle_account_connected",
+        readiness=HandlerReadiness.READY,
+        eligible=True,
         targets=("provider_webhook_events", "provider_connection_state"),
         subject=("account_id", "accountId", "payload.account.id"),
         retention=RetentionClass.SAFETY,
@@ -232,6 +234,8 @@ _SPECS = (
         "Fansly account authentication failed",
         "account",
         "handle_account_authentication_failed",
+        readiness=HandlerReadiness.READY,
+        eligible=True,
         targets=(
             "provider_webhook_events",
             "provider_circuit_breakers",

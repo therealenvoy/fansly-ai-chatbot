@@ -699,6 +699,41 @@ PROVIDER_CIRCUIT_BREAKERS = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
 
+PROVIDER_CONNECTION_STATES = Table(
+    "provider_connection_states",
+    metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("provider", String(32), primary_key=True),
+    Column("connection_status", String(32), nullable=False),
+    Column("last_connected_at", DateTime(timezone=True), nullable=True),
+    Column("last_auth_failed_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+PROVIDER_ALERTS = Table(
+    "provider_alerts",
+    metadata,
+    Column(
+        "id",
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    ),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("provider", String(32), nullable=False),
+    Column("event_key", String(64), nullable=False),
+    Column("severity", String(16), nullable=False),
+    Column("code", String(64), nullable=False),
+    Column("message", String(255), nullable=False),
+    Column("acknowledged_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "creator_id",
+        "event_key",
+        name="uq_provider_alert_event",
+    ),
+)
+
 Index(
     "ix_inbound_pending_order",
     INBOUND_MESSAGES.c.creator_id,

@@ -13,15 +13,20 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from src.persistence.schema import (
     CONVERSATIONS,
     CONTACT_CLAIMS,
+    CREATOR_SETTINGS,
     FANS,
     FAN_MESSAGES,
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
+    PROVIDER_ALERTS,
+    PROVIDER_CIRCUIT_BREAKERS,
+    PROVIDER_CONNECTION_STATES,
     PROVIDER_MESSAGE_STATES,
     PROVIDER_WEBHOOK_EVENTS,
 )
 
 from .onlyfansapi import (
+    OnlyFansApiFanslyAccountEvent,
     OnlyFansApiFanslyDeletedMessage,
     OnlyFansApiFanslyMessage,
     OnlyFansApiFanslyReadReceipt,
@@ -772,6 +777,125 @@ class WebhookEventRepository:
                         updated_at=now,
                     )
                 )
+        return WebhookIngestResult(True, None)
+
+    def ingest_account(
+        self,
+        *,
+        creator_id: str,
+        event: OnlyFansApiFanslyAccountEvent,
+    ) -> WebhookIngestResult:
+        """Project connection health without ever restoring authority."""
+        now = datetime.now(timezone.utc)
+        authentication_failed = (
+            event.event_name
+            == "fansly.accounts.authentication_failed"
+        )
+        with self.engine.begin() as connection:
+            if not self._insert_event(
+                connection,
+                creator_id=creator_id,
+                event=event,
+                platform_message_id=None,
+                chat_id=None,
+                direction="unknown",
+            ):
+                return WebhookIngestResult(False, None)
+
+            state = self._insert(PROVIDER_CONNECTION_STATES).values(
+                creator_id=creator_id,
+                provider="onlyfansapi",
+                connection_status=(
+                    "authentication_failed"
+                    if authentication_failed
+                    else "connected"
+                ),
+                last_connected_at=(
+                    None
+                    if authentication_failed
+                    else event.provider_created_at
+                ),
+                last_auth_failed_at=(
+                    event.provider_created_at
+                    if authentication_failed
+                    else None
+                ),
+                updated_at=now,
+            )
+            state = state.on_conflict_do_update(
+                index_elements=["creator_id", "provider"],
+                set_={
+                    "connection_status": (
+                        "authentication_failed"
+                        if authentication_failed
+                        else "connected"
+                    ),
+                    "last_connected_at": (
+                        PROVIDER_CONNECTION_STATES.c.last_connected_at
+                        if authentication_failed
+                        else event.provider_created_at
+                    ),
+                    "last_auth_failed_at": (
+                        event.provider_created_at
+                        if authentication_failed
+                        else PROVIDER_CONNECTION_STATES.c.last_auth_failed_at
+                    ),
+                    "updated_at": now,
+                },
+            )
+            connection.execute(state)
+
+            if authentication_failed:
+                circuit = self._insert(
+                    PROVIDER_CIRCUIT_BREAKERS
+                ).values(
+                    creator_id=creator_id,
+                    provider="onlyfansapi",
+                    is_open=True,
+                    reason_code="authentication_failed",
+                    opened_at=event.provider_created_at,
+                    operator_reset_at=None,
+                    updated_at=now,
+                )
+                circuit = circuit.on_conflict_do_update(
+                    index_elements=["creator_id", "provider"],
+                    set_={
+                        "is_open": True,
+                        "reason_code": "authentication_failed",
+                        "opened_at": event.provider_created_at,
+                        "operator_reset_at": None,
+                        "updated_at": now,
+                    },
+                )
+                connection.execute(circuit)
+                setting = self._insert(CREATOR_SETTINGS).values(
+                    creator_id=creator_id,
+                    key="bot_enabled",
+                    value="false",
+                    updated_at=now,
+                )
+                setting = setting.on_conflict_do_update(
+                    index_elements=["creator_id", "key"],
+                    set_={"value": "false", "updated_at": now},
+                )
+                connection.execute(setting)
+                alert = self._insert(PROVIDER_ALERTS).values(
+                    creator_id=creator_id,
+                    provider="onlyfansapi",
+                    event_key=event.event_key,
+                    severity="critical",
+                    code="authentication_failed",
+                    message=(
+                        "Fansly provider authentication failed; "
+                        "sending and reconciliation are disabled."
+                    ),
+                    acknowledged_at=None,
+                    created_at=now,
+                )
+                alert = alert.on_conflict_do_nothing(
+                    index_elements=["creator_id", "event_key"]
+                )
+                connection.execute(alert)
         return WebhookIngestResult(True, None)
 
     def record_dead_letter(

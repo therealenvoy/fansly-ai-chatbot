@@ -7,9 +7,13 @@ from src.memory.store import MessageStore
 from src.persistence.database import create_database_engine
 from src.persistence.schema import (
     CONVERSATIONS,
+    CREATOR_SETTINGS,
     FAN_MESSAGES,
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
+    PROVIDER_ALERTS,
+    PROVIDER_CIRCUIT_BREAKERS,
+    PROVIDER_CONNECTION_STATES,
     PROVIDER_MESSAGE_STATES,
     PROVIDER_WEBHOOK_EVENTS,
     metadata,
@@ -17,6 +21,7 @@ from src.persistence.schema import (
 from src.persistence.state import ConversationStateRepository
 from src.webhooks.onlyfansapi import (
     InvalidWebhookEvent,
+    OnlyFansApiFanslyAccountEvent,
     OnlyFansApiFanslyDeletedMessage,
     OnlyFansApiFanslyMessage,
     OnlyFansApiFanslyReadReceipt,
@@ -113,6 +118,18 @@ def _read_event():
                 "fanId": "fan-a",
                 "createdAt": "2026-07-28T00:03:00Z",
             },
+        },
+        expected_account_id="account-a",
+    )
+
+
+def _account_event(event_name, event_id):
+    return OnlyFansApiFanslyAccountEvent.from_payload(
+        {
+            "event": event_name,
+            "event_id": event_id,
+            "account_id": "account-a",
+            "timestamp": "2026-07-28T00:04:00Z",
         },
         expected_account_id="account-a",
     )
@@ -378,3 +395,68 @@ def test_read_receipt_updates_state_without_outbound_or_inbound_work():
     assert message["read_at"] is not None
     assert inbound_count == 0
     assert outbox_count == 0
+
+
+def test_authentication_failure_opens_circuit_and_disables_bot_atomically():
+    engine = _engine()
+    repository = WebhookEventRepository(engine)
+    event = _account_event(
+        "fansly.accounts.authentication_failed",
+        "auth-failed-a",
+    )
+
+    for _ in range(10):
+        result = repository.ingest_account(
+            creator_id="creator-a",
+            event=event,
+        )
+
+    assert result.created is False
+    with engine.connect() as connection:
+        circuit = connection.execute(
+            select(PROVIDER_CIRCUIT_BREAKERS)
+        ).mappings().one()
+        bot_enabled = connection.execute(
+            select(CREATOR_SETTINGS.c.value).where(
+                CREATOR_SETTINGS.c.key == "bot_enabled"
+            )
+        ).scalar_one()
+        alerts = connection.execute(
+            select(PROVIDER_ALERTS)
+        ).mappings().all()
+    assert circuit["is_open"] is True
+    assert circuit["reason_code"] == "authentication_failed"
+    assert bot_enabled == "false"
+    assert len(alerts) == 1
+    assert "authentication" in alerts[0]["message"].lower()
+
+
+def test_connected_event_updates_visibility_without_resetting_circuit():
+    engine = _engine()
+    repository = WebhookEventRepository(engine)
+    repository.ingest_account(
+        creator_id="creator-a",
+        event=_account_event(
+            "fansly.accounts.authentication_failed",
+            "auth-failed-a",
+        ),
+    )
+
+    repository.ingest_account(
+        creator_id="creator-a",
+        event=_account_event(
+            "fansly.accounts.connected",
+            "connected-a",
+        ),
+    )
+
+    with engine.connect() as connection:
+        state = connection.execute(
+            select(PROVIDER_CONNECTION_STATES)
+        ).mappings().one()
+        circuit_open = connection.execute(
+            select(PROVIDER_CIRCUIT_BREAKERS.c.is_open)
+        ).scalar_one()
+    assert state["connection_status"] == "connected"
+    assert state["last_connected_at"] is not None
+    assert circuit_open is True

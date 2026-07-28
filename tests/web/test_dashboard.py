@@ -294,6 +294,10 @@ def _make_bot(db_url):
         True,
         None,
     )
+    bot.ingest_webhook_account.return_value = WebhookIngestResult(
+        True,
+        None,
+    )
     bot.ai_settings = MagicMock()
     bot.ai_settings.status.return_value = {
         "provider": "DeepSeek",
@@ -545,7 +549,7 @@ class TestOnlyFansApiFanslyWebhook:
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["event"] = "fansly.accounts.connected"
+        payload["event"] = "fansly.followers.new"
 
         status, body = _post_onlyfansapi_webhook(host, payload)
 

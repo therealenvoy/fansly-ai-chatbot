@@ -620,3 +620,69 @@ class OnlyFansApiFanslyReadReceipt:
             fan_id=fan_id or None,
             provider_created_at=created_at,
         )
+
+
+@dataclass(frozen=True)
+class OnlyFansApiFanslyAccountEvent:
+    account_id: str
+    provider_created_at: datetime
+    event_key: str
+    event_name: str
+    provider_event_id: str | None = None
+    schema_version: str | None = None
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: dict,
+        *,
+        expected_account_id: str,
+    ) -> "OnlyFansApiFanslyAccountEvent":
+        if not isinstance(payload, dict):
+            raise InvalidWebhookEvent("invalid webhook payload")
+        event_name = _text(payload.get("event"))
+        if event_name not in {
+            "fansly.accounts.connected",
+            "fansly.accounts.authentication_failed",
+        }:
+            raise InvalidWebhookEvent("unsupported event")
+        account_id = _text(
+            payload.get("account_id"),
+            payload.get("accountId"),
+        )
+        _validate_account(account_id, expected_account_id)
+        provider_event_id = _text(
+            payload.get("event_id"),
+            payload.get("eventId"),
+            payload.get("webhook_id"),
+        )
+        schema_version = _text(
+            payload.get("version"),
+            payload.get("schema_version"),
+        )
+        envelope = _mapping(payload.get("payload")) or _mapping(
+            payload.get("data")
+        )
+        provider_created_at = _provider_datetime(
+            payload.get("timestamp")
+            if payload.get("timestamp") is not None
+            else (
+                envelope.get("createdAt")
+                if envelope.get("createdAt") is not None
+                else envelope.get("created_at")
+            )
+        )
+        return cls(
+            event_key=_stable_event_key(
+                event_name,
+                account_id,
+                account_id,
+                provider_created_at,
+                provider_event_id or None,
+            ),
+            event_name=event_name,
+            provider_event_id=provider_event_id or None,
+            schema_version=schema_version or None,
+            account_id=account_id,
+            provider_created_at=provider_created_at,
+        )
