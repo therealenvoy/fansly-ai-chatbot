@@ -96,8 +96,12 @@ def test_live_percentage_requires_guard_advanced_mode_and_ceiling():
         service.save({"mode": "shadow", "live_percent": 1})
     with pytest.raises(BrainSettingsError):
         service.save({"mode": "advanced", "live_percent": 6})
+    with pytest.raises(BrainSettingsError, match="positive daily cost ceiling"):
+        service.save({"mode": "advanced", "live_percent": 5})
 
-    saved = service.save({"mode": "advanced", "live_percent": 5})
+    saved = service.save(
+        {"mode": "advanced", "live_percent": 5, "max_daily_cost": 5}
+    )
     assert saved.live_percent == 5
     assert saved.max_live_percent == 5
     assert saved.allow_advanced_send is True
@@ -110,7 +114,10 @@ def test_rollback_is_immediate_persistent_and_audited():
             "BRAIN_MAX_LIVE_PERCENT": "10",
         }
     )
-    service.save({"mode": "advanced", "live_percent": 5}, actor="operator")
+    service.save(
+        {"mode": "advanced", "live_percent": 5, "max_daily_cost": 5},
+        actor="operator",
+    )
 
     rolled_back = service.rollback(
         actor="operator",

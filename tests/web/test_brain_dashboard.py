@@ -1,6 +1,112 @@
 from src.settings.brain import BrainSettingsService
 from src.settings.store import SettingsStore
+from src.web.dashboard import DASHBOARD_HTML, DashboardHandler
 from tests.web.test_dashboard import _get, _post, db_url, running_server
+
+
+def test_dashboard_document_has_one_terminal_html_close():
+    normalized = DASHBOARD_HTML.strip().lower()
+
+    assert normalized.count("</html>") == 1
+    assert normalized.endswith("</html>")
+
+
+def test_brain_dashboard_renders_required_operational_evidence_labels():
+    for label in (
+        "Bot enabled",
+        "Authority / mode",
+        "Requested / ceiling / shadow",
+        "Advanced guard / rollback",
+        "Brain version / deployment",
+        "Failure categories",
+        "Fast latency",
+        "Strategic latency",
+        "Provider calls",
+        "Tokens",
+        "Outbox safety",
+        "Delivered outcomes",
+    ):
+        assert label in DASHBOARD_HTML
+
+
+def _promotion_metrics():
+    return {
+        "shadow_outbox_writes": 0,
+        "max_daily_cost": 5.0,
+        "promotion_window": {
+            "attempted_runs": 200,
+            "completion_rate_excluding_capped": 0.995,
+            "unclassified_failures": 0,
+            "json_schema_failures": 0,
+            "json_schema_failure_rate": 0,
+            "timeout_rate_limit_rate": 0.01,
+            "fast_p95_latency_ms": 7000,
+            "strategic_p95_latency_ms": 19000,
+            "approved_safety_violations": 0,
+            "provider_attempts": 200,
+            "fast_average_cost": 0.001,
+            "strategic_average_cost": 0.003,
+        },
+        "review_window": {
+            "blinded_reviews": 200,
+            "advanced_non_tied_win_rate": 0.55,
+            "advanced_safety_hard_failures": 0,
+            "advanced_hard_failures_by_code": {},
+        },
+    }
+
+
+def test_promotion_uses_current_version_windows_not_all_time_history():
+    metrics = _promotion_metrics()
+    metrics.update(
+        {
+            "attempted_runs": 999,
+            "completion_rate_excluding_capped": 0.25,
+            "json_schema_failures": 500,
+            "blinded_reviews": 999,
+            "advanced_non_tied_win_rate": 0.1,
+        }
+    )
+
+    result = DashboardHandler._brain_promotion_readiness(metrics)
+
+    assert result == {"eligible": True, "unmet": []}
+
+
+def test_promotion_rejects_one_malformed_output_in_latest_200():
+    metrics = _promotion_metrics()
+    metrics["promotion_window"]["json_schema_failures"] = 1
+    metrics["promotion_window"]["json_schema_failure_rate"] = 0.005
+
+    result = DashboardHandler._brain_promotion_readiness(metrics)
+
+    assert result["eligible"] is False
+    assert "zero_malformed_json_last_200" in result["unmet"]
+    assert "json_schema_below_half_percent" in result["unmet"]
+
+
+def test_promotion_rejects_advanced_review_safety_failure():
+    metrics = _promotion_metrics()
+    metrics["review_window"]["advanced_safety_hard_failures"] = 1
+
+    result = DashboardHandler._brain_promotion_readiness(metrics)
+
+    assert result["eligible"] is False
+    assert "zero_approved_safety_violations" in result["unmet"]
+
+
+def test_promotion_rejects_persona_or_repetition_regression():
+    metrics = _promotion_metrics()
+    metrics["review_window"]["advanced_hard_failures_by_code"] = {
+        "persona_regression": 1,
+        "excessive_repetition": 1,
+    }
+
+    result = DashboardHandler._brain_promotion_readiness(metrics)
+
+    assert result["eligible"] is False
+    assert "no_advanced_persona_regression" in result["unmet"]
+    assert "no_advanced_repetition_regression" in result["unmet"]
 
 
 def _attach_brain_service(bot, db_url):
@@ -33,6 +139,7 @@ def test_brain_status_and_metrics_are_authenticated_and_secret_free(
     assert metrics_status == 200
     assert metrics["source"] == "durable_brain2_records"
     assert metrics["shadow_outbox_writes"] == 0
+    assert metrics["duplicate_outbox_writes"] == 0
     assert metrics["attempted_runs"] == 0
     assert metrics["completion_rate_excluding_capped"] is None
     assert metrics["provider_attempts"] == 0

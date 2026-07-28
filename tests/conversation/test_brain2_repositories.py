@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import update
+
+from src.conversation.brain2_schema import CONVERSATION_OUTCOMES
 from src.conversation.brain2_repository import (
     ConversationOutcomeRepository,
     FanConversationStateRepository,
@@ -26,12 +29,12 @@ def _engine():
     return engine
 
 
-def _sent_turn(engine):
+def _sent_turn(engine, suffix="1"):
     now = datetime.now(timezone.utc)
     pipeline = MessageProcessingRepository(engine)
     inbound, _ = pipeline.insert_inbound(
         creator_id="creator-a",
-        platform_message_id="inbound-1",
+        platform_message_id=f"inbound-{suffix}",
         fan_id="fan-a",
         chat_id="chat-a",
         content="hello",
@@ -47,7 +50,7 @@ def _sent_turn(engine):
     pipeline.claim_outbox(outbox.id)
     pipeline.complete_delivery(
         outbox.id,
-        provider_message_id="outbound-1",
+        provider_message_id=f"outbound-{suffix}",
     )
     return inbound.id, outbox.id, now
 
@@ -159,6 +162,46 @@ def test_outcome_window_closes_expired_rows():
     if closed_at.tzinfo is None:
         closed_at = closed_at.replace(tzinfo=timezone.utc)
     assert closed_at == sent_at
+
+
+def test_rollback_summary_is_variant_scoped_and_uses_closed_outcomes():
+    engine = _engine()
+    repository = ConversationOutcomeRepository(engine)
+    outcome_ids = []
+    for suffix, variant in (("control", "control"), ("advanced", "advanced")):
+        inbound_id, outbox_id, sent_at = _sent_turn(engine, suffix)
+        outcome_ids.append(
+            repository.create_for_delivery(
+                decision_id=None,
+                inbound_message_id=inbound_id,
+                outbox_message_id=outbox_id,
+                creator_id="creator-a",
+                fan_id="fan-a",
+                brain_version="brain2-v2",
+                model="deepseek-v4-flash",
+                variant=variant,
+                trigger_kind="unread",
+                sent_at=sent_at,
+            )
+        )
+    now = datetime.now(timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            update(CONVERSATION_OUTCOMES)
+            .where(CONVERSATION_OUTCOMES.c.id.in_(outcome_ids))
+            .values(
+                meaningful_reply=True,
+                continued_three_turns=True,
+                attribution_closed_at=now,
+            )
+        )
+
+    summary = repository.rollback_summary(creator_id="creator-a")
+
+    assert summary["control"]["attempts"] == 1
+    assert summary["advanced"]["attempts"] == 1
+    assert summary["control"]["meaningful_replies"] == 1
+    assert summary["advanced"]["continuations"] == 1
 
 
 def test_memory_supersedes_conflict_and_keeps_source_provenance():

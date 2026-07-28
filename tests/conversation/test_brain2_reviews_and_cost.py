@@ -11,6 +11,7 @@ from src.conversation.brain2_repository import (
 from src.conversation.brain2_schema import (
     BRAIN_BLINDED_REVIEWS,
     BRAIN_COMPARISON_PAIRS,
+    BRAIN_CONFIGURATION_EVENTS,
 )
 from src.conversation.repository import ConversationDecisionRepository
 from src.conversation.shadow import ShadowBrainService
@@ -118,7 +119,39 @@ def test_completed_shadow_run_creates_one_blinded_pair_and_review():
         assert connection.execute(
             select(func.count()).select_from(BRAIN_BLINDED_REVIEWS)
         ).scalar_one() == 1
+        events = connection.execute(
+            select(BRAIN_CONFIGURATION_EVENTS).order_by(
+                BRAIN_CONFIGURATION_EVENTS.c.id
+            )
+        ).mappings().all()
     assert review_id > 0
+    assert [event["event_type"] for event in events] == ["review_created"]
+    assert events[0]["previous_values"] == {}
+    assert events[0]["new_values"]["hard_failures"] == []
+
+    updated_review_id = BrainBlindedReviewRepository(engine).save_review(
+        pair_id=pair["id"],
+        creator_id="creator-a",
+        reviewer="operator",
+        scores=scores,
+        winner="left",
+        hard_failures=["right:sales_or_ppv"],
+    )
+    with engine.connect() as connection:
+        events = connection.execute(
+            select(BRAIN_CONFIGURATION_EVENTS).order_by(
+                BRAIN_CONFIGURATION_EVENTS.c.id
+            )
+        ).mappings().all()
+    assert updated_review_id == review_id
+    assert [event["event_type"] for event in events] == [
+        "review_created",
+        "review_updated",
+    ]
+    assert events[1]["previous_values"]["winner"] == "right"
+    assert events[1]["new_values"]["hard_failures"] == [
+        "right:sales_or_ppv"
+    ]
     service.shutdown()
 
 
@@ -133,3 +166,23 @@ def test_blinded_review_rejects_missing_score_dimensions():
             winner="tie",
             hard_failures=[],
         )
+
+
+def test_blinded_review_rejects_unqualified_or_unknown_hard_failures():
+    engine = _engine()
+    repository = BrainBlindedReviewRepository(engine)
+    scores = {
+        field: {"left": 7, "right": 8}
+        for field in repository.SCORE_FIELDS
+    }
+
+    for hard_failure in ("sales_or_ppv", "left:not_a_real_failure"):
+        with pytest.raises(ValueError, match="invalid_review_hard_failure"):
+            repository.save_review(
+                pair_id=1,
+                creator_id="creator-a",
+                reviewer="operator",
+                scores=scores,
+                winner="tie",
+                hard_failures=[hard_failure],
+            )

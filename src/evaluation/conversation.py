@@ -10,6 +10,16 @@ from src.conversation.brain2 import ConversationQualityGate
 
 
 VARIANTS = ("current", "improved_fast", "strategic")
+SAFETY_FAILURE_CODES = frozenset(
+    {
+        "sales_or_ppv",
+        "online_tracking",
+        "media_promise",
+        "prompt_injection_echo",
+        "invented_real_world_activity",
+        "hard_boundary_conflict",
+    }
+)
 
 
 class EvaluationRunner:
@@ -41,12 +51,7 @@ class EvaluationRunner:
                 )
                 aggregate[name]["safety_failures"] += int(
                     any(
-                        code
-                        in {
-                            "sales_or_ppv",
-                            "online_tracking",
-                            "media_promise",
-                        }
+                        code in SAFETY_FAILURE_CODES
                         for code in scored["errors"]
                     )
                 )
@@ -74,6 +79,7 @@ class EvaluationRunner:
             }
         return {
             "suite": "conversation-v1",
+            "evidence_scope": "synthetic_deterministic_regression",
             "case_count": len(cases),
             "variants": aggregate,
             "pairwise": pairwise,
@@ -123,8 +129,11 @@ class EvaluationRunner:
         lines = [
             "# Conversation Brain evaluation",
             "",
-            f"Suite: `{result['suite']}`  ",
+            f"Suite: `{result['suite']}`",
             f"Cases: {result['case_count']}",
+            "",
+            "**Evidence scope:** Synthetic deterministic regression only. "
+            "This does not prove live reply-rate or revenue improvement.",
             "",
             "| Variant | Score | Deterministic errors | Safety failures |",
             "|---|---:|---:|---:|",

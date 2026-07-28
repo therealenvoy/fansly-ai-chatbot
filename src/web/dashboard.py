@@ -25,7 +25,7 @@ from sqlalchemy import case, func, select, text
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
 from ..persistence.pipeline import MessageProcessingRepository
-from ..persistence.schema import CONVERSATION_DECISIONS
+from ..persistence.schema import CONVERSATION_DECISIONS, OUTBOX_MESSAGES
 from ..persistence.presence import PresenceRepository
 from ..media.repository import MediaAsset, MediaAssetRepository
 from ..persona.models import PersonaDocument
@@ -2216,10 +2216,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _brain_metrics_payload(self):
         if self.engine is None:
             return None
+        settings_service = getattr(self.bot, "brain_settings_service", None)
+        current_settings = (
+            settings_service.snapshot()
+            if settings_service is not None
+            else None
+        )
+        current_version = current_settings.version if current_settings else None
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(BRAIN_SHADOW_RUNS).where(
-                    BRAIN_SHADOW_RUNS.c.creator_id == self.creator_id
+                select(BRAIN_SHADOW_RUNS)
+                .where(BRAIN_SHADOW_RUNS.c.creator_id == self.creator_id)
+                .order_by(
+                    BRAIN_SHADOW_RUNS.c.created_at.desc(),
+                    BRAIN_SHADOW_RUNS.c.id.desc(),
                 )
             ).mappings().all()
             outcomes = connection.execute(
@@ -2241,174 +2251,365 @@ class DashboardHandler(BaseHTTPRequestHandler):
             authority_rows = connection.execute(
                 select(
                     CONVERSATION_DECISIONS.c.authority,
-                    func.count(CONVERSATION_DECISIONS.c.id),
+                    func.count(CONVERSATION_OUTCOMES.c.id),
+                )
+                .select_from(
+                    CONVERSATION_OUTCOMES.join(
+                        CONVERSATION_DECISIONS,
+                        CONVERSATION_OUTCOMES.c.conversation_decision_id
+                        == CONVERSATION_DECISIONS.c.id,
+                    )
                 )
                 .where(CONVERSATION_DECISIONS.c.creator_id == self.creator_id)
                 .group_by(CONVERSATION_DECISIONS.c.authority)
             ).all()
+            duplicate_outbox_groups = connection.execute(
+                select(func.count()).select_from(
+                    select(OUTBOX_MESSAGES.c.inbound_message_id)
+                    .where(OUTBOX_MESSAGES.c.creator_id == self.creator_id)
+                    .group_by(OUTBOX_MESSAGES.c.inbound_message_id)
+                    .having(func.count(OUTBOX_MESSAGES.c.id) > 1)
+                    .subquery()
+                )
+            ).scalar_one()
             reviews = connection.execute(
                 select(
+                    BRAIN_BLINDED_REVIEWS.c.pair_id,
                     BRAIN_BLINDED_REVIEWS.c.winner,
+                    BRAIN_BLINDED_REVIEWS.c.hard_failures,
                     BRAIN_COMPARISON_PAIRS.c.left_source,
                     BRAIN_COMPARISON_PAIRS.c.right_source,
+                    BRAIN_SHADOW_RUNS.c.brain_version,
                 )
                 .select_from(
                     BRAIN_BLINDED_REVIEWS.join(
                         BRAIN_COMPARISON_PAIRS,
                         BRAIN_BLINDED_REVIEWS.c.pair_id
                         == BRAIN_COMPARISON_PAIRS.c.id,
+                    ).join(
+                        BRAIN_SHADOW_RUNS,
+                        BRAIN_COMPARISON_PAIRS.c.shadow_run_id
+                        == BRAIN_SHADOW_RUNS.c.id,
                     )
                 )
                 .where(BRAIN_BLINDED_REVIEWS.c.creator_id == self.creator_id)
+                .order_by(
+                    BRAIN_BLINDED_REVIEWS.c.updated_at.desc(),
+                    BRAIN_BLINDED_REVIEWS.c.id.desc(),
+                )
             ).mappings().all()
-        statuses = {}
-        routes = {}
-        failures = {}
-        failure_categories = {}
-        latencies = {"fast": [], "strategic": []}
-        for row in rows:
-            status = str(row["status"])
-            route = str(row["route"])
-            statuses[status] = statuses.get(status, 0) + 1
-            routes[route] = routes.get(route, 0) + 1
-            if status == "failed":
-                code = str(row["error_code"] or "unclassified")
-                stage = str(row["error_stage"] or "unknown")
-                failures[code] = failures.get(code, 0) + 1
-                key = f"{stage}:{code}"
-                failure_categories[key] = failure_categories.get(key, 0) + 1
-            if status == "completed":
-                latencies.setdefault(route, []).append(row["latency_ms"])
-        sampled = len(rows)
-        completed = statuses.get("completed", 0)
-        failed = statuses.get("failed", 0)
-        capped = statuses.get("capped", 0)
-        attempted = completed + failed
-        json_failures = sum(
-            count
-            for code, count in failures.items()
-            if any(marker in code for marker in ("_json_invalid", "_schema_invalid", "_output_empty", "output_truncated"))
+
+        malformed_markers = (
+            "_json_invalid",
+            "_schema_invalid",
+            "_output_empty",
+            "output_truncated",
         )
-        retryable_provider_failures = sum(
-            failures.get(code, 0)
-            for code in ("provider_timeout", "provider_rate_limited")
-        )
-        unclassified = sum(
-            count for code, count in failures.items() if "unclassified" in code
-        )
-        advanced_wins = current_wins = ties = 0
-        for review in reviews:
-            if review["winner"] == "tie":
-                ties += 1
-                continue
-            winner_source = (
-                review["left_source"]
-                if review["winner"] == "left"
-                else review["right_source"]
+        safety_codes = {
+            "sales_or_ppv",
+            "price_or_tip",
+            "paid_media",
+            "media_promise",
+            "online_tracking",
+            "invented_real_world_activity",
+            "hard_boundary_conflict",
+            "prompt_injection_echo",
+        }
+
+        def rollup(run_rows):
+            statuses = {}
+            routes = {}
+            failures = {}
+            failure_categories = {}
+            latencies = {"fast": [], "strategic": []}
+            route_costs = {"fast": 0.0, "strategic": 0.0}
+            route_attempts = {"fast": 0, "strategic": 0}
+            for row in run_rows:
+                status = str(row["status"])
+                route = str(row["route"])
+                statuses[status] = statuses.get(status, 0) + 1
+                routes[route] = routes.get(route, 0) + 1
+                route_costs[route] = route_costs.get(route, 0.0) + float(
+                    row["estimated_cost"] or 0
+                )
+                if status in {"completed", "failed"}:
+                    route_attempts[route] = route_attempts.get(route, 0) + 1
+                if status == "failed":
+                    code = str(row["error_code"] or "unclassified")
+                    stage = str(row["error_stage"] or "unknown")
+                    failures[code] = failures.get(code, 0) + 1
+                    key = f"{stage}:{code}"
+                    failure_categories[key] = failure_categories.get(key, 0) + 1
+                if status == "completed":
+                    latencies.setdefault(route, []).append(row["latency_ms"])
+            sampled = len(run_rows)
+            completed = statuses.get("completed", 0)
+            failed = statuses.get("failed", 0)
+            capped = statuses.get("capped", 0)
+            attempted = completed + failed
+            json_failures = sum(
+                count
+                for code, count in failures.items()
+                if any(marker in code for marker in malformed_markers)
             )
-            if winner_source == "advanced":
-                advanced_wins += 1
-            else:
-                current_wins += 1
-        non_tied = advanced_wins + current_wins
+            transient_failures = sum(
+                failures.get(code, 0)
+                for code in ("provider_timeout", "provider_rate_limited")
+            )
+            unclassified = sum(
+                count
+                for code, count in failures.items()
+                if "unclassified" in code
+            )
+            approved_safety = 0
+            for row in run_rows:
+                gate = row["gate"] or {}
+                if not gate.get("approved"):
+                    continue
+                if set(gate.get("reason_codes") or ()) & safety_codes:
+                    approved_safety += 1
+            gate_rejections = sum(bool(row["gate_rejected"]) for row in run_rows)
+            fallbacks = sum(bool(row["fallback_used"]) for row in run_rows)
+            return {
+                "sampled_runs": sampled,
+                "attempted_runs": attempted,
+                "completed_runs": completed,
+                "failed_runs": failed,
+                "capped_runs": capped,
+                "queued_runs": statuses.get("queued", 0),
+                "completion_rate_excluding_capped": (
+                    completed / attempted if attempted else None
+                ),
+                "cap_hit_rate": capped / sampled if sampled else None,
+                "runs_by_status": statuses,
+                "runs_by_route": routes,
+                "failure_categories": failure_categories,
+                "failures_by_code": failures,
+                "unclassified_failures": unclassified,
+                "json_schema_failures": json_failures,
+                "json_schema_failure_rate": (
+                    json_failures / attempted if attempted else None
+                ),
+                "timeout_rate_limit_rate": (
+                    transient_failures / attempted if attempted else None
+                ),
+                "fast_count": routes.get("fast", 0),
+                "strategic_count": routes.get("strategic", 0),
+                "fast_p50_latency_ms": self._percentile(
+                    latencies.get("fast", []), 0.50
+                ),
+                "fast_p95_latency_ms": self._percentile(
+                    latencies.get("fast", []), 0.95
+                ),
+                "strategic_p50_latency_ms": self._percentile(
+                    latencies.get("strategic", []), 0.50
+                ),
+                "strategic_p95_latency_ms": self._percentile(
+                    latencies.get("strategic", []), 0.95
+                ),
+                "provider_attempts": sum(
+                    int(row["provider_attempts"] or 0) for row in run_rows
+                ),
+                "shadow_model_calls": sum(
+                    int(row["model_calls"] or 0) for row in run_rows
+                ),
+                "retry_calls": sum(
+                    int(row["retry_calls"] or 0) for row in run_rows
+                ),
+                "repair_calls": sum(
+                    int(row["repair_calls"] or 0) for row in run_rows
+                ),
+                "prompt_tokens": sum(
+                    int(row["prompt_tokens"] or 0) for row in run_rows
+                ),
+                "completion_tokens": sum(
+                    int(row["completion_tokens"] or 0) for row in run_rows
+                ),
+                "total_tokens": sum(
+                    int(row["total_tokens"] or 0) for row in run_rows
+                ),
+                "estimated_cost": sum(
+                    float(row["estimated_cost"] or 0) for row in run_rows
+                ),
+                "fast_estimated_cost": route_costs.get("fast", 0.0),
+                "strategic_estimated_cost": route_costs.get("strategic", 0.0),
+                "fast_average_cost": (
+                    route_costs.get("fast", 0.0) / route_attempts.get("fast", 0)
+                    if route_attempts.get("fast", 0)
+                    else None
+                ),
+                "strategic_average_cost": (
+                    route_costs.get("strategic", 0.0)
+                    / route_attempts.get("strategic", 0)
+                    if route_attempts.get("strategic", 0)
+                    else None
+                ),
+                "fallback_count": fallbacks,
+                "fallback_rate": fallbacks / attempted if attempted else None,
+                "gate_rejection_count": gate_rejections,
+                "gate_rejection_rate": (
+                    gate_rejections / attempted if attempted else None
+                ),
+                "approved_safety_violations": approved_safety,
+            }
+
+        def review_rollup(review_rows):
+            unique_reviews = []
+            seen_pairs = set()
+            for review in review_rows:
+                pair_id = int(review["pair_id"])
+                if pair_id in seen_pairs:
+                    continue
+                seen_pairs.add(pair_id)
+                unique_reviews.append(review)
+            advanced_wins = current_wins = ties = 0
+            advanced_safety_hard_failures = 0
+            advanced_hard_failures_by_code = {}
+            for review in unique_reviews:
+                if review["winner"] == "tie":
+                    ties += 1
+                else:
+                    winner_source = (
+                        review["left_source"]
+                        if review["winner"] == "left"
+                        else review["right_source"]
+                    )
+                    if winner_source == "advanced":
+                        advanced_wins += 1
+                    else:
+                        current_wins += 1
+                for label in review["hard_failures"] or ():
+                    side, separator, code = str(label).partition(":")
+                    if not separator:
+                        code = side
+                        source = "advanced"
+                    else:
+                        source = review.get(f"{side}_source")
+                    if source == "advanced" and code in safety_codes:
+                        advanced_safety_hard_failures += 1
+                    if source == "advanced":
+                        advanced_hard_failures_by_code[code] = (
+                            advanced_hard_failures_by_code.get(code, 0) + 1
+                        )
+            non_tied = advanced_wins + current_wins
+            return {
+                "blinded_reviews": len(unique_reviews),
+                "advanced_review_wins": advanced_wins,
+                "current_review_wins": current_wins,
+                "review_ties": ties,
+                "advanced_non_tied_win_rate": (
+                    advanced_wins / non_tied if non_tied else None
+                ),
+                "advanced_safety_hard_failures": advanced_safety_hard_failures,
+                "advanced_hard_failures_by_code": advanced_hard_failures_by_code,
+            }
+
+        all_stats = rollup(rows)
+        version_attempts = [
+            row
+            for row in rows
+            if row["status"] in {"completed", "failed"}
+            and (current_version is None or row["brain_version"] == current_version)
+        ]
+        promotion_stats = rollup(version_attempts[:200])
+        promotion_stats["brain_version"] = current_version
+        promotion_stats["window_limit"] = 200
+        all_reviews = review_rollup(reviews)
+        version_reviews = [
+            review
+            for review in reviews
+            if current_version is None or review["brain_version"] == current_version
+        ]
+        review_stats = review_rollup(version_reviews)
+        review_stats["brain_version"] = current_version
+
         outcome_count = int(outcomes[0] or 0)
         reply_count = int(outcomes[1] or 0)
-        gate_rejections = sum(bool(row["gate_rejected"]) for row in rows)
-        fallbacks = sum(bool(row["fallback_used"]) for row in rows)
         return {
             "source": "durable_brain2_records",
-            "sampled_runs": sampled,
-            "shadow_runs": sampled,
-            "attempted_runs": attempted,
-            "completed_runs": completed,
-            "failed_runs": failed,
-            "capped_runs": capped,
-            "queued_runs": statuses.get("queued", 0),
-            "completion_rate_excluding_capped": (
-                completed / attempted if attempted else None
+            "shadow_runs": all_stats["sampled_runs"],
+            **all_stats,
+            "promotion_window": promotion_stats,
+            "review_window": review_stats,
+            "max_daily_cost": (
+                float(current_settings.max_daily_cost)
+                if current_settings is not None
+                else 0.0
             ),
-            "cap_hit_rate": capped / sampled if sampled else None,
-            "runs_by_status": statuses,
-            "runs_by_route": routes,
-            "failure_categories": failure_categories,
-            "failures_by_code": failures,
-            "unclassified_failures": unclassified,
-            "json_schema_failures": json_failures,
-            "json_schema_failure_rate": json_failures / attempted if attempted else None,
-            "timeout_rate_limit_rate": (
-                retryable_provider_failures / attempted if attempted else None
-            ),
-            "fast_count": routes.get("fast", 0),
-            "strategic_count": routes.get("strategic", 0),
-            "fast_p50_latency_ms": self._percentile(latencies.get("fast", []), 0.50),
-            "fast_p95_latency_ms": self._percentile(latencies.get("fast", []), 0.95),
-            "strategic_p50_latency_ms": self._percentile(latencies.get("strategic", []), 0.50),
-            "strategic_p95_latency_ms": self._percentile(latencies.get("strategic", []), 0.95),
-            "provider_attempts": sum(int(row["provider_attempts"] or 0) for row in rows),
-            "shadow_model_calls": sum(int(row["model_calls"] or 0) for row in rows),
-            "retry_calls": sum(int(row["retry_calls"] or 0) for row in rows),
-            "repair_calls": sum(int(row["repair_calls"] or 0) for row in rows),
-            "prompt_tokens": sum(int(row["prompt_tokens"] or 0) for row in rows),
-            "completion_tokens": sum(int(row["completion_tokens"] or 0) for row in rows),
-            "total_tokens": sum(int(row["total_tokens"] or 0) for row in rows),
-            "estimated_cost": sum(float(row["estimated_cost"] or 0) for row in rows),
-            "fallback_count": fallbacks,
-            "fallback_rate": fallbacks / attempted if attempted else None,
-            "gate_rejection_count": gate_rejections,
-            "gate_rejection_rate": gate_rejections / attempted if attempted else None,
             "eligible_sent_turns": outcome_count,
             "fan_replies": reply_count,
             "reply_rate": reply_count / outcome_count if outcome_count else None,
             "memory_records": int(memories or 0),
             "shadow_outbox_writes": 0,
+            "duplicate_outbox_writes": int(duplicate_outbox_groups or 0),
             "outcomes_by_authority": {
                 str(authority or "current"): int(count)
                 for authority, count in authority_rows
             },
-            "blinded_reviews": len(reviews),
-            "advanced_review_wins": advanced_wins,
-            "current_review_wins": current_wins,
-            "review_ties": ties,
-            "advanced_non_tied_win_rate": (
-                advanced_wins / non_tied if non_tied else None
-            ),
-            "approved_safety_violations": 0,
+            **all_reviews,
         }
 
     @staticmethod
     def _brain_promotion_readiness(metrics):
         if not metrics:
             return {"eligible": False, "unmet": ["metrics_unavailable"]}
+        window = metrics.get("promotion_window") or {}
+        reviews = metrics.get("review_window") or {}
         checks = {
-            "200_uncapped_attempts": metrics["attempted_runs"] >= 200,
+            "200_uncapped_attempts": window.get("attempted_runs", 0) >= 200,
             "99_percent_completion": (
-                metrics["completion_rate_excluding_capped"] is not None
-                and metrics["completion_rate_excluding_capped"] >= 0.99
+                window.get("completion_rate_excluding_capped") is not None
+                and window["completion_rate_excluding_capped"] >= 0.99
             ),
-            "zero_unclassified_failures": metrics["unclassified_failures"] == 0,
+            "zero_unclassified_failures": window.get("unclassified_failures", 0) == 0,
+            "zero_malformed_json_last_200": window.get("json_schema_failures", 0) == 0,
             "json_schema_below_half_percent": (
-                metrics["json_schema_failure_rate"] is not None
-                and metrics["json_schema_failure_rate"] < 0.005
+                window.get("json_schema_failure_rate") is not None
+                and window["json_schema_failure_rate"] < 0.005
             ),
             "provider_timeout_rate_below_two_percent": (
-                metrics["timeout_rate_limit_rate"] is not None
-                and metrics["timeout_rate_limit_rate"] < 0.02
+                window.get("timeout_rate_limit_rate") is not None
+                and window["timeout_rate_limit_rate"] < 0.02
             ),
             "fast_p95_below_8_seconds": (
-                metrics["fast_p95_latency_ms"] is not None
-                and metrics["fast_p95_latency_ms"] < 8000
+                window.get("fast_p95_latency_ms") is not None
+                and window["fast_p95_latency_ms"] < 8000
             ),
             "strategic_p95_below_20_seconds": (
-                metrics["strategic_p95_latency_ms"] is not None
-                and metrics["strategic_p95_latency_ms"] < 20000
+                window.get("strategic_p95_latency_ms") is not None
+                and window["strategic_p95_latency_ms"] < 20000
             ),
-            "200_blinded_reviews": metrics["blinded_reviews"] >= 200,
+            "200_blinded_reviews": reviews.get("blinded_reviews", 0) >= 200,
             "55_percent_non_tied_advanced_wins": (
-                metrics["advanced_non_tied_win_rate"] is not None
-                and metrics["advanced_non_tied_win_rate"] >= 0.55
+                reviews.get("advanced_non_tied_win_rate") is not None
+                and reviews["advanced_non_tied_win_rate"] >= 0.55
             ),
-            "zero_approved_safety_violations": metrics["approved_safety_violations"] == 0,
-            "zero_shadow_outbox_writes": metrics["shadow_outbox_writes"] == 0,
+            "zero_approved_safety_violations": (
+                window.get("approved_safety_violations", 0) == 0
+                and reviews.get("advanced_safety_hard_failures", 0) == 0
+            ),
+            "no_advanced_persona_regression": (
+                reviews.get("advanced_hard_failures_by_code", {}).get(
+                    "persona_regression", 0
+                )
+                == 0
+            ),
+            "no_advanced_repetition_regression": (
+                reviews.get("advanced_hard_failures_by_code", {}).get(
+                    "excessive_repetition", 0
+                )
+                == 0
+            ),
+            "zero_shadow_outbox_writes": metrics.get("shadow_outbox_writes", 0) == 0,
+            "zero_duplicate_outbox_writes": (
+                metrics.get("duplicate_outbox_writes", 0) == 0
+            ),
+            "cost_telemetry_verified": (
+                window.get("provider_attempts", 0) >= window.get("attempted_runs", 0)
+                and (window.get("fast_average_cost") or 0) > 0
+                and (window.get("strategic_average_cost") or 0) > 0
+            ),
+            "daily_cost_ceiling_configured": metrics.get("max_daily_cost", 0) > 0,
         }
         return {
             "eligible": all(checks.values()),

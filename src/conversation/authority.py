@@ -87,10 +87,33 @@ class AutomaticRollbackEvaluator:
         }
     )
 
-    def __init__(self, minimum_rate_window: int = 100):
+    def __init__(
+        self,
+        minimum_rate_window: int = 100,
+        minimum_outcome_window: int = 50,
+    ):
         self.minimum_rate_window = max(20, int(minimum_rate_window))
+        self.minimum_outcome_window = max(20, int(minimum_outcome_window))
 
-    def evaluate(self, attempts: list[dict]) -> str | None:
+    def evaluate(
+        self,
+        attempts: list[dict],
+        *,
+        outcomes: dict | None = None,
+        operational: dict | None = None,
+    ) -> str | None:
+        operational = operational or {}
+        if operational.get("kill_switch_requested"):
+            return "operator_kill_switch"
+        for field, reason in (
+            ("duplicate_outbox_writes", "advanced_duplicate_outbox_write"),
+            ("unauthorized_outbox_writes", "advanced_unauthorized_outbox_write"),
+            ("database_failures", "advanced_database_failure"),
+            ("persistence_failures", "advanced_persistence_failure"),
+            ("state_consistency_failures", "advanced_state_consistency_failure"),
+        ):
+            if int(operational.get(field) or 0) > 0:
+                return reason
         advanced = [
             item
             for item in attempts
@@ -102,6 +125,9 @@ class AutomaticRollbackEvaluator:
             violation = next(iter(codes & self.SAFETY_CODES), None)
             if violation:
                 return f"advanced_safety_violation:{violation}"
+        outcome_reason = self._outcome_regression(outcomes or {})
+        if outcome_reason:
+            return outcome_reason
         if len(advanced) < self.minimum_rate_window:
             return None
         window = advanced[: self.minimum_rate_window]
@@ -137,4 +163,33 @@ class AutomaticRollbackEvaluator:
             index = max(0, min(len(latencies) - 1, -(-95 * len(latencies) // 100) - 1))
             if latencies[index] > ceiling:
                 return f"advanced_{route}_latency_p95"
+        return None
+
+    def _outcome_regression(self, outcomes: dict) -> str | None:
+        advanced = outcomes.get("advanced") or {}
+        control = outcomes.get("control") or {}
+        advanced_attempts = int(advanced.get("attempts") or 0)
+        control_attempts = int(control.get("attempts") or 0)
+        if min(advanced_attempts, control_attempts) < self.minimum_outcome_window:
+            return None
+
+        def rate(bucket: dict, field: str, attempts: int) -> float:
+            return float(bucket.get(field) or 0) / attempts
+
+        advanced_negative = rate(advanced, "negative_signals", advanced_attempts)
+        control_negative = rate(control, "negative_signals", control_attempts)
+        if (
+            advanced_negative >= control_negative + 0.03
+            and advanced_negative >= max(0.03, control_negative * 1.5)
+        ):
+            return "advanced_negative_signal_regression"
+
+        for field, reason in (
+            ("meaningful_replies", "advanced_meaningful_reply_regression"),
+            ("continuations", "advanced_continuation_regression"),
+        ):
+            advanced_rate = rate(advanced, field, advanced_attempts)
+            control_rate = rate(control, field, control_attempts)
+            if control_rate > 0 and advanced_rate < control_rate * 0.95:
+                return reason
         return None

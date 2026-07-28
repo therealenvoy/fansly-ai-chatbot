@@ -1330,8 +1330,10 @@ class FanslyBot:
                             outbox_message_id=delivered_outbox.id,
                             creator_id=self.creator_id,
                             fan_id=sending.fan_id,
-                            brain_version="current-hardened-v1",
+                            brain_version=stored_decision.brain_version,
                             model=stored_decision.model,
+                            experiment_id=stored_decision.experiment_id,
+                            variant=stored_decision.variant,
                             trigger_kind=inbound.trigger_kind,
                             sent_at=(
                                 delivered_outbox.sent_at
@@ -1343,6 +1345,20 @@ class FanslyBot:
                         "Failed to schedule conversation outcome for inbound %s",
                         inbound.id,
                     )
+                    if (
+                        stored_decision is not None
+                        and stored_decision.authority == "advanced"
+                        and self.brain_settings_service is not None
+                    ):
+                        try:
+                            self.brain_settings_service.rollback(
+                                actor="system",
+                                reason="advanced_outcome_persistence_failure",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to rollback after advanced outcome persistence failure"
+                            )
             self._record_sent_reply(
                 sending.fan_id,
                 sending.content,
@@ -2249,6 +2265,37 @@ class FanslyBot:
                 else None
             )
             if gate.approved and approved:
+                if (
+                    execution["authority"] == "advanced"
+                    and self.brain_settings_service is not None
+                ):
+                    latest_settings = self.brain_settings_service.snapshot()
+                    latest_selection = self.brain_authority_router.select(
+                        settings=latest_settings,
+                        creator_id=self.creator_id,
+                        fan_id=fan_id,
+                    )
+                    if (
+                        latest_settings.version != execution["brain_version"]
+                        or latest_selection.authority != "advanced"
+                    ):
+                        execution.update(
+                            authority="current",
+                            brain_version="current-v1",
+                            variant="control",
+                            fallback_used=True,
+                            fallback_reason="stale_authority_after_generation",
+                            gate_results={
+                                "advanced": "rejected",
+                                "reason_codes": [
+                                    "stale_authority_after_generation"
+                                ],
+                            },
+                        )
+                        decision = self.chat_responder.decide(**context)
+                        if decision is None:
+                            return None
+                        continue
                 break
             if execution["authority"] != "advanced":
                 logger.warning(
@@ -2301,7 +2348,10 @@ class FanslyBot:
                     self.conversation_decision_repo.latest_execution_attempts(
                         creator_id=self.creator_id,
                         limit=100,
-                    )
+                    ),
+                    outcomes=self.conversation_outcome_repo.rollback_summary(
+                        creator_id=self.creator_id,
+                    ),
                 )
                 if rollback_reason:
                     self.brain_settings_service.rollback(
@@ -2310,6 +2360,15 @@ class FanslyBot:
                     )
             except Exception:
                 logger.exception("Automatic Brain rollback evaluation failed")
+                try:
+                    self.brain_settings_service.rollback(
+                        actor="system",
+                        reason="advanced_rollback_evaluation_persistence_failure",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to rollback after rollback evaluation persistence failure"
+                    )
         recent_objectives = (
             [approved_decision.objective]
             + list(brain_state["recent_objectives"] or [])

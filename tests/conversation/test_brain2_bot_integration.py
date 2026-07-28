@@ -131,6 +131,16 @@ class RuntimeSettings:
         return self.settings
 
 
+class SequencedRuntimeSettings:
+    def __init__(self, *settings):
+        self.settings = list(settings)
+
+    def snapshot(self):
+        if len(self.settings) > 1:
+            return self.settings.pop(0)
+        return self.settings[0]
+
+
 def _advanced_outcome(message="advanced hello"):
     decision = _decision("maintain", "direct_answer", message, None)
     return AdvancedDecisionOutcome(
@@ -192,6 +202,54 @@ def test_advanced_authority_uses_advanced_decision_and_skips_current_generator()
         creator_id="creator-a",
     )
     assert stored.authority == "advanced"
+
+
+def test_rollback_after_generation_falls_back_before_advanced_decision_is_saved():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.return_value = _decision(
+        "maintain", "direct_answer", "current after rollback", None
+    )
+    advanced = MagicMock()
+    advanced.decide.return_value = _advanced_outcome()
+    settings = SequencedRuntimeSettings(
+        _brain_settings(),
+        BrainRuntimeSettings(mode="current"),
+    )
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+        advanced_brain_service=advanced,
+        brain_settings_service=settings,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="advanced-rollback-race",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hey",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="Fan: hey",
+        fan_message="hey",
+        known_facts=[],
+    )
+
+    assert reply.content == "current after rollback"
+    stored = bot.conversation_decision_repo.get(
+        inbound.id,
+        creator_id="creator-a",
+    )
+    assert stored.authority == "current"
+    assert stored.fallback_reason == "stale_authority_after_generation"
 
 
 def test_advanced_failure_falls_back_to_current_generator_once():

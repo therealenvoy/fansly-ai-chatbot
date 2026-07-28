@@ -203,6 +203,56 @@ class ConversationOutcomeRepository(_Repository):
             ).mappings().first()
         return dict(row) if row else None
 
+    def rollback_summary(
+        self,
+        *,
+        creator_id: str,
+        limit_per_variant: int = 500,
+    ) -> dict[str, dict[str, int]]:
+        limit_per_variant = max(50, min(int(limit_per_variant), 5_000))
+        summary = {
+            variant: {
+                "attempts": 0,
+                "meaningful_replies": 0,
+                "continuations": 0,
+                "negative_signals": 0,
+            }
+            for variant in ("control", "advanced")
+        }
+        with self.engine.connect() as connection:
+            for variant in ("control", "advanced"):
+                rows = connection.execute(
+                    select(
+                        CONVERSATION_OUTCOMES.c.meaningful_reply,
+                        CONVERSATION_OUTCOMES.c.continued_three_turns,
+                        CONVERSATION_OUTCOMES.c.negative_signal,
+                    )
+                    .where(
+                        and_(
+                            CONVERSATION_OUTCOMES.c.creator_id == creator_id,
+                            CONVERSATION_OUTCOMES.c.attribution_closed_at.is_not(None),
+                            CONVERSATION_OUTCOMES.c.variant == variant,
+                        )
+                    )
+                    .order_by(
+                        CONVERSATION_OUTCOMES.c.sent_at.desc(),
+                        CONVERSATION_OUTCOMES.c.id.desc(),
+                    )
+                    .limit(limit_per_variant)
+                ).mappings().all()
+                bucket = summary[variant]
+                bucket["attempts"] = len(rows)
+                bucket["meaningful_replies"] = sum(
+                    bool(row["meaningful_reply"]) for row in rows
+                )
+                bucket["continuations"] = sum(
+                    bool(row["continued_three_turns"]) for row in rows
+                )
+                bucket["negative_signals"] = sum(
+                    bool(row["negative_signal"]) for row in rows
+                )
+        return summary
+
 
 class FanMemoryV2Repository(_Repository):
     def remember(
@@ -1014,6 +1064,21 @@ class BrainBlindedReviewRepository(_Repository):
             "boundary_compliance", "conversation_only_compliance",
         }
     )
+    HARD_FAILURE_CODES = frozenset(
+        {
+            "sales_or_ppv",
+            "price_or_tip",
+            "paid_media",
+            "media_promise",
+            "online_tracking",
+            "invented_real_world_activity",
+            "hard_boundary_conflict",
+            "prompt_injection_echo",
+            "persona_regression",
+            "excessive_repetition",
+            "irrelevant",
+        }
+    )
 
     def save_review(
         self,
@@ -1038,13 +1103,25 @@ class BrainBlindedReviewRepository(_Repository):
                 for side, value in values.items()
             }
         now = utcnow()
+        normalized_failures = []
+        for item in hard_failures[:20]:
+            side, separator, code = str(item).partition(":")
+            if (
+                separator != ":"
+                or side not in {"left", "right"}
+                or code not in self.HARD_FAILURE_CODES
+            ):
+                raise ValueError("invalid_review_hard_failure")
+            label = f"{side}:{code}"
+            if label not in normalized_failures:
+                normalized_failures.append(label)
         statement = self._insert(BRAIN_BLINDED_REVIEWS).values(
             pair_id=pair_id,
             creator_id=creator_id,
             reviewer=reviewer,
             scores=normalized,
             winner=winner,
-            hard_failures=[str(item)[:128] for item in hard_failures[:20]],
+            hard_failures=normalized_failures,
             created_at=now,
             updated_at=now,
         )
@@ -1069,6 +1146,14 @@ class BrainBlindedReviewRepository(_Repository):
             ).mappings().first()
             if pair is None:
                 raise ValueError("review_pair_not_found")
+            previous = connection.execute(
+                select(BRAIN_BLINDED_REVIEWS).where(
+                    and_(
+                        BRAIN_BLINDED_REVIEWS.c.pair_id == pair_id,
+                        BRAIN_BLINDED_REVIEWS.c.reviewer == reviewer,
+                    )
+                )
+            ).mappings().first()
             connection.execute(statement)
             review_id = connection.execute(
                 select(BRAIN_BLINDED_REVIEWS.c.id).where(
@@ -1082,6 +1167,34 @@ class BrainBlindedReviewRepository(_Repository):
                 update(BRAIN_COMPARISON_PAIRS)
                 .where(BRAIN_COMPARISON_PAIRS.c.id == pair_id)
                 .values(status="reviewed")
+            )
+            previous_values = (
+                {
+                    "scores": previous["scores"],
+                    "winner": previous["winner"],
+                    "hard_failures": previous["hard_failures"],
+                }
+                if previous is not None
+                else {}
+            )
+            connection.execute(
+                self._insert(BRAIN_CONFIGURATION_EVENTS).values(
+                    creator_id=creator_id,
+                    event_type=(
+                        "review_updated" if previous is not None else "review_created"
+                    ),
+                    actor=reviewer[:64],
+                    previous_values=previous_values,
+                    new_values={
+                        "pair_id": int(pair_id),
+                        "review_id": int(review_id),
+                        "scores": normalized,
+                        "winner": winner,
+                        "hard_failures": normalized_failures,
+                    },
+                    reason=f"pair_id:{int(pair_id)}",
+                    created_at=now,
+                )
             )
         return int(review_id)
 

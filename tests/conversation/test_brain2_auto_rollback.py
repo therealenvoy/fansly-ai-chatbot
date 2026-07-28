@@ -57,3 +57,86 @@ def test_insufficient_non_safety_sample_does_not_auto_rollback():
         _attempt(fallback_used=True, fallback_reason="provider_timeout")
     ] + [_attempt() for _ in range(20)]
     assert AutomaticRollbackEvaluator().evaluate(attempts) is None
+
+
+def test_operational_safety_failures_rollback_without_a_sample_window():
+    evaluator = AutomaticRollbackEvaluator()
+    assert evaluator.evaluate(
+        [],
+        operational={"duplicate_outbox_writes": 1},
+    ) == "advanced_duplicate_outbox_write"
+    assert evaluator.evaluate(
+        [],
+        operational={"persistence_failures": 1},
+    ) == "advanced_persistence_failure"
+    assert evaluator.evaluate(
+        [],
+        operational={"kill_switch_requested": True},
+    ) == "operator_kill_switch"
+
+
+def test_outcome_regressions_compare_advanced_to_control_after_50_each():
+    evaluator = AutomaticRollbackEvaluator()
+    control = {
+        "attempts": 50,
+        "meaningful_replies": 30,
+        "continuations": 20,
+        "negative_signals": 1,
+    }
+    assert evaluator.evaluate(
+        [],
+        outcomes={
+            "control": control,
+            "advanced": {
+                "attempts": 50,
+                "meaningful_replies": 30,
+                "continuations": 20,
+                "negative_signals": 3,
+            },
+        },
+    ) == "advanced_negative_signal_regression"
+    assert evaluator.evaluate(
+        [],
+        outcomes={
+            "control": control,
+            "advanced": {
+                "attempts": 50,
+                "meaningful_replies": 28,
+                "continuations": 20,
+                "negative_signals": 1,
+            },
+        },
+    ) == "advanced_meaningful_reply_regression"
+    assert evaluator.evaluate(
+        [],
+        outcomes={
+            "control": control,
+            "advanced": {
+                "attempts": 50,
+                "meaningful_replies": 30,
+                "continuations": 18,
+                "negative_signals": 1,
+            },
+        },
+    ) == "advanced_continuation_regression"
+
+
+def test_outcome_regression_waits_for_sufficient_control_evidence():
+    reason = AutomaticRollbackEvaluator().evaluate(
+        [],
+        outcomes={
+            "control": {
+                "attempts": 49,
+                "meaningful_replies": 40,
+                "continuations": 30,
+                "negative_signals": 0,
+            },
+            "advanced": {
+                "attempts": 50,
+                "meaningful_replies": 0,
+                "continuations": 0,
+                "negative_signals": 50,
+            },
+        },
+    )
+    assert reason is None

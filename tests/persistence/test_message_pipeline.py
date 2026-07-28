@@ -7,6 +7,7 @@ from sqlalchemy import select
 from src.bot import FanslyBot
 from src.conversation.mode import BotMode
 from src.conversation.brain import ConversationDecision
+from src.conversation.brain2_schema import CONVERSATION_OUTCOMES
 from src.fansly_client import (
     ChatInfo,
     FanslyApiClient,
@@ -100,6 +101,65 @@ def _rows(engine, table):
         return conn.execute(
             select(table).order_by(table.c.id)
         ).mappings().all()
+
+
+def test_delivery_outcome_preserves_advanced_authority_attribution():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+    )
+    now = datetime.now(timezone.utc)
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="advanced-attribution-inbound",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hey",
+        provider_created_at=now,
+    )
+    decision = ConversationDecision(
+        fan_state="engaged",
+        state_summary="engaged",
+        objective="maintain",
+        tactic="direct_answer",
+        open_thread=None,
+        draft="advanced reply",
+        critique=(),
+        final_message="advanced reply",
+        confidence=0.8,
+    )
+    bot.conversation_decision_repo.save(
+        inbound_message_id=inbound.id,
+        creator_id="creator-a",
+        fan_id="fan-a",
+        trigger_kind="unread",
+        decision=decision,
+        model="deepseek-v4-flash",
+        execution={
+            "authority": "advanced",
+            "brain_version": "brain2-v2",
+            "variant": "advanced",
+            "experiment_id": "canary-v2",
+        },
+    )
+    bot._prepare_message = MagicMock(
+        return_value=OutboundMessage.text("advanced reply")
+    )
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="advanced-attribution-outbound",
+    )
+
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+    assert bot._process_claimed_inbound(claimed) is True
+
+    outcome = _rows(engine, CONVERSATION_OUTCOMES)[0]
+    assert outcome["brain_version"] == "brain2-v2"
+    assert outcome["variant"] == "advanced"
+    assert outcome["experiment_id"] == "canary-v2"
 
 
 def test_pipeline_sorts_oldest_first_and_sends_every_message_once():

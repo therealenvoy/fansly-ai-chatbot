@@ -131,6 +131,14 @@ class BrainSettingsService:
             raise BrainSettingsError(
                 "live_percent exceeds the deployment ceiling"
             )
+        try:
+            maximum_daily_cost = float(merged["max_daily_cost"])
+        except (TypeError, ValueError) as exc:
+            raise BrainSettingsError("max_daily_cost must be numeric") from exc
+        if requested_live > 0 and maximum_daily_cost <= 0:
+            raise BrainSettingsError(
+                "live_percent requires a positive daily cost ceiling"
+            )
         maximum_shadow = int(
             self.environment.get(
                 "BRAIN_MAX_SHADOW_SAMPLE_PERCENT",

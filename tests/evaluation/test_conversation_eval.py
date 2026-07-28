@@ -40,6 +40,8 @@ def test_evaluation_reports_deterministic_errors_and_pairwise_results(tmp_path):
     result = EvaluationRunner().run_file(fixture)
 
     assert result["case_count"] == 1
+    assert result["evidence_scope"] == "synthetic_deterministic_regression"
+    assert "does not prove live reply-rate" in EvaluationRunner.markdown(result)
     assert result["variants"]["improved_fast"]["deterministic_errors"] == 0
     assert result["variants"]["strategic"]["deterministic_errors"] == 0
     assert result["pairwise"]["improved_fast_vs_current"]["wins"] == 1
