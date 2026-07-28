@@ -549,7 +549,7 @@ class TestOnlyFansApiFanslyWebhook:
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["event"] = "fansly.followers.new"
+        payload["event"] = "fansly.posts.created"
 
         status, body = _post_onlyfansapi_webhook(host, payload)
 
