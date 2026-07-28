@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import Engine, and_, case, exists, func, or_, select, update
+from sqlalchemy import Engine, and_, case, exists, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -17,6 +18,9 @@ from .schema import (
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
     PROCESSED_PLATFORM_MESSAGES,
+    CONTACT_CLAIMS,
+    TRIGGER_OWNERSHIP,
+    TRIGGER_OWNERSHIP_EVENTS,
     FAN_CONTACT_POLICIES,
     utcnow,
 )
@@ -250,6 +254,7 @@ class MessageProcessingRepository:
         inbound: InboundMessageRecord,
         message: OutboundMessage | None = None,
         content: str | None = None,
+        service_role: str = "current_brain",
     ) -> tuple[OutboxMessageRecord, bool]:
         """Persist one approved response per inbound message."""
         if message is None:
@@ -283,12 +288,13 @@ class MessageProcessingRepository:
                     )
                 ).scalar_one_or_none() or 0
             )
-        values.update(trigger_source=inbound.trigger_kind, service_role="conversation_reply", permit_status="approved", permit_expires_at=utcnow() + timedelta(minutes=15), contact_policy_version=policy_version)
+        values.update(trigger_source=inbound.trigger_kind, service_role=service_role, permit_status="approved", permit_expires_at=utcnow() + timedelta(minutes=15), contact_policy_version=policy_version)
         stmt = self._insert(OUTBOX_MESSAGES).values(**values)
         stmt = stmt.on_conflict_do_nothing(
             index_elements=["inbound_message_id"]
         )
         with self.engine.begin() as conn:
+            self._ensure_trigger_ownership_defaults(conn, inbound.creator_id)
             result = conn.execute(stmt)
             created = result.rowcount == 1
             row = conn.execute(
@@ -380,6 +386,42 @@ class MessageProcessingRepository:
             compare_now = now
             if permit_expires_at is not None and permit_expires_at.tzinfo is None:
                 compare_now = now.replace(tzinfo=None)
+            inbound = conn.execute(
+                select(INBOUND_MESSAGES).where(
+                    INBOUND_MESSAGES.c.id == row["inbound_message_id"]
+                )
+            ).mappings().one()
+            trigger_type = {
+                "unread": "inbound_reply",
+                "online": "online",
+                "stalled": "stalled",
+            }.get(str(row["trigger_source"]), str(row["trigger_source"]))
+            owner = conn.execute(
+                select(TRIGGER_OWNERSHIP.c.owner).where(
+                    and_(
+                        TRIGGER_OWNERSHIP.c.creator_id == row["creator_id"],
+                        TRIGGER_OWNERSHIP.c.trigger_type == trigger_type,
+                    )
+                )
+            ).scalar_one_or_none()
+            claim_key = hashlib.sha256(
+                "\0".join(
+                    (
+                        str(row["creator_id"]),
+                        str(row["fan_id"]),
+                        trigger_type,
+                        str(inbound["platform_message_id"]),
+                    )
+                ).encode("utf-8")
+            ).hexdigest()
+            existing_claim = conn.execute(
+                select(CONTACT_CLAIMS).where(
+                    and_(
+                        CONTACT_CLAIMS.c.creator_id == row["creator_id"],
+                        CONTACT_CLAIMS.c.idempotency_key == claim_key,
+                    )
+                )
+            ).mappings().first()
             policy_block = (
                 row["permit_status"] != "approved"
                 or permit_expires_at is None
@@ -387,6 +429,8 @@ class MessageProcessingRepository:
                 or (policy is not None and bool(policy["do_not_contact"]))
                 or (paused_until is not None and paused_until > compare_now)
                 or int(row["contact_policy_version"] or 0) != int(policy["version"] if policy else 0)
+                or owner != row["service_role"]
+                or (existing_claim is not None and existing_claim["source_system"] != row["service_role"])
             )
             if policy_block:
                 conn.execute(update(OUTBOX_MESSAGES).where(OUTBOX_MESSAGES.c.id == outbox_id).values(status=OUTBOX_BLOCKED_POLICY, permit_status="revoked", last_error="send permit rejected by current contact policy"))
@@ -394,6 +438,43 @@ class MessageProcessingRepository:
                 inbound = conn.execute(select(INBOUND_MESSAGES).where(INBOUND_MESSAGES.c.id == row["inbound_message_id"])).mappings().one()
                 self._insert_processed(conn, inbound, now)
                 return None
+            if existing_claim is None:
+                claim_stmt = self._insert(CONTACT_CLAIMS).values(
+                    creator_id=row["creator_id"],
+                    fan_id=row["fan_id"],
+                    trigger_type=trigger_type,
+                    trigger_event_id=inbound["platform_message_id"],
+                    source_system=row["service_role"],
+                    campaign_or_automation_id=None,
+                    idempotency_key=claim_key,
+                    claimed_at=now,
+                    cooldown_until=None,
+                    outbox_id=row["id"],
+                    native_message_hash=None,
+                    status="claimed",
+                    denial_reason=None,
+                )
+                claim_stmt = claim_stmt.on_conflict_do_nothing(
+                    index_elements=["creator_id", "idempotency_key"]
+                )
+                if conn.execute(claim_stmt).rowcount != 1:
+                    conn.execute(
+                        update(OUTBOX_MESSAGES)
+                        .where(OUTBOX_MESSAGES.c.id == outbox_id)
+                        .values(status=OUTBOX_BLOCKED_POLICY, permit_status="revoked", last_error="contact episode was claimed concurrently")
+                    )
+                    conn.execute(
+                        update(INBOUND_MESSAGES)
+                        .where(INBOUND_MESSAGES.c.id == row["inbound_message_id"])
+                        .values(
+                            status=INBOUND_COMPLETED,
+                            completed_at=now,
+                            locked_at=None,
+                            last_error=None,
+                        )
+                    )
+                    self._insert_processed(conn, inbound, now)
+                    return None
             result = conn.execute(
                 update(OUTBOX_MESSAGES)
                 .where(
@@ -995,6 +1076,51 @@ class MessageProcessingRepository:
             completed_at=row["completed_at"],
             last_error=row["last_error"],
         )
+
+    @staticmethod
+    def _ensure_trigger_ownership_defaults(conn, creator_id: str) -> None:
+        now = utcnow()
+        defaults = {
+            "new_follower": "disabled",
+            "new_subscriber": "disabled",
+            "gift_subscriber": "disabled",
+            "renewal": "disabled",
+            "qualifying_tip": "disabled",
+            "online": "disabled",
+            "stalled": "disabled",
+            "inbound_reply": "current_brain",
+        }
+        for trigger_type, owner in defaults.items():
+            statement = MessageProcessingRepository._dialect_insert(
+                conn.dialect.name,
+                TRIGGER_OWNERSHIP,
+            ).values(
+                creator_id=creator_id,
+                trigger_type=trigger_type,
+                owner=owner,
+                version=1,
+                updated_by="system_default",
+                updated_at=now,
+            )
+            statement = statement.on_conflict_do_nothing(
+                index_elements=["creator_id", "trigger_type"]
+            )
+            if conn.execute(statement).rowcount == 1:
+                conn.execute(
+                    insert(TRIGGER_OWNERSHIP_EVENTS).values(
+                        creator_id=creator_id,
+                        trigger_type=trigger_type,
+                        previous_owner=None,
+                        new_owner=owner,
+                        actor="system_default",
+                        reason="safe_initial_ownership",
+                        created_at=now,
+                    )
+                )
+
+    @staticmethod
+    def _dialect_insert(dialect_name: str, table):
+        return pg_insert(table) if dialect_name == "postgresql" else sqlite_insert(table)
 
     @staticmethod
     def _outbox(row) -> OutboxMessageRecord:

@@ -328,6 +328,92 @@ CONVERSATION_DECISIONS = Table(
     ),
 )
 
+NATIVE_AUTOMATIONS = Table(
+    "native_automations", metadata,
+    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("name", String(128), nullable=False),
+    Column("trigger_type", String(32), nullable=False),
+    Column("intended_enabled", Boolean, nullable=False, default=False),
+    Column("audience", JSON, nullable=False, default=dict),
+    Column("tier_filters", JSON, nullable=False, default=list),
+    Column("tip_keyword", String(128)), Column("tip_threshold", Integer),
+    Column("delay_seconds", Integer, nullable=False, default=0),
+    Column("cooldown_seconds", Integer, nullable=False, default=0),
+    Column("message_text", Text, nullable=False),
+    Column("message_hash", String(64), nullable=False),
+    Column("media_reference", String(128)), Column("locked_text", Boolean, nullable=False, default=False),
+    Column("configuration_status", String(40), nullable=False, default="draft"),
+    Column("provider_automation_id", String(128)),
+    Column("operator_verified_at", DateTime(timezone=True)),
+    Column("last_observed_send_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint("creator_id", "name", name="uq_native_automation_name"),
+)
+
+NATIVE_CAMPAIGNS = Table(
+    "native_campaigns", metadata,
+    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("name", String(128), nullable=False), Column("audience", JSON, nullable=False, default=dict),
+    Column("included_tiers", JSON, nullable=False, default=list),
+    Column("included_lists", JSON, nullable=False, default=list),
+    Column("excluded_lists", JSON, nullable=False, default=list),
+    Column("exclude_offline", Boolean, nullable=False, default=False),
+    Column("exclude_creators", Boolean, nullable=False, default=True),
+    Column("scheduled_time", DateTime(timezone=True)),
+    Column("cooldown_seconds", Integer, nullable=False, default=0),
+    Column("message_text", Text, nullable=False),
+    Column("content_fingerprint", String(64), nullable=False),
+    Column("media_metadata", JSON, nullable=False, default=dict),
+    Column("conversation_only", Boolean, nullable=False, default=True),
+    Column("ppv_blocked", Boolean, nullable=False, default=True),
+    Column("operator_status", String(40), nullable=False, default="draft"),
+    Column("sent_at", DateTime(timezone=True)), Column("observed_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint("creator_id", "name", name="uq_native_campaign_name"),
+)
+
+TRIGGER_OWNERSHIP = Table(
+    "trigger_ownership", metadata,
+    Column("creator_id", String(64), ForeignKey("creators.id"), primary_key=True),
+    Column("trigger_type", String(32), primary_key=True),
+    Column("owner", String(40), nullable=False),
+    Column("version", Integer, nullable=False, default=1),
+    Column("updated_by", String(64), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+TRIGGER_OWNERSHIP_EVENTS = Table(
+    "trigger_ownership_events", metadata,
+    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("trigger_type", String(32), nullable=False),
+    Column("previous_owner", String(40)), Column("new_owner", String(40), nullable=False),
+    Column("actor", String(64), nullable=False), Column("reason", String(128), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
+CONTACT_CLAIMS = Table(
+    "contact_claims", metadata,
+    Column("id", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("fan_id", String(128), nullable=False),
+    Column("trigger_type", String(32), nullable=False),
+    Column("trigger_event_id", String(128), nullable=False),
+    Column("source_system", String(40), nullable=False),
+    Column("campaign_or_automation_id", String(128)),
+    Column("idempotency_key", String(64), nullable=False),
+    Column("claimed_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("cooldown_until", DateTime(timezone=True)),
+    Column("outbox_id", BigInteger().with_variant(Integer, "sqlite"), ForeignKey("outbox_messages.id")),
+    Column("native_message_hash", String(64)), Column("status", String(32), nullable=False),
+    Column("denial_reason", String(128)),
+    UniqueConstraint("creator_id", "idempotency_key", name="uq_contact_claim_idempotency"),
+)
+
 PROVIDER_WEBHOOK_EVENTS = Table(
     "provider_webhook_events",
     metadata,
@@ -686,6 +772,12 @@ Index(
     PROVIDER_CREDIT_RESERVATIONS.c.creator_id,
     PROVIDER_CREDIT_RESERVATIONS.c.status,
     PROVIDER_CREDIT_RESERVATIONS.c.created_at,
+)
+Index(
+    "ix_contact_claim_fan_time",
+    CONTACT_CLAIMS.c.creator_id,
+    CONTACT_CLAIMS.c.fan_id,
+    CONTACT_CLAIMS.c.claimed_at,
 )
 
 

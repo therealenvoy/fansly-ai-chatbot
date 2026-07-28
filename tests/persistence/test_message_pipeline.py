@@ -8,6 +8,11 @@ from src.bot import FanslyBot
 from src.conversation.mode import BotMode
 from src.conversation.brain import ConversationDecision
 from src.conversation.brain2_schema import CONVERSATION_OUTCOMES
+from src.engagement.control_plane import (
+    TriggerOwner,
+    TriggerOwnershipRepository,
+    TriggerType,
+)
 from src.fansly_client import (
     ChatInfo,
     FanslyApiClient,
@@ -144,6 +149,13 @@ def test_delivery_outcome_preserves_advanced_authority_attribution():
             "variant": "advanced",
             "experiment_id": "canary-v2",
         },
+    )
+    TriggerOwnershipRepository(engine).assign(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.BRAIN2,
+        actor="test",
+        reason="advanced authority test",
     )
     bot._prepare_message = MagicMock(
         return_value=OutboundMessage.text("advanced reply")

@@ -1254,9 +1254,18 @@ class FanslyBot:
                     )
                     return True
                 outbound = self._coerce_outbound(prepared)
+                service_role = "current_brain"
+                if self.bot_mode == BotMode.CONVERSATION:
+                    decision = self.conversation_decision_repo.get(
+                        inbound.id,
+                        creator_id=self.creator_id,
+                    )
+                    if decision is not None and decision.authority == "advanced":
+                        service_role = "brain2"
                 outbox, _ = self.processing_repo.enqueue_outbox(
                     inbound=inbound,
                     message=outbound,
+                    service_role=service_role,
                 )
                 unsupported = self._unsupported_reason(outbound)
                 if unsupported:
