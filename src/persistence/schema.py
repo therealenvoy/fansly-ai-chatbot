@@ -882,3 +882,6 @@ Index(
 
 # Register additive Brain 2.0 tables in the shared Alembic metadata.
 import src.conversation.brain2_schema  # noqa: E402,F401
+
+# Register feature-flagged Human Delivery tables in shared Alembic metadata.
+import src.human_delivery.schema  # noqa: E402,F401
