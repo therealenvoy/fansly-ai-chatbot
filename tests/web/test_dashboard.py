@@ -254,6 +254,7 @@ def _make_bot(db_url):
     bot.account_id = "account-123"
     bot.client.account_id = "fansly_acc_test"
     bot.client._creator_fansly_id = "creator-native-1"
+    bot.client.creator_fansly_id = "creator-native-1"
     bot.client.list_chats.return_value = []
     bot.client.verify_auth.return_value = True
     bot.client.capabilities = ProviderCapabilities(
