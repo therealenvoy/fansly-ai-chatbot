@@ -67,6 +67,10 @@ FAN_MESSAGES = Table(
     Column("content", Text),
     Column("message_id", String, nullable=True),
     Column("attachments", JSON, nullable=True),
+    Column("source_class", String(32), nullable=True),
+    Column("provider_event_id", String(128), nullable=True),
+    Column("read_at", DateTime(timezone=True), nullable=True),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime, default=utcnow),
 )
 
@@ -165,6 +169,10 @@ CONVERSATIONS = Table(
     Column("provider_cursor", String(255), nullable=True),
     Column("last_platform_message_id", String(128), nullable=True),
     Column("last_activity_at", DateTime(timezone=True), nullable=True),
+    Column("last_speaker", String(16), nullable=True),
+    Column("last_fan_message_at", DateTime(timezone=True), nullable=True),
+    Column("last_creator_message_at", DateTime(timezone=True), nullable=True),
+    Column("last_read_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
     UniqueConstraint(
@@ -439,6 +447,27 @@ PROVIDER_WEBHOOK_EVENTS = Table(
     ),
 )
 
+PROVIDER_MESSAGE_STATES = Table(
+    "provider_message_states",
+    metadata,
+    Column(
+        "creator_id",
+        String(64),
+        ForeignKey("creators.id"),
+        primary_key=True,
+    ),
+    Column("platform_message_id", String(128), primary_key=True),
+    Column("chat_id", String(128), nullable=True),
+    Column("fan_id", String(128), nullable=True),
+    Column("direction", String(16), nullable=False, default="unknown"),
+    Column("source_class", String(32), nullable=True),
+    Column("provider_event_id", String(128), nullable=True),
+    Column("provider_created_at", DateTime(timezone=True), nullable=True),
+    Column("read_at", DateTime(timezone=True), nullable=True),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
 
 FAN_CONTACT_POLICIES = Table(
     "fan_contact_policies",
@@ -696,6 +725,12 @@ Index(
     "ix_provider_webhook_event_message",
     PROVIDER_WEBHOOK_EVENTS.c.creator_id,
     PROVIDER_WEBHOOK_EVENTS.c.platform_message_id,
+)
+Index(
+    "ix_provider_message_state_chat_time",
+    PROVIDER_MESSAGE_STATES.c.creator_id,
+    PROVIDER_MESSAGE_STATES.c.chat_id,
+    PROVIDER_MESSAGE_STATES.c.provider_created_at,
 )
 Index(
     "ix_outbox_permit_status",

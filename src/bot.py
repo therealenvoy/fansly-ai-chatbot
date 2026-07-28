@@ -69,6 +69,7 @@ from .humanize.variation import VariationPool
 from .messaging.models import OutboundKind, OutboundMessage
 from .messaging.policy import MessageContentPolicy
 from .persistence.pipeline import (
+    InboundSupersededError,
     InboundMessageRecord,
     MessageProcessingRepository,
     OutboxMessageRecord,
@@ -81,7 +82,13 @@ from .persistence.presence import PresenceRepository
 if TYPE_CHECKING:
     from .persistence.state import ConversationStateRepository
     from .settings.chat_guidance import ChatGuidanceService
-    from .webhooks.onlyfansapi import OnlyFansApiFanslyMessage
+    from .webhooks.onlyfansapi import (
+        OnlyFansApiFanslyDeletedMessage,
+        OnlyFansApiFanslyMessage,
+        OnlyFansApiFanslyReadReceipt,
+        OnlyFansApiFanslySentMessage,
+    )
+    from .webhooks.repository import WebhookIngestResult
 
 logger = logging.getLogger(__name__)
 
@@ -551,6 +558,33 @@ class FanslyBot:
                     event.provider_created_at,
                 )
         return result.created
+
+    def ingest_webhook_sent(
+        self,
+        event: "OnlyFansApiFanslySentMessage",
+    ) -> "WebhookIngestResult":
+        return self.webhook_event_repo.ingest_sent(
+            creator_id=self.creator_id,
+            event=event,
+        )
+
+    def ingest_webhook_deleted(
+        self,
+        event: "OnlyFansApiFanslyDeletedMessage",
+    ) -> "WebhookIngestResult":
+        return self.webhook_event_repo.ingest_deleted(
+            creator_id=self.creator_id,
+            event=event,
+        )
+
+    def ingest_webhook_read(
+        self,
+        event: "OnlyFansApiFanslyReadReceipt",
+    ) -> "WebhookIngestResult":
+        return self.webhook_event_repo.ingest_read(
+            creator_id=self.creator_id,
+            event=event,
+        )
 
     def _attribute_inbound_outcome(
         self,
@@ -1262,11 +1296,18 @@ class FanslyBot:
                     )
                     if decision is not None and decision.authority == "advanced":
                         service_role = "brain2"
-                outbox, _ = self.processing_repo.enqueue_outbox(
-                    inbound=inbound,
-                    message=outbound,
-                    service_role=service_role,
-                )
+                try:
+                    outbox, _ = self.processing_repo.enqueue_outbox(
+                        inbound=inbound,
+                        message=outbound,
+                        service_role=service_role,
+                    )
+                except InboundSupersededError:
+                    logger.info(
+                        "Discarded superseded reply for inbound %s",
+                        inbound.platform_message_id,
+                    )
+                    return True
                 unsupported = self._unsupported_reason(outbound)
                 if unsupported:
                     self.processing_repo.complete_unsupported(

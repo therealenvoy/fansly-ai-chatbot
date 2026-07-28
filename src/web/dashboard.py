@@ -12,7 +12,7 @@ import math
 import os
 import re
 import secrets
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 
 import yaml
@@ -64,7 +64,10 @@ from ..webhooks.gateway import (
 )
 from ..webhooks.onlyfansapi import (
     InvalidWebhookEvent,
+    OnlyFansApiFanslyDeletedMessage,
     OnlyFansApiFanslyMessage,
+    OnlyFansApiFanslyReadReceipt,
+    OnlyFansApiFanslySentMessage,
 )
 
 logger = logging.getLogger("fansly-bot.dashboard")
@@ -1136,16 +1139,87 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 202,
             )
         try:
-            event = OnlyFansApiFanslyMessage.from_payload(
-                delivery.payload,
-                expected_account_id=str(
-                    getattr(self.client, "account_id", "")
-                ),
-                creator_fansly_id=str(
-                    getattr(self.client, "creator_fansly_id", "")
-                ),
+            expected_account_id = str(
+                getattr(self.client, "account_id", "")
             )
-            created = self.bot.ingest_webhook_message(event)
+            creator_fansly_id = str(
+                getattr(self.client, "creator_fansly_id", "")
+            )
+            if event_name == "fansly.messages.received":
+                event = OnlyFansApiFanslyMessage.from_payload(
+                    delivery.payload,
+                    expected_account_id=expected_account_id,
+                    creator_fansly_id=creator_fansly_id,
+                )
+                event = replace(
+                    event,
+                    event_key=envelope.event_key,
+                    provider_event_id=envelope.provider_event_id,
+                    schema_version=envelope.schema_version,
+                )
+                created = self.bot.ingest_webhook_message(event)
+                quarantined = False
+            elif event_name == "fansly.messages.sent":
+                event = OnlyFansApiFanslySentMessage.from_payload(
+                    delivery.payload,
+                    expected_account_id=expected_account_id,
+                    creator_fansly_id=creator_fansly_id,
+                )
+                result = self.bot.ingest_webhook_sent(
+                    replace(
+                        event,
+                        event_key=envelope.event_key,
+                        provider_event_id=envelope.provider_event_id,
+                        schema_version=envelope.schema_version,
+                    )
+                )
+                created = result.created
+                quarantined = result.quarantined
+            elif event_name == "fansly.messages.deleted":
+                event = OnlyFansApiFanslyDeletedMessage.from_payload(
+                    delivery.payload,
+                    expected_account_id=expected_account_id,
+                )
+                result = self.bot.ingest_webhook_deleted(
+                    replace(
+                        event,
+                        event_key=envelope.event_key,
+                        provider_event_id=envelope.provider_event_id,
+                        schema_version=envelope.schema_version,
+                    )
+                )
+                created = result.created
+                quarantined = result.quarantined
+            elif event_name == "fansly.messages.read":
+                event = OnlyFansApiFanslyReadReceipt.from_payload(
+                    delivery.payload,
+                    expected_account_id=expected_account_id,
+                )
+                result = self.bot.ingest_webhook_read(
+                    replace(
+                        event,
+                        event_key=envelope.event_key,
+                        provider_event_id=envelope.provider_event_id,
+                        schema_version=envelope.schema_version,
+                    )
+                )
+                created = result.created
+                quarantined = result.quarantined
+            else:
+                persisted = self._record_webhook_dead_letter(
+                    envelope.event_key,
+                    event_name,
+                    "missing_dispatch",
+                )
+                if not persisted:
+                    return self.j(
+                        {"error": "webhook persistence unavailable"},
+                        503,
+                    )
+                return self.j(
+                    {"accepted": False, "quarantined": True},
+                    202,
+                )
         except InvalidWebhookEvent as exc:
             reason = str(exc)
             persisted = self._record_webhook_dead_letter(
@@ -1167,7 +1241,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "OnlyFansAPI Fansly webhook processing failed"
             )
             return self.j({"error": "webhook processing failed"}, 500)
-        if created:
+        if quarantined:
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
+            )
+        if created and event_name == "fansly.messages.received":
             wakeup = getattr(self.server, "inbound_wakeup", None)
             if wakeup is not None:
                 wakeup.set()

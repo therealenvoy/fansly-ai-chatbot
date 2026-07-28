@@ -32,6 +32,7 @@ from src.sequences.models import (
 )
 from src.sequences.repository import SequenceRepository
 from src.web.dashboard import DASHBOARD_HTML, MAX_BODY_BYTES, DashboardServer
+from src.webhooks.repository import WebhookIngestResult
 
 
 TEST_USER = "test-operator"
@@ -280,6 +281,18 @@ def _make_bot(db_url):
         True,
     )
     bot.ingest_webhook_message.return_value = True
+    bot.ingest_webhook_sent.return_value = WebhookIngestResult(
+        True,
+        None,
+    )
+    bot.ingest_webhook_deleted.return_value = WebhookIngestResult(
+        True,
+        None,
+    )
+    bot.ingest_webhook_read.return_value = WebhookIngestResult(
+        True,
+        None,
+    )
     bot.ai_settings = MagicMock()
     bot.ai_settings.status.return_value = {
         "provider": "DeepSeek",
@@ -525,13 +538,13 @@ class TestOnlyFansApiFanslyWebhook:
         bot.webhook_event_repo.record_dead_letter.assert_called_once()
         bot.ingest_webhook_message.assert_not_called()
 
-    def test_planned_handler_is_not_subscribed_or_processed_early(
+    def test_non_ready_handler_is_not_processed_early(
         self,
         running_server,
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["event"] = "fansly.messages.sent"
+        payload["event"] = "fansly.accounts.connected"
 
         status, body = _post_onlyfansapi_webhook(host, payload)
 
@@ -541,6 +554,23 @@ class TestOnlyFansApiFanslyWebhook:
             bot.webhook_event_repo.record_dead_letter.call_args.kwargs
         )
         assert kwargs["error_category"] == "handler_not_ready"
+        bot.ingest_webhook_message.assert_not_called()
+
+    def test_signed_creator_message_uses_sent_projection(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        payload = self._payload()
+        payload["event"] = "fansly.messages.sent"
+        payload["payload"]["senderId"] = "creator-native-1"
+        payload["payload"]["recipientId"] = "fan-1"
+
+        status, body = _post_onlyfansapi_webhook(host, payload)
+
+        assert status == 200
+        assert body == {"accepted": True, "duplicate": False}
+        bot.ingest_webhook_sent.assert_called_once()
         bot.ingest_webhook_message.assert_not_called()
 
     def test_quarantine_database_failure_remains_retryable(

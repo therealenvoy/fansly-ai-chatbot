@@ -15,6 +15,7 @@ from src.sequences.models import StepStatus
 from src.sequences.repository import PROGRESS_TABLE, STEPS_TABLE
 
 from .schema import (
+    FAN_MESSAGES,
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
     PROCESSED_PLATFORM_MESSAGES,
@@ -38,6 +39,10 @@ OUTBOX_DELIVERY_UNKNOWN = "delivery_unknown"
 OUTBOX_BLOCKED_UNSUPPORTED = "blocked_unsupported"
 OUTBOX_BLOCKED_POLICY = "blocked_policy"
 OUTBOX_BLOCKED_PROVIDER = "blocked_provider"
+
+
+class InboundSupersededError(RuntimeError):
+    """Conversation work became terminal before an outbox could be created."""
 
 
 @dataclass(frozen=True)
@@ -294,6 +299,18 @@ class MessageProcessingRepository:
             index_elements=["inbound_message_id"]
         )
         with self.engine.begin() as conn:
+            current_status = conn.execute(
+                select(INBOUND_MESSAGES.c.status)
+                .where(INBOUND_MESSAGES.c.id == inbound.id)
+                .with_for_update()
+            ).scalar_one()
+            allowed_statuses = {INBOUND_PROCESSING}
+            if inbound.status == INBOUND_PENDING:
+                allowed_statuses.add(INBOUND_PENDING)
+            if current_status not in allowed_statuses:
+                raise InboundSupersededError(
+                    "inbound work was superseded before outbox creation"
+                )
             self._ensure_trigger_ownership_defaults(conn, inbound.creator_id)
             result = conn.execute(stmt)
             created = result.rowcount == 1
@@ -531,6 +548,18 @@ class MessageProcessingRepository:
                 )
             )
             conn.execute(
+                update(FAN_MESSAGES)
+                .where(
+                    and_(
+                        FAN_MESSAGES.c.creator_id
+                        == outbox["creator_id"],
+                        FAN_MESSAGES.c.message_id
+                        == provider_message_id,
+                    )
+                )
+                .values(source_class="ai")
+            )
+            conn.execute(
                 update(INBOUND_MESSAGES)
                 .where(
                     INBOUND_MESSAGES.c.id == outbox["inbound_message_id"]
@@ -615,6 +644,8 @@ class MessageProcessingRepository:
                 .where(INBOUND_MESSAGES.c.id == inbound_id)
                 .with_for_update()
             ).mappings().one()
+            if row["status"] != INBOUND_PROCESSING:
+                return self._inbound(row)
             next_status = (
                 INBOUND_PENDING
                 if row["attempt_count"] < max_attempts

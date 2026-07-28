@@ -7,7 +7,10 @@ import pytest
 
 from src.webhooks.onlyfansapi import (
     InvalidWebhookEvent,
+    OnlyFansApiFanslyDeletedMessage,
     OnlyFansApiFanslyMessage,
+    OnlyFansApiFanslyReadReceipt,
+    OnlyFansApiFanslySentMessage,
     verify_onlyfansapi_signature,
 )
 
@@ -128,3 +131,51 @@ def test_invalid_or_wrong_scope_events_fail_closed(mutate, match):
             expected_account_id="fansly_acct_test",
             creator_fansly_id="creator-1",
         )
+
+
+def test_sent_message_extracts_creator_origin_hints():
+    payload = _payload()
+    payload["event"] = "fansly.messages.sent"
+    payload["payload"].update(
+        {
+            "senderId": "creator-1",
+            "recipientId": "fan-1",
+            "automationId": "native-automation-1",
+        }
+    )
+
+    event = OnlyFansApiFanslySentMessage.from_payload(
+        payload,
+        expected_account_id="fansly_acct_test",
+        creator_fansly_id="creator-1",
+    )
+
+    assert event.platform_message_id == "message-1"
+    assert event.fan_id == "fan-1"
+    assert event.automation_id == "native-automation-1"
+
+
+def test_deleted_and_read_events_normalize_message_identifiers():
+    deleted_payload = _payload()
+    deleted_payload["event"] = "fansly.messages.deleted"
+    deleted = OnlyFansApiFanslyDeletedMessage.from_payload(
+        deleted_payload,
+        expected_account_id="fansly_acct_test",
+    )
+    read_payload = _payload()
+    read_payload["event"] = "fansly.messages.read"
+    read_payload["payload"]["messageIds"] = [
+        "message-1",
+        "message-2",
+        "message-1",
+    ]
+    read = OnlyFansApiFanslyReadReceipt.from_payload(
+        read_payload,
+        expected_account_id="fansly_acct_test",
+    )
+
+    assert deleted.platform_message_id == "message-1"
+    assert read.platform_message_ids == (
+        "message-1",
+        "message-2",
+    )

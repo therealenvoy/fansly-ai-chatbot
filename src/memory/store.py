@@ -161,6 +161,7 @@ class MessageStore:
         predicate = and_(
             MESSAGES_TABLE.c.fan_id == fan_id,
             MESSAGES_TABLE.c.creator_id == creator_id,
+            MESSAGES_TABLE.c.deleted_at.is_(None),
         )
         with self.engine.connect() as conn:
             total = int(
@@ -211,6 +212,7 @@ class MessageStore:
         filters = [
             MESSAGES_TABLE.c.fan_id == fan_id,
             MESSAGES_TABLE.c.creator_id == creator_id,
+            MESSAGES_TABLE.c.deleted_at.is_(None),
         ]
         if sender is not None:
             filters.append(MESSAGES_TABLE.c.sender == sender)
@@ -232,6 +234,7 @@ class MessageStore:
             stmt = select(func.count()).select_from(MESSAGES_TABLE).where(
                 (MESSAGES_TABLE.c.fan_id == fan_id)
                 & (MESSAGES_TABLE.c.creator_id == creator_id)
+                & MESSAGES_TABLE.c.deleted_at.is_(None)
             )
             return int(conn.execute(stmt).scalar_one() or 0)
 
@@ -244,6 +247,12 @@ class MessageStore:
             "message_id": row.message_id,
             "chat_id": row.chat_id,
             "attachments": list(row.attachments or []),
+            "source_class": row.source_class,
+            "read_at": (
+                row.read_at.isoformat()
+                if row.read_at
+                else None
+            ),
             "created_at": (
                 row.created_at.isoformat()
                 if row.created_at
