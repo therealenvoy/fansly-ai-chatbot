@@ -243,6 +243,25 @@ def test_memory_supersedes_conflict_and_keeps_source_provenance():
     old = repository.get(first)
     assert old["status"] == "superseded"
     assert old["superseded_by_id"] == second
+    corrected = repository.correct(
+        second,
+        creator_id="creator-a",
+        display_value="Favorite color is burgundy",
+        confidence=0.95,
+        contradiction_status="operator_confirmed",
+    )
+    assert corrected["display_value"] == "Favorite color is burgundy"
+    assert corrected["source_message_id"] == "m-2"
+    assert corrected["source_event_id"].startswith("crm-correction:")
+    assert repository.deactivate(
+        second,
+        creator_id="creator-a",
+    ) is True
+    assert repository.relevant(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        limit=10,
+    ) == []
 
 
 def test_state_update_uses_optimistic_versioning():

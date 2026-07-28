@@ -18,6 +18,7 @@ from src.human_delivery.repository import (
 )
 from src.human_delivery.schema import (
     CREATOR_FACTS,
+    HUMAN_DELIVERY_REVIEWS,
     HUMAN_RESPONSE_BUBBLES,
     HUMAN_RESPONSE_PLANS,
 )
@@ -70,6 +71,9 @@ class HumanDeliveryService:
             suggested_guide=suggested_guide,
         )
 
+    def update_settings(self, settings: HumanDeliverySettings) -> None:
+        self.settings = settings
+
     def status(self) -> dict:
         rows = self.documents.list_documents()
         active = {
@@ -121,6 +125,22 @@ class HumanDeliveryService:
                     .group_by(HUMAN_RESPONSE_BUBBLES.c.status)
                 ).all()
             )
+            review_count = int(
+                connection.execute(
+                    select(func.count(HUMAN_DELIVERY_REVIEWS.c.id))
+                    .select_from(
+                        HUMAN_DELIVERY_REVIEWS.join(
+                            HUMAN_RESPONSE_PLANS,
+                            HUMAN_DELIVERY_REVIEWS.c.plan_id
+                            == HUMAN_RESPONSE_PLANS.c.id,
+                        )
+                    )
+                    .where(
+                        HUMAN_RESPONSE_PLANS.c.creator_id
+                        == self.creator_id
+                    )
+                ).scalar_one()
+            )
         return {
             "settings": self.settings.safe_status(),
             "documents": {
@@ -137,6 +157,18 @@ class HumanDeliveryService:
                     str(key): int(value)
                     for key, value in bubble_counts.items()
                 },
+                "bubble_distribution": self.plans.metrics(
+                    creator_id=self.creator_id
+                )["bubble_distribution"],
+                "average_bubbles": self.plans.metrics(
+                    creator_id=self.creator_id
+                )["average_bubbles"],
+                "blinded_reviews": review_count,
+                "model_powered_shadow_enabled": bool(
+                    self.settings.shadow_authority
+                    and self.settings.prompt_compiler_enabled
+                ),
+                "unexpected_outbox_writes": 0,
             },
             "safety": {
                 "live_pipeline_changed": False,
@@ -300,6 +332,52 @@ class HumanDeliveryService:
                 )
             ).mappings().one()
         return dict(saved)
+
+    def review_pair(self, *, reviewer: str = "crm") -> dict | None:
+        return self.plans.review_pair(
+            creator_id=self.creator_id,
+            reviewer=reviewer,
+        )
+
+    def save_review(
+        self,
+        payload: Mapping[str, object],
+        *,
+        reviewer: str = "crm",
+    ) -> dict:
+        scores = payload.get("scores") or {}
+        failures = payload.get("hard_failures") or []
+        if not isinstance(scores, dict) or not isinstance(failures, list):
+            raise ValueError("invalid review scores or hard failures")
+        allowed_dimensions = {
+            "naturalness",
+            "persona_fit",
+            "context_awareness",
+            "memory_use",
+            "emotional_intelligence",
+            "repetition",
+            "safety",
+        }
+        cleaned_scores = {}
+        for dimension, sides in scores.items():
+            if dimension not in allowed_dimensions or not isinstance(
+                sides,
+                dict,
+            ):
+                continue
+            cleaned_scores[dimension] = {
+                side: min(max(float(value), 1.0), 5.0)
+                for side, value in sides.items()
+                if side in {"left", "right"}
+            }
+        return self.plans.save_review(
+            plan_id=int(payload.get("pair_id")),
+            creator_id=self.creator_id,
+            reviewer=reviewer,
+            scores=cleaned_scores,
+            winner=str(payload.get("winner") or ""),
+            hard_failures=failures,
+        )
 
     def activate(self, document_id: int) -> dict:
         """Activate only inside the new document store, never the live prompt."""

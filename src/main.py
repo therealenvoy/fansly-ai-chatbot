@@ -47,8 +47,8 @@ from .settings.ai import (
 from .settings.chat_guidance import ChatGuidanceService
 from .settings.brain import BrainSettingsService
 from .human_delivery.guide import DEFAULT_CONVERSATION_GUIDE
+from .human_delivery.control import HumanDeliveryControlService
 from .human_delivery.service import HumanDeliveryService
-from .human_delivery.settings import HumanDeliverySettings
 from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
 from .persistence.state import ConversationStateRepository
@@ -319,12 +319,17 @@ chat_guidance = ChatGuidanceService(
     settings_store,
     legacy_brand_bible_path=BRAND_BIBLE_CONFIG_PATH,
 )
-human_delivery_settings = HumanDeliverySettings.from_mapping(os.environ)
+human_delivery_control = HumanDeliveryControlService(
+    settings_store=settings_store,
+    environment=os.environ,
+)
+human_delivery_settings = human_delivery_control.snapshot()
 human_delivery = HumanDeliveryService(
     database_engine,
     creator_id=CREATOR_ID,
     settings=human_delivery_settings,
 )
+human_delivery_control.runtime = human_delivery
 try:
     guidance_snapshot = chat_guidance.snapshot()
     human_delivery.bootstrap(
@@ -635,6 +640,7 @@ dashboard = DashboardServer(
     ai_settings=ai_settings,
     chat_guidance=chat_guidance,
     human_delivery=human_delivery,
+    human_delivery_control=human_delivery_control,
     credit_governor=provider_credit_governor,
     onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
     webhook_endpoint_url=ONLYFANSAPI_WEBHOOK_URL,

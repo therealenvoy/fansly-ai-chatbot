@@ -18,7 +18,12 @@ from src.human_delivery.schema import (
     HUMAN_RESPONSE_BUBBLES,
     HUMAN_RESPONSE_PLANS,
 )
-from src.persistence.schema import CREATORS, INBOUND_MESSAGES, metadata
+from src.persistence.schema import (
+    CONVERSATION_DECISIONS,
+    CREATORS,
+    INBOUND_MESSAGES,
+    metadata,
+)
 
 
 def _engine():
@@ -325,3 +330,74 @@ def test_shadow_planner_uses_one_model_call_and_never_writes_outbox():
     assert result["status"] == "shadow_planned"
     assert result["model_calls"] == 1
     assert result["outbox_writes"] == 0
+
+
+def test_blinded_review_hides_source_until_score_is_stored():
+    engine = _engine()
+    inbound_id = _inbound(
+        engine,
+        message_id="synthetic-review",
+        content="tell me something",
+        created_at=datetime.now(timezone.utc),
+    )
+    turn = FanTurnRepository(engine).add_inbound(inbound_id)
+    with engine.begin() as connection:
+        result = connection.execute(
+            insert(CONVERSATION_DECISIONS).values(
+                inbound_message_id=inbound_id,
+                creator_id="creator-a",
+                fan_id="fan-a",
+                trigger_kind="unread",
+                fan_state="warm",
+                state_summary="synthetic",
+                objective="answer",
+                tactic="direct",
+                draft="current response",
+                critique=[],
+                final_message="current response",
+                confidence=0.8,
+                model="stub",
+                authority="current",
+                brain_version="current-v1",
+                provider_attempts=1,
+                model_calls=1,
+                retry_calls=0,
+                repair_calls=0,
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+                estimated_cost=0,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        decision_id = int(result.inserted_primary_key[0])
+    repository = HumanResponsePlanRepository(engine)
+    repository.save_shadow_plan(
+        turn_id=turn["id"],
+        creator_id="creator-a",
+        fan_id="fan-a",
+        decision=_decision(),
+        prompt_fingerprint="b" * 64,
+        compilation_report={},
+        model="stub",
+        current_decision_id=decision_id,
+    )
+    pair = repository.review_pair(
+        creator_id="creator-a",
+        reviewer="crm",
+    )
+    assert pair is not None
+    assert set(pair) == {"pair_id", "left", "right"}
+    saved = repository.save_review(
+        plan_id=pair["pair_id"],
+        creator_id="creator-a",
+        reviewer="crm",
+        scores={"naturalness": {"left": 4, "right": 3}},
+        winner="left",
+        hard_failures=[],
+    )
+    assert saved["left_source"] in {"human", "current"}
+    assert repository.review_pair(
+        creator_id="creator-a",
+        reviewer="crm",
+    ) is None

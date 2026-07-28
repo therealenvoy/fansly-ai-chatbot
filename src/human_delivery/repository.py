@@ -19,9 +19,14 @@ from src.human_delivery.schema import (
     FAN_TURN_INBOUND_LINKS,
     FAN_TURNS,
     HUMAN_RESPONSE_BUBBLES,
+    HUMAN_DELIVERY_REVIEWS,
     HUMAN_RESPONSE_PLANS,
 )
-from src.persistence.schema import INBOUND_MESSAGES, utcnow
+from src.persistence.schema import (
+    CONVERSATION_DECISIONS,
+    INBOUND_MESSAGES,
+    utcnow,
+)
 
 
 def _aware(value: datetime) -> datetime:
@@ -81,8 +86,8 @@ class DocumentRepository:
         document_type = str(document_type).strip().lower()
         if document_type not in DOCUMENT_TYPES:
             raise ValueError("unsupported conversation document type")
-        normalized = str(content or "").strip()
-        if not normalized:
+        normalized = str(content or "")
+        if not normalized.strip():
             raise ValueError("conversation document content is required")
         if len(normalized) > 100_000:
             raise ValueError(
@@ -963,6 +968,135 @@ class HumanResponsePlanRepository:
             "average_bubbles": round(average, 3),
             "outbox_writes": 0,
         }
+
+    def review_pair(
+        self,
+        *,
+        creator_id: str,
+        reviewer: str,
+    ) -> dict | None:
+        with self.engine.connect() as connection:
+            reviewed_ids = select(
+                HUMAN_DELIVERY_REVIEWS.c.plan_id
+            ).where(
+                HUMAN_DELIVERY_REVIEWS.c.reviewer
+                == str(reviewer)[:64]
+            )
+            plan = connection.execute(
+                select(
+                    HUMAN_RESPONSE_PLANS.c.id,
+                    HUMAN_RESPONSE_PLANS.c.current_decision_id,
+                    CONVERSATION_DECISIONS.c.final_message,
+                )
+                .select_from(
+                    HUMAN_RESPONSE_PLANS.join(
+                        CONVERSATION_DECISIONS,
+                        HUMAN_RESPONSE_PLANS.c.current_decision_id
+                        == CONVERSATION_DECISIONS.c.id,
+                    )
+                )
+                .where(
+                    and_(
+                        HUMAN_RESPONSE_PLANS.c.creator_id == creator_id,
+                        HUMAN_RESPONSE_PLANS.c.status == "shadow",
+                        HUMAN_RESPONSE_PLANS.c.id.not_in(reviewed_ids),
+                    )
+                )
+                .order_by(HUMAN_RESPONSE_PLANS.c.id.desc())
+                .limit(1)
+            ).mappings().first()
+            if plan is None:
+                return None
+            human_text = "\n".join(
+                str(value)
+                for value in connection.execute(
+                    select(HUMAN_RESPONSE_BUBBLES.c.content)
+                    .where(
+                        HUMAN_RESPONSE_BUBBLES.c.plan_id == plan["id"]
+                    )
+                    .order_by(HUMAN_RESPONSE_BUBBLES.c.bubble_index)
+                ).scalars()
+            )
+        human_left = int(
+            hashlib.sha256(
+                f"review:{plan['id']}".encode("utf-8")
+            ).hexdigest()[:2],
+            16,
+        ) % 2 == 0
+        return {
+            "pair_id": int(plan["id"]),
+            "left": (
+                human_text if human_left else str(plan["final_message"])
+            ),
+            "right": (
+                str(plan["final_message"]) if human_left else human_text
+            ),
+        }
+
+    def save_review(
+        self,
+        *,
+        plan_id: int,
+        creator_id: str,
+        reviewer: str,
+        scores: dict,
+        winner: str,
+        hard_failures: list,
+    ) -> dict:
+        if winner not in {"left", "right", "tie"}:
+            raise ValueError("review winner must be left, right, or tie")
+        with self.engine.begin() as connection:
+            exists = connection.execute(
+                select(HUMAN_RESPONSE_PLANS.c.id).where(
+                    and_(
+                        HUMAN_RESPONSE_PLANS.c.id == int(plan_id),
+                        HUMAN_RESPONSE_PLANS.c.creator_id == creator_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if exists is None:
+                raise ValueError("Human Delivery review pair was not found")
+            human_left = int(
+                hashlib.sha256(
+                    f"review:{int(plan_id)}".encode("utf-8")
+                ).hexdigest()[:2],
+                16,
+            ) % 2 == 0
+            values = {
+                "plan_id": int(plan_id),
+                "reviewer": str(reviewer)[:64],
+                "left_source": "human" if human_left else "current",
+                "right_source": "current" if human_left else "human",
+                "scores": dict(scores),
+                "winner": winner,
+                "hard_failures": [
+                    str(item)[:128] for item in hard_failures[:20]
+                ],
+                "created_at": utcnow(),
+            }
+            statement = self._insert(HUMAN_DELIVERY_REVIEWS).values(
+                **values
+            )
+            statement = statement.on_conflict_do_update(
+                index_elements=["plan_id", "reviewer"],
+                set_={
+                    "scores": values["scores"],
+                    "winner": values["winner"],
+                    "hard_failures": values["hard_failures"],
+                    "created_at": values["created_at"],
+                },
+            )
+            connection.execute(statement)
+            row = connection.execute(
+                select(HUMAN_DELIVERY_REVIEWS).where(
+                    and_(
+                        HUMAN_DELIVERY_REVIEWS.c.plan_id == int(plan_id),
+                        HUMAN_DELIVERY_REVIEWS.c.reviewer
+                        == str(reviewer)[:64],
+                    )
+                )
+            ).mappings().one()
+        return dict(row)
 
     def _insert(self, table):
         if self.engine.dialect.name == "postgresql":

@@ -1015,10 +1015,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/brain/experiments": return self._brain_experiments()
         if p=="/api/brain/reviews": return self._brain_reviews(q)
         if p=="/api/human-delivery/status": return self._human_delivery_status()
+        if p=="/api/human-delivery/settings": return self._human_delivery_status()
         if p=="/api/human-delivery/documents": return self._human_delivery_documents()
         if p=="/api/human-delivery/examples": return self._human_delivery_examples(q)
         if p=="/api/human-delivery/creator-facts": return self._human_delivery_creator_facts()
         if p=="/api/human-delivery/memory": return self._human_delivery_memory(q)
+        if p=="/api/human-delivery/review": return self._human_delivery_review()
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1057,8 +1059,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/brain/reviews": return self._brain_review_save(b)
         if p=="/api/brain/experiments": return self._brain_experiments_save(b)
         if p=="/api/human-delivery/documents": return self._human_delivery_document_save(b)
+        if p=="/api/human-delivery/settings": return self._human_delivery_settings_save(b)
         if p=="/api/human-delivery/examples": return self._human_delivery_example_save(b)
         if p=="/api/human-delivery/creator-facts": return self._human_delivery_creator_fact_save(b)
+        if p=="/api/human-delivery/review": return self._human_delivery_review_save(b)
         if p.startswith("/api/human-delivery/documents/") and p.endswith("/activate"):
             return self._human_delivery_document_activate(p)
         if p.startswith("/api/human-delivery/memory/"):
@@ -1085,7 +1089,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 type(error).__name__,
             )
             return self.j({"error": "Human Delivery status is unavailable"}, 503)
+        control = getattr(
+            self.server,
+            "human_delivery_control",
+            None,
+        )
+        if control is not None:
+            payload["control"] = control.safe_status()
         return self.j(payload)
+
+    def _human_delivery_settings_save(self, body: str):
+        control = getattr(
+            self.server,
+            "human_delivery_control",
+            None,
+        )
+        if control is None:
+            return self.j(
+                {"error": "Human Delivery settings are unavailable"},
+                503,
+            )
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            settings = control.save(data)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "saved",
+            "settings": settings.safe_status(),
+            "live_prompt_unchanged": True,
+        })
 
     def _human_delivery_documents(self):
         service = self._human_delivery_service()
@@ -1180,6 +1215,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError) as error:
             return self.j({"error": str(error)}, 400)
         return self.j({"status": "saved", "memory": memory})
+
+    def _human_delivery_review(self):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        return self.j({"pair": service.review_pair(reviewer="crm")})
+
+    def _human_delivery_review_save(self, body: str):
+        service = self._human_delivery_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            review = service.save_review(data, reviewer="crm")
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({"status": "saved", "review": review})
 
     def _human_delivery_document_activate(self, path: str):
         service = self._human_delivery_service()
@@ -4047,6 +4101,7 @@ class DashboardServer:
         ai_settings=None,
         chat_guidance=None,
         human_delivery=None,
+        human_delivery_control=None,
         credit_governor=None,
         webhook_control=None,
         webhook_endpoint_url: str = "",
@@ -4120,6 +4175,7 @@ class DashboardServer:
         self.server.ai_settings = ai_settings
         self.server.chat_guidance = chat_guidance
         self.server.human_delivery = human_delivery
+        self.server.human_delivery_control = human_delivery_control
         self.server.credit_governor = credit_governor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
