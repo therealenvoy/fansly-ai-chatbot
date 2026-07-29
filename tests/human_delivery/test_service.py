@@ -8,7 +8,7 @@ from src.human_delivery.settings import HumanDeliverySettings
 from src.persistence.schema import CREATORS, metadata
 
 
-def _service():
+def _service(settings=None):
     engine = create_engine("sqlite:///:memory:", future=True)
     metadata.create_all(engine)
     now = datetime.now(timezone.utc)
@@ -23,7 +23,7 @@ def _service():
     service = HumanDeliveryService(
         engine,
         creator_id="creator-a",
-        settings=HumanDeliverySettings(),
+        settings=settings or HumanDeliverySettings(),
     )
     service.bootstrap(
         creator_persona="tone: playful",
@@ -44,6 +44,9 @@ def test_service_status_is_fail_closed_and_content_free():
         "repository_can_write_outbox": False,
         "sales_playbook_in_conversation_prompt": False,
         "deployment_ceiling_enforced": True,
+        "live_context_compiler_connected": False,
+        "live_style_connected": False,
+        "multi_bubble_delivery_connected": False,
     }
     assert "content" not in str(status)
 
@@ -124,3 +127,60 @@ def test_synthetic_preview_has_zero_external_calls_and_outbox_writes():
     assert preview["external_calls"] == 0
     assert preview["outbox_writes"] == 0
     assert "sales_playbook" not in preview["compilation"]["included"]
+
+
+def test_live_context_uses_governed_documents_and_current_guidance():
+    service = _service(
+        HumanDeliverySettings.from_mapping(
+            {
+                "HUMAN_DELIVERY_ENABLED": "true",
+                "HUMAN_DELIVERY_MODE": "live",
+                "HUMAN_DELIVERY_LIVE_PERCENT": "100",
+                "HUMAN_DELIVERY_MAX_LIVE_PERCENT": "100",
+                "HUMAN_DELIVERY_PROMPT_COMPILER": "true",
+            }
+        )
+    )
+
+    compiled = service.compile_live_context(
+        fan_id="fan-a",
+        newest_turn="how was your day?",
+        history="fan: hey\ncreator: heyy",
+        fan_memory=["likes rainy nights"],
+        existing_chat_instructions="reply casually and specifically",
+        existing_brand_bible="the creator likes cats",
+    )
+
+    assert compiled is not None
+    assert "reply casually and specifically" in compiled["chat_instructions"]
+    assert "the creator likes cats" in compiled["chat_instructions"]
+    assert "likes rainy nights" in compiled["chat_instructions"]
+    assert "sales_playbook" not in compiled["compilation"]["included"]
+    assert compiled["brand_bible"] == ""
+
+
+def test_live_style_applies_mostly_lowercase_without_outbox_authority():
+    service = _service(
+        HumanDeliverySettings.from_mapping(
+            {
+                "HUMAN_DELIVERY_ENABLED": "true",
+                "HUMAN_DELIVERY_MODE": "live",
+                "HUMAN_DELIVERY_LIVE_PERCENT": "100",
+                "HUMAN_DELIVERY_MAX_LIVE_PERCENT": "100",
+                "HUMAN_DELIVERY_CASING_MODE": "mostly_lowercase",
+            }
+        )
+    )
+
+    rendered = service.apply_live_style(
+        fan_id="fan-a",
+        text="That Actually Made Me Smile",
+        fan_style_samples=["lol thats cute", "sameee"],
+    )
+    status = service.status()
+
+    assert rendered["content"] == "that actually made me smile"
+    assert rendered["applied"] is True
+    assert status["safety"]["live_pipeline_changed"] is True
+    assert status["safety"]["repository_can_write_outbox"] is False
+    assert status["safety"]["multi_bubble_delivery_connected"] is False

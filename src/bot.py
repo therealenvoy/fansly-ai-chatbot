@@ -2495,6 +2495,53 @@ class FanslyBot:
         context["recent_tactics"] = [
             item.decision.tactic for item in recent_decisions
         ]
+        recent_creator_messages: list[str] = []
+        recent_fan_messages: list[str] = []
+        if self.message_store is not None:
+            try:
+                recent_history = self.message_store.get_history(
+                    fan_id,
+                    self.creator_id,
+                    limit=50,
+                )
+                recent_creator_messages = [
+                    item["content"]
+                    for item in recent_history
+                    if item["sender"] == "creator"
+                ]
+                recent_fan_messages = [
+                    item["content"]
+                    for item in recent_history
+                    if item["sender"] == "fan"
+                ]
+            except Exception:
+                logger.exception("Failed to load delivery style context")
+        human_context_applied = False
+        if self.human_delivery is not None:
+            try:
+                live_context = self.human_delivery.compile_live_context(
+                    fan_id=fan_id,
+                    newest_turn=str(context.get("fan_message") or ""),
+                    history=str(context.get("history") or ""),
+                    fan_memory=known_facts,
+                    existing_chat_instructions=str(
+                        context.get("chat_instructions") or ""
+                    ),
+                    existing_brand_bible=str(
+                        context.get("brand_bible") or ""
+                    ),
+                )
+                if live_context is not None:
+                    context["chat_instructions"] = live_context[
+                        "chat_instructions"
+                    ]
+                    context["brand_bible"] = live_context["brand_bible"]
+                    human_context_applied = True
+            except Exception as exc:
+                logger.error(
+                    "Human Delivery live context failed safely: %s",
+                    type(exc).__name__,
+                )
         runtime_settings = (
             self.brain_settings_service.snapshot()
             if self.brain_settings_service is not None
@@ -2523,7 +2570,11 @@ class FanslyBot:
             "estimated_cost": 0.0,
             "fallback_used": False,
             "fallback_reason": None,
-            "gate_results": {},
+            "gate_results": {
+                "human_delivery_context": (
+                    "applied" if human_context_applied else "not_selected"
+                ),
+            },
         }
         decision = None
         advanced_outcome = None
@@ -2550,6 +2601,7 @@ class FanslyBot:
                     latency_ms=advanced_outcome.latency_ms,
                     estimated_cost=advanced_outcome.estimated_cost,
                     gate_results={
+                        **execution["gate_results"],
                         "advanced": "approved",
                         "reason_codes": list(advanced_outcome.gate_reason_codes),
                     },
@@ -2569,6 +2621,7 @@ class FanslyBot:
                     latency_ms=advanced_outcome.latency_ms,
                     estimated_cost=advanced_outcome.estimated_cost,
                     gate_results={
+                        **execution["gate_results"],
                         "advanced": "rejected",
                         "reason_codes": list(advanced_outcome.gate_reason_codes),
                     },
@@ -2580,20 +2633,6 @@ class FanslyBot:
             )
         if decision is None:
             decision = self.chat_responder.decide(**context)
-        recent_creator_messages: list[str] = []
-        if self.message_store is not None:
-            try:
-                recent_creator_messages = [
-                    item["content"]
-                    for item in self.message_store.get_history(
-                        fan_id,
-                        self.creator_id,
-                        limit=12,
-                    )
-                    if item["sender"] == "creator"
-                ]
-            except Exception:
-                logger.exception("Failed to load creator repetition context")
         if decision is None and requested_authority != "advanced":
             fallback = self._safe_conversation_fallback(
                 trigger_kind=trigger_kind,
@@ -2636,6 +2675,57 @@ class FanslyBot:
                 else None
             )
             if gate.approved and approved:
+                if self.human_delivery is not None:
+                    try:
+                        live_style = self.human_delivery.apply_live_style(
+                            fan_id=fan_id,
+                            text=approved,
+                            fan_style_samples=recent_fan_messages,
+                        )
+                        styled = str(
+                            live_style.get("content") or ""
+                        ).strip()
+                        if styled and styled != approved:
+                            sales_reason = (
+                                self.conversation_policy.sales_reason(styled)
+                            )
+                            policy = self.content_policy.validate_outbound(
+                                styled
+                            )
+                            validation = (
+                                self.validator.validate(policy.content)
+                                if policy.approved
+                                else None
+                            )
+                            if (
+                                not sales_reason
+                                and policy.approved
+                                and validation is not None
+                                and validation.passed
+                            ):
+                                approved = policy.content
+                                execution["gate_results"][
+                                    "human_delivery_style"
+                                ] = "applied"
+                            else:
+                                execution["gate_results"][
+                                    "human_delivery_style"
+                                ] = "rejected_fallback"
+                        else:
+                            execution["gate_results"][
+                                "human_delivery_style"
+                            ] = str(
+                                live_style.get("reason")
+                                or "not_selected"
+                            )
+                    except Exception as exc:
+                        execution["gate_results"][
+                            "human_delivery_style"
+                        ] = "error_fallback"
+                        logger.error(
+                            "Human Delivery live style failed safely: %s",
+                            type(exc).__name__,
+                        )
                 if (
                     execution["authority"] == "advanced"
                     and self.brain_settings_service is not None
@@ -2657,6 +2747,7 @@ class FanslyBot:
                             fallback_used=True,
                             fallback_reason="stale_authority_after_generation",
                             gate_results={
+                                **execution["gate_results"],
                                 "advanced": "rejected",
                                 "reason_codes": [
                                     "stale_authority_after_generation"
@@ -2686,6 +2777,7 @@ class FanslyBot:
                 fallback_used=True,
                 fallback_reason=fallback_reason,
                 gate_results={
+                    **execution["gate_results"],
                     "advanced": "rejected",
                     "reason_codes": list(gate.reason_codes),
                 },

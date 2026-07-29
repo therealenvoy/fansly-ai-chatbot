@@ -389,3 +389,59 @@ def test_advanced_post_generation_gate_rejection_falls_back_to_current():
     )
     assert stored.authority == "current"
     assert stored.fallback_reason == "advanced_quality_gate_rejected"
+
+
+def test_human_delivery_compiles_live_context_and_styles_approved_reply():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.return_value = _decision(
+        "maintain",
+        "direct_answer",
+        "That Actually Made Me Smile",
+        None,
+    )
+    human_delivery = MagicMock()
+    human_delivery.compile_live_context.return_value = {
+        "chat_instructions": "compiled human guide",
+        "brand_bible": "",
+        "compilation": {"included": ["creator_persona"]},
+    }
+    human_delivery.apply_live_style.return_value = {
+        "content": "that actually made me smile",
+        "applied": True,
+        "reason": "live_style",
+    }
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+        human_delivery=human_delivery,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="human-delivery-live",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hey",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="Fan: hey",
+        fan_message="hey",
+        known_facts=[],
+        chat_instructions="legacy guide",
+        brand_bible="legacy brand",
+    )
+
+    assert reply.content == "that actually made me smile"
+    call_context = responder.decide.call_args.kwargs
+    assert call_context["chat_instructions"] == "compiled human guide"
+    assert call_context["brand_bible"] == ""
+    human_delivery.compile_live_context.assert_called_once()
+    human_delivery.apply_live_style.assert_called_once()

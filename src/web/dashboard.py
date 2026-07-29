@@ -1227,7 +1227,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return self.j({
             "status": "saved",
             "settings": settings.safe_status(),
-            "live_prompt_unchanged": True,
+            "runtime_applied": True,
+            "live_context_effective": bool(
+                settings.live_authority
+                and settings.prompt_compiler_enabled
+            ),
+            "live_style_effective": settings.live_authority,
         })
 
     def _human_delivery_documents(self):
@@ -1357,8 +1362,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return self.j({
             "status": "activated_for_review_store",
             "document": document,
-            "runtime_applied": False,
-            "live_prompt_unchanged": True,
+            "runtime_applied": bool(
+                service.settings.live_authority
+                and service.settings.prompt_compiler_enabled
+            ),
+            "live_prompt_updated": bool(
+                service.settings.live_authority
+                and service.settings.prompt_compiler_enabled
+            ),
         })
 
     def _human_delivery_preview(self, body: str):
@@ -2634,6 +2645,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
         metrics = self._brain_metrics_payload()
         promotion = self._brain_promotion_readiness(metrics)
+        operator_override_available = (
+            os.getenv(
+                "BRAIN_OPERATOR_PROMOTION_OVERRIDE",
+                "false",
+            ).strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         return self.j({
             "creator_id": self.creator_id,
             "bot_enabled": bool(getattr(self.bot, "enabled", False)),
@@ -2650,6 +2668,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "automatic_rollback": settings.auto_rollback,
             "promotion_eligible": promotion["eligible"],
             "promotion_unmet_gates": promotion["unmet"],
+            "operator_promotion_override_available": (
+                operator_override_available
+            ),
             "settings": asdict(settings),
             "conversation_only": bool(
                 getattr(getattr(self.bot, "bot_mode", None), "value", "")
@@ -2665,26 +2686,62 @@ class DashboardHandler(BaseHTTPRequestHandler):
             data = json.loads(body) if body else {}
             if not isinstance(data, dict):
                 return self.j({"error": "request body must be an object"}, 400)
+            operator_override = data.pop(
+                "operator_override",
+                False,
+            )
+            if not isinstance(operator_override, bool):
+                return self.j(
+                    {"error": "operator_override must be a boolean"},
+                    400,
+                )
             requested_live = int(data.get("live_percent", 0) or 0)
+            override_available = (
+                os.getenv(
+                    "BRAIN_OPERATOR_PROMOTION_OVERRIDE",
+                    "false",
+                ).strip().lower()
+                in {"1", "true", "yes", "on"}
+            )
             if requested_live > 0:
                 promotion = self._brain_promotion_readiness(
                     self._brain_metrics_payload()
                 )
-                if not promotion["eligible"]:
+                if not promotion["eligible"] and not (
+                    operator_override and override_available
+                ):
                     return self.j(
                         {
                             "error": "pre-live promotion gates are not satisfied",
                             "unmet_gates": promotion["unmet"],
+                            "operator_override_available": (
+                                override_available
+                            ),
                         },
                         409,
                     )
-            settings = service.save(data, actor="crm")
+            settings = service.save(
+                data,
+                actor="crm",
+                reason=(
+                    "explicit operator promotion override"
+                    if requested_live > 0
+                    and operator_override
+                    and override_available
+                    else None
+                ),
+            )
         except (BrainSettingsError, TypeError, ValueError) as error:
             return self.j({"error": str(error)}, 400)
         return self.j({
             "status": "ok",
             "saved": True,
             "runtime_applied": True,
+            "operator_override_used": bool(
+                requested_live > 0
+                and operator_override
+                and override_available
+            ),
             "settings": asdict(settings),
         })
 

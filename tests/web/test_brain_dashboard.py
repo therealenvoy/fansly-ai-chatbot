@@ -187,6 +187,74 @@ def test_advanced_live_authority_is_rejected(running_server):
     assert "deployment guard" in body["error"]
 
 
+def test_explicit_operator_override_allows_live_before_promotion(
+    running_server,
+    monkeypatch,
+):
+    host, bot, db_url = running_server
+    monkeypatch.setenv("BRAIN_OPERATOR_PROMOTION_OVERRIDE", "true")
+    bot.brain_settings_service = BrainSettingsService(
+        settings_store=SettingsStore(
+            db_url=db_url,
+            creator_id=bot.creator_id,
+        ),
+        environment={
+            "BRAIN_ALLOW_ADVANCED_SEND": "true",
+            "BRAIN_MAX_LIVE_PERCENT": "100",
+            "BRAIN_MAX_SHADOW_SAMPLE_PERCENT": "100",
+        },
+        shadow_runtime=getattr(bot, "shadow_brain_service", None),
+    )
+
+    status, body = _post(
+        host,
+        "/api/brain/settings",
+        {
+            "mode": "advanced",
+            "live_percent": 100,
+            "max_daily_cost": 10,
+            "operator_override": True,
+        },
+    )
+
+    assert status == 200
+    assert body["operator_override_used"] is True
+    assert body["settings"]["mode"] == "advanced"
+    assert body["settings"]["live_percent"] == 100
+
+
+def test_live_before_promotion_still_rejects_without_explicit_override(
+    running_server,
+    monkeypatch,
+):
+    host, bot, db_url = running_server
+    monkeypatch.setenv("BRAIN_OPERATOR_PROMOTION_OVERRIDE", "true")
+    bot.brain_settings_service = BrainSettingsService(
+        settings_store=SettingsStore(
+            db_url=db_url,
+            creator_id=bot.creator_id,
+        ),
+        environment={
+            "BRAIN_ALLOW_ADVANCED_SEND": "true",
+            "BRAIN_MAX_LIVE_PERCENT": "100",
+        },
+        shadow_runtime=getattr(bot, "shadow_brain_service", None),
+    )
+
+    status, body = _post(
+        host,
+        "/api/brain/settings",
+        {
+            "mode": "advanced",
+            "live_percent": 100,
+            "max_daily_cost": 10,
+        },
+    )
+
+    assert status == 409
+    assert body["operator_override_available"] is True
+
+
 def test_brain_context_is_creator_scoped_and_excludes_message_drafts(
     running_server,
 ):

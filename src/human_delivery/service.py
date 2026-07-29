@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
 import json
 from typing import Mapping
 
@@ -39,13 +40,14 @@ from src.persistence.schema import CONVERSATIONS, utcnow
 from src.human_delivery.settings import HumanDeliverySettings
 from src.human_delivery.style import (
     apply_casing,
+    apply_rare_typo,
     fingerprint,
     repetition_score,
 )
 
 
 class HumanDeliveryService:
-    """Govern prompts and synthetic previews without gaining send authority."""
+    """Govern live prompt context and style without direct send authority."""
 
     def __init__(
         self,
@@ -86,6 +88,107 @@ class HumanDeliveryService:
 
     def update_settings(self, settings: HumanDeliverySettings) -> None:
         self.settings = settings
+
+    def live_selected(self, fan_id: str) -> bool:
+        """Return a stable creator/fan assignment inside the live ceiling."""
+        if not self.settings.live_authority:
+            return False
+        digest = hashlib.sha256(
+            (
+                f"{self.creator_id}:{str(fan_id)}:"
+                "human-delivery-live-v1"
+            ).encode("utf-8")
+        ).digest()
+        bucket = int.from_bytes(digest[:8], "big") % 10_000
+        return bucket < int(self.settings.live_percent) * 100
+
+    def compile_live_context(
+        self,
+        *,
+        fan_id: str,
+        newest_turn: str,
+        history: str,
+        fan_memory: list[str],
+        existing_chat_instructions: str,
+        existing_brand_bible: str,
+    ) -> dict | None:
+        """Compile the governed live prompt without gaining send authority."""
+        if not (
+            self.live_selected(fan_id)
+            and self.settings.prompt_compiler_enabled
+        ):
+            return None
+        documents = self.documents.active_documents()
+        if str(existing_chat_instructions or "").strip():
+            documents["conversation_guide"] = str(
+                existing_chat_instructions
+            )
+        if str(existing_brand_bible or "").strip():
+            documents["brand_bible"] = str(existing_brand_bible)
+        creator_facts = [
+            str(row["fact_value"])
+            for row in self.creator_facts()
+            if str(row.get("status") or "") == "active"
+            and str(row.get("fact_value") or "").strip()
+        ]
+        compilation = self.compiler.compile(
+            runtime_rules=(
+                "Live inbound conversation reply only. Follow the newest fan "
+                "turn and grounded history. Never sell, mention PPV, request "
+                "tips, promise media, invent facts, or reveal internal data."
+            ),
+            documents=documents,
+            creator_facts=creator_facts,
+            contact_policy="authenticated inbound conversation reply only",
+            fan_memory=list(fan_memory)[:20],
+            history=str(history or ""),
+            newest_turn=str(newest_turn or ""),
+            examples=self.documents.examples(status="active", limit=12),
+            conversation_only=True,
+        )
+        return {
+            "chat_instructions": compilation.prompt,
+            "brand_bible": "",
+            "compilation": compilation.safe_report(),
+        }
+
+    def apply_live_style(
+        self,
+        *,
+        fan_id: str,
+        text: str,
+        fan_style_samples: list[str],
+    ) -> dict:
+        """Apply bounded live delivery style to an already approved reply."""
+        normalized = str(text or "").strip()
+        if not normalized or not self.live_selected(fan_id):
+            return {
+                "content": normalized,
+                "applied": False,
+                "reason": "not_selected",
+            }
+        fan_profile = fingerprint(
+            [str(value) for value in fan_style_samples[:50]]
+        )
+        styled = apply_casing(
+            normalized,
+            mode=self.settings.casing_mode,
+            fan_profile=fan_profile,
+        )
+        styled = apply_rare_typo(
+            styled,
+            enabled=self.settings.allow_typos,
+            seed=f"{self.creator_id}:{fan_id}",
+        )
+        return {
+            "content": styled,
+            "applied": styled != normalized,
+            "reason": "live_style",
+            "style_profile": {
+                **fan_profile.as_metrics(),
+                "sample_count": fan_profile.sample_count,
+            },
+        }
 
     def status(self) -> dict:
         document_rows = select(
@@ -253,11 +356,17 @@ class HumanDeliveryService:
                 "unexpected_outbox_writes": 0,
             },
             "safety": {
-                "live_pipeline_changed": False,
+                "live_pipeline_changed": self.settings.live_authority,
                 "preview_can_send": False,
                 "repository_can_write_outbox": False,
                 "sales_playbook_in_conversation_prompt": False,
                 "deployment_ceiling_enforced": True,
+                "live_context_compiler_connected": bool(
+                    self.settings.live_authority
+                    and self.settings.prompt_compiler_enabled
+                ),
+                "live_style_connected": self.settings.live_authority,
+                "multi_bubble_delivery_connected": False,
             },
         }
 
