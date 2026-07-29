@@ -96,3 +96,23 @@ def test_daily_limit_cannot_be_lower_than_hourly_limit():
                 "max_per_day": 5,
             },
         )
+
+
+def test_zero_legacy_limits_remain_fail_closed():
+    control = _control()
+    control.environment.update(
+        {
+            "MAX_PROACTIVE_PER_HOUR": "0",
+            "MAX_PROACTIVE_PER_DAY": "0",
+            "MAX_PROACTIVE_PER_FAN_PER_DAY": "0",
+        }
+    )
+
+    requested = control.requested()
+
+    assert requested.online.max_per_hour == 0
+    assert requested.online.max_per_day == 0
+    assert requested.online.max_per_fan_per_day == 0
+    assert requested.stalled.max_per_hour == 0
+    assert requested.stalled.max_per_day == 0
+    assert requested.stalled.max_per_fan_per_day == 0

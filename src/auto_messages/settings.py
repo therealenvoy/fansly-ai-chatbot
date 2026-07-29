@@ -93,20 +93,20 @@ class AutoMessageTriggerSettings:
             ),
             max_per_hour=_int(
                 values.get(f"{prefix}_MAX_PER_HOUR"),
-                3 if online else 5,
-                minimum=1,
+                0,
+                minimum=0,
                 maximum=100,
             ),
             max_per_day=_int(
                 values.get(f"{prefix}_MAX_PER_DAY"),
-                15 if online else 25,
-                minimum=1,
+                0,
+                minimum=0,
                 maximum=1000,
             ),
             max_per_fan_per_day=_int(
                 values.get(f"{prefix}_MAX_PER_FAN_PER_DAY"),
-                1,
-                minimum=1,
+                0,
+                minimum=0,
                 maximum=3,
             ),
             include_currently_online=_bool(
