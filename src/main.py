@@ -48,6 +48,7 @@ from .settings.chat_guidance import ChatGuidanceService
 from .settings.brain import BrainSettingsService
 from .human_delivery.guide import DEFAULT_CONVERSATION_GUIDE
 from .human_delivery.control import HumanDeliveryControlService
+from .auto_messages.control import AutoMessagesControlService
 from .human_delivery.service import HumanDeliveryService
 from .persistence.database import create_database_engine
 from .persistence.migrations import upgrade_database
@@ -330,6 +331,11 @@ human_delivery = HumanDeliveryService(
     settings=human_delivery_settings,
 )
 human_delivery_control.runtime = human_delivery
+auto_messages_control = AutoMessagesControlService(
+    settings_store=settings_store,
+    environment=os.environ,
+)
+auto_messages_settings = auto_messages_control.snapshot()
 try:
     guidance_snapshot = chat_guidance.snapshot()
     human_delivery.bootstrap(
@@ -528,21 +534,39 @@ if api_ok:
             chat_guidance=chat_guidance,
             human_delivery=human_delivery,
             enable_unread_replies=ENABLE_UNREAD_REPLIES,
-            enable_online_outreach=ENABLE_ONLINE_OUTREACH,
-            enable_stalled_outreach=ENABLE_STALLED_OUTREACH,
-            outreach_existing_online=OUTREACH_EXISTING_ONLINE,
-            online_window_seconds=ONLINE_WINDOW_SECONDS,
-            proactive_cooldown_hours=PROACTIVE_COOLDOWN_HOURS,
-            max_proactive_per_hour=MAX_PROACTIVE_PER_HOUR,
-            max_proactive_per_day=MAX_PROACTIVE_PER_DAY,
+            enable_online_outreach=auto_messages_settings.online.enabled,
+            enable_stalled_outreach=auto_messages_settings.stalled.enabled,
+            outreach_existing_online=(
+                auto_messages_settings.online.include_currently_online
+            ),
+            online_window_seconds=(
+                auto_messages_settings.online.online_window_seconds
+            ),
+            proactive_cooldown_hours=(
+                auto_messages_settings.online.cooldown_hours
+            ),
+            max_proactive_per_hour=(
+                auto_messages_settings.online.max_per_hour
+            ),
+            max_proactive_per_day=(
+                auto_messages_settings.online.max_per_day
+            ),
             max_proactive_per_fan_per_day=(
-                MAX_PROACTIVE_PER_FAN_PER_DAY
+                auto_messages_settings.online.max_per_fan_per_day
             ),
             presence_batch_size=PRESENCE_BATCH_SIZE,
-            presence_poll_interval_seconds=PRESENCE_POLL_INTERVAL,
-            stalled_after_hours=STALLED_AFTER_HOURS,
-            stalled_scan_interval_seconds=STALLED_SCAN_INTERVAL,
-            stalled_scan_batch_size=STALLED_SCAN_BATCH_SIZE,
+            presence_poll_interval_seconds=(
+                auto_messages_settings.online.poll_interval_seconds
+            ),
+            stalled_after_hours=(
+                auto_messages_settings.stalled.stalled_after_hours
+            ),
+            stalled_scan_interval_seconds=(
+                auto_messages_settings.stalled.scan_interval_seconds
+            ),
+            stalled_scan_batch_size=(
+                auto_messages_settings.stalled.scan_batch_size
+            ),
             reply_delay_min_seconds=REPLY_DELAY_MIN_SECONDS,
             reply_delay_max_seconds=REPLY_DELAY_MAX_SECONDS,
             processing_retry_base_seconds=(
@@ -571,6 +595,8 @@ if api_ok:
                 bot.launch_block_reason,
             )
         bot.enabled = requested_enabled
+        bot.update_auto_messages(auto_messages_settings)
+        auto_messages_control.runtime = bot
         logger.info(f"Bot enabled state from DB: {bot.enabled}")
     except Exception as e:
         api_error = type(e).__name__
@@ -641,6 +667,7 @@ dashboard = DashboardServer(
     chat_guidance=chat_guidance,
     human_delivery=human_delivery,
     human_delivery_control=human_delivery_control,
+    auto_messages_control=auto_messages_control,
     credit_governor=provider_credit_governor,
     onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
     webhook_endpoint_url=ONLYFANSAPI_WEBHOOK_URL,

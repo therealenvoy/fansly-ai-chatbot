@@ -22,7 +22,11 @@ from typing import Optional, TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy import case, func, select, text
+from sqlalchemy.exc import IntegrityError
 
+from ..auto_messages.control import AutoMessagesControlError
+from ..auto_messages.metrics import AutoMessagesMetrics
+from ..engagement.control_plane import NativePlanRepository
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
 from ..persistence.pipeline import MessageProcessingRepository
@@ -828,6 +832,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def human_delivery(self):
         return getattr(self.server, "human_delivery", None)
 
+    @property
+    def auto_messages_control(self):
+        return getattr(self.server, "auto_messages_control", None)
+
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
@@ -1021,6 +1029,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/human-delivery/creator-facts": return self._human_delivery_creator_facts()
         if p=="/api/human-delivery/memory": return self._human_delivery_memory(q)
         if p=="/api/human-delivery/review": return self._human_delivery_review()
+        if p=="/api/auto-messages": return self._auto_messages_status()
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1068,7 +1077,106 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/human-delivery/memory/"):
             return self._human_delivery_memory_update(p, b)
         if p=="/api/human-delivery/preview": return self._human_delivery_preview(b)
+        if p=="/api/auto-messages/settings": return self._auto_messages_settings_save(b)
+        if p=="/api/auto-messages/preview": return self._auto_messages_preview(b)
+        if p=="/api/auto-messages/campaigns": return self._auto_messages_campaign_save(b)
         self.j({"error":"not found"},404)
+
+    def _auto_messages_status(self):
+        control = self.auto_messages_control
+        if control is None or self.engine is None:
+            return self.j({"error": "Auto Messages is unavailable"}, 503)
+        try:
+            effective = control.snapshot()
+            payload = control.safe_status()
+            payload["metrics"] = AutoMessagesMetrics(
+                self.engine,
+                creator_id=self.creator_id,
+            ).snapshot(effective)
+            payload["campaigns"] = NativePlanRepository(
+                self.engine
+            ).list_campaigns(self.creator_id)
+            payload["mass_delivery_available"] = False
+            payload["mass_delivery_reason"] = (
+                "Campaigns are saved as conversation-only drafts. "
+                "This control center cannot send mass messages."
+            )
+        except Exception:
+            logger.exception("Auto Messages status failed")
+            return self.j(
+                {"error": "Auto Messages status is unavailable"},
+                503,
+            )
+        return self.j(payload)
+
+    def _auto_messages_settings_save(self, body: str):
+        control = self.auto_messages_control
+        if control is None:
+            return self.j({"error": "Auto Messages is unavailable"}, 503)
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise AutoMessagesControlError(
+                    "request body must be an object"
+                )
+            trigger = str(data.pop("trigger", "")).strip().lower()
+            settings = control.save(trigger, data)
+        except (AutoMessagesControlError, TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "saved",
+            "trigger": trigger,
+            "settings": settings.safe_status(),
+            "control": control.safe_status(),
+        })
+
+    def _auto_messages_preview(self, body: str):
+        control = self.auto_messages_control
+        if control is None or self.engine is None:
+            return self.j({"error": "Auto Messages is unavailable"}, 503)
+        try:
+            data = json.loads(body) if body else {}
+            trigger = str(data.get("trigger", "")).strip().lower()
+            preview = AutoMessagesMetrics(
+                self.engine,
+                creator_id=self.creator_id,
+            ).preview(control.snapshot(), trigger)
+            preview["blocked_reason"] = control.safe_status()[
+                "blocked_reasons"
+            ].get(trigger)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(preview)
+
+    def _auto_messages_campaign_save(self, body: str):
+        if self.engine is None:
+            return self.j({"error": "Campaign drafts are unavailable"}, 503)
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            campaign_id = NativePlanRepository(
+                self.engine
+            ).create_campaign(
+                creator_id=self.creator_id,
+                name=data.get("name", ""),
+                message_text=data.get("message_text", ""),
+                audience=data.get("audience"),
+                cooldown_seconds=int(data.get("cooldown_seconds", 0) or 0),
+            )
+        except IntegrityError:
+            return self.j(
+                {"error": "a campaign with this name already exists"},
+                409,
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j({
+            "status": "draft_saved",
+            "campaign_id": campaign_id,
+            "sent": False,
+            "ppv_blocked": True,
+        }, 201)
 
     def _human_delivery_service(self):
         service = self.human_delivery
@@ -4102,6 +4210,7 @@ class DashboardServer:
         chat_guidance=None,
         human_delivery=None,
         human_delivery_control=None,
+        auto_messages_control=None,
         credit_governor=None,
         webhook_control=None,
         webhook_endpoint_url: str = "",
@@ -4176,6 +4285,7 @@ class DashboardServer:
         self.server.chat_guidance = chat_guidance
         self.server.human_delivery = human_delivery
         self.server.human_delivery_control = human_delivery_control
+        self.server.auto_messages_control = auto_messages_control
         self.server.credit_governor = credit_governor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir

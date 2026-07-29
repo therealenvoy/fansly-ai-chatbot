@@ -13,6 +13,7 @@ from .schema import (
     CONVERSATIONS,
     CRM_CHAT_SYNC,
     FAN_MESSAGES,
+    FAN_CONTACT_POLICIES,
     FAN_PRESENCE,
     FANS,
     INBOUND_MESSAGES,
@@ -203,15 +204,20 @@ class PresenceRepository:
         creator_id: str,
         fan_id: str,
         now: datetime,
+        trigger_kind: str = "online",
+        require_online: bool = True,
         cooldown_hours: int,
         max_per_hour: int,
         max_per_day: int,
         max_per_fan_per_day: int,
     ) -> tuple[bool, str | None]:
+        if trigger_kind not in {"online", "stalled"}:
+            return False, "unsupported proactive trigger"
         now = self._aware(now)
         hour_ago = now - timedelta(hours=1)
         day_ago = now - timedelta(days=1)
         fan_cooldown = now - timedelta(hours=max(1, cooldown_hours))
+        proactive_triggers = ("online", "stalled")
         sent_base = (
             select(func.count(OUTBOX_MESSAGES.c.id))
             .select_from(
@@ -225,8 +231,19 @@ class PresenceRepository:
                 and_(
                     OUTBOX_MESSAGES.c.creator_id == creator_id,
                     OUTBOX_MESSAGES.c.status == "sent",
-                    INBOUND_MESSAGES.c.trigger_kind == "online",
+                    INBOUND_MESSAGES.c.trigger_kind.in_(
+                        proactive_triggers
+                    ),
                 )
+            )
+        )
+        pending_base = select(func.count(INBOUND_MESSAGES.c.id)).where(
+            and_(
+                INBOUND_MESSAGES.c.creator_id == creator_id,
+                INBOUND_MESSAGES.c.trigger_kind.in_(
+                    proactive_triggers
+                ),
+                INBOUND_MESSAGES.c.status.in_(["pending", "processing"]),
             )
         )
         with self.engine.connect() as connection:
@@ -238,9 +255,52 @@ class PresenceRepository:
                     )
                 )
             ).mappings().first()
-            if presence is None or presence["status"] != "online":
+            if require_online and (
+                presence is None or presence["status"] != "online"
+            ):
                 return False, "fan is not currently online"
-            last_outreach = presence["last_outreach_at"]
+            policy = connection.execute(
+                select(FAN_CONTACT_POLICIES).where(
+                    and_(
+                        FAN_CONTACT_POLICIES.c.creator_id == creator_id,
+                        FAN_CONTACT_POLICIES.c.fan_id == fan_id,
+                    )
+                )
+            ).mappings().first()
+            if policy is not None:
+                if bool(policy["do_not_contact"]):
+                    return False, "fan opted out"
+                if (
+                    policy["paused_until"] is not None
+                    and self._aware(policy["paused_until"]) > now
+                ):
+                    return False, "fan contact is paused"
+                if (
+                    policy["cooldown_until"] is not None
+                    and self._aware(policy["cooldown_until"]) > now
+                ):
+                    return False, "fan contact policy cooldown is active"
+
+            last_outreach = connection.execute(
+                select(func.max(OUTBOX_MESSAGES.c.sent_at))
+                .select_from(
+                    OUTBOX_MESSAGES.join(
+                        INBOUND_MESSAGES,
+                        OUTBOX_MESSAGES.c.inbound_message_id
+                        == INBOUND_MESSAGES.c.id,
+                    )
+                )
+                .where(
+                    and_(
+                        OUTBOX_MESSAGES.c.creator_id == creator_id,
+                        OUTBOX_MESSAGES.c.fan_id == fan_id,
+                        OUTBOX_MESSAGES.c.status == "sent",
+                        INBOUND_MESSAGES.c.trigger_kind.in_(
+                            proactive_triggers
+                        ),
+                    )
+                )
+            ).scalar_one_or_none()
             if (
                 last_outreach is not None
                 and self._aware(last_outreach) > fan_cooldown
@@ -290,14 +350,24 @@ class PresenceRepository:
                 sent_hour = connection.execute(
                     sent_base.where(OUTBOX_MESSAGES.c.sent_at >= hour_ago)
                 ).scalar_one()
-                if int(sent_hour or 0) >= max_per_hour:
+                pending_hour = connection.execute(
+                    pending_base.where(
+                        INBOUND_MESSAGES.c.provider_created_at >= hour_ago
+                    )
+                ).scalar_one()
+                if int(sent_hour or 0) + int(pending_hour or 0) >= max_per_hour:
                     return False, "hourly proactive limit reached"
 
             if max_per_day > 0:
                 sent_day = connection.execute(
                     sent_base.where(OUTBOX_MESSAGES.c.sent_at >= day_ago)
                 ).scalar_one()
-                if int(sent_day or 0) >= max_per_day:
+                pending_day = connection.execute(
+                    pending_base.where(
+                        INBOUND_MESSAGES.c.provider_created_at >= day_ago
+                    )
+                ).scalar_one()
+                if int(sent_day or 0) + int(pending_day or 0) >= max_per_day:
                     return False, "daily proactive limit reached"
 
             if max_per_fan_per_day > 0:
@@ -309,7 +379,19 @@ class PresenceRepository:
                         )
                     )
                 ).scalar_one()
-                if int(sent_fan_day or 0) >= max_per_fan_per_day:
+                pending_fan_day = connection.execute(
+                    pending_base.where(
+                        and_(
+                            INBOUND_MESSAGES.c.provider_created_at >= day_ago,
+                            INBOUND_MESSAGES.c.fan_id == fan_id,
+                        )
+                    )
+                ).scalar_one()
+                if (
+                    int(sent_fan_day or 0)
+                    + int(pending_fan_day or 0)
+                    >= max_per_fan_per_day
+                ):
                     return False, "fan daily proactive limit reached"
         return True, None
 

@@ -259,6 +259,20 @@ input,textarea,select{width:100%;border:1px solid var(--line);border-radius:10px
 input:focus,textarea:focus,select:focus{outline:none;border-color:rgba(161,124,255,.65);box-shadow:0 0 0 3px rgba(161,124,255,.1)}
 textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-Regular",Consolas,monospace}
 .done{display:none;font-size:9px;color:var(--green)}#conn-result{font-size:9px;color:var(--muted)}
+.auto-tabs{display:flex;gap:22px;border-bottom:1px solid var(--line);margin:2px 0 18px}
+.auto-tab{appearance:none;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);padding:11px 2px;font-size:10px;font-weight:700;cursor:pointer}
+.auto-tab.active{color:var(--text);border-bottom-color:var(--violet)}
+.auto-trigger{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px;align-items:start}
+.auto-trigger h3{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.auto-trigger-state{display:inline-flex;align-items:center;gap:6px;font-size:8px;font-weight:700;padding:5px 8px;border-radius:999px;background:rgba(255,255,255,.05);color:var(--muted)}
+.auto-trigger-state.on{background:rgba(68,215,146,.1);color:var(--green)}
+.auto-trigger-state.blocked{background:rgba(245,189,98,.1);color:var(--amber)}
+.auto-trigger-summary{font-size:10px;line-height:1.5;color:var(--muted)}
+.auto-form{margin-top:17px;padding-top:17px;border-top:1px solid var(--line)}
+.auto-inline-check{display:flex;align-items:center;gap:8px;margin:0;color:var(--text)}
+.auto-inline-check input{width:auto}
+.auto-preview{margin-top:12px;padding:12px;border:1px dashed var(--line-strong);border-radius:12px;background:rgba(255,255,255,.015);font-size:10px;line-height:1.55;color:var(--muted)}
+.auto-credit{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border-radius:999px;background:rgba(68,215,146,.08);border:1px solid rgba(68,215,146,.18);color:var(--green);font-size:9px;font-weight:700}
 .drawer{position:fixed;inset:14px 14px 14px auto;width:500px;max-width:calc(100vw - 28px);z-index:60;display:flex;flex-direction:column;border:1px solid var(--line-strong);border-radius:20px;background:rgba(18,18,27,.98);box-shadow:-30px 0 80px rgba(0,0,0,.45);transform:translateX(calc(100% + 28px));transition:transform .22s ease;backdrop-filter:blur(20px)}
 .drawer.open{transform:translateX(0)}.drawer-head{height:62px;padding:0 17px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
 .drawer-head h3{font-size:14px}.drawer-close{width:32px;height:32px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer}
@@ -284,7 +298,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
   .icon-button{display:none}.operator-avatar{width:34px;height:34px}.toggle-pill{min-height:34px;padding:0 10px}
   .content{padding:17px 13px 30px}.page-head{align-items:flex-start;flex-direction:column}.page-head h1{font-size:23px}.page-actions{justify-content:flex-start}
   .dashboard-grid{gap:9px}.status-card,.ops-card,.hero-card,.metric-card,.activity-card,.next-card{grid-column:span 12}.hero-card{min-height:218px}
-  .cards,.g2,.g3{grid-template-columns:1fr}.messages-layout{height:calc(100dvh - 168px);grid-template-columns:1fr}.conversation-pane{display:none}.conversation-rail{border-right:0}
+  .cards,.g2,.g3,.auto-trigger{grid-template-columns:1fr}.messages-layout{height:calc(100dvh - 168px);grid-template-columns:1fr}.conversation-pane{display:none}.conversation-rail{border-right:0}
   .messages-layout.chat-open .conversation-rail{display:none}.messages-layout.chat-open .conversation-pane{display:flex}
   .panel{border-radius:14px}.drawer{inset:0;width:100%;max-width:none;border-radius:0}.media-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
@@ -314,6 +328,9 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/></svg><span>Analytics</span>
       </button>
       <span class="nav-label">Revenue tools</span>
+      <button type="button" class="nav-item" data-tab="auto-messages">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 3z"/><path d="m13 7-3 5h3l-1 3 4-6h-3z"/></svg><span>Auto Messages</span>
+      </button>
       <button type="button" class="nav-item" data-tab="scripts">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h9l3 3V20.5H6zM9 10h6M9 14h6M9 18h4"/></svg><span>Scripts</span>
       </button>
@@ -393,6 +410,8 @@ var editScriptId=null;
 var dashboardScriptDraft={};
 var dashboardPersona={};
 var voiceDocuments=[];
+var autoMessagesView='triggers';
+var autoCampaignEditor=false;
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function attr(s){return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
@@ -407,7 +426,7 @@ function botControlMarkup(){return'<div class="bot-control-group"><button type="
 async function F(u){try{var r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return null;return await r.json()}catch(e){return null}}
 async function M(u,options){options=options||{};options.credentials='same-origin';options.cache='no-store';options.headers=Object.assign({},options.headers||{}, {'X-CSRF-Token':CSRF_TOKEN});return fetch(u,options)}
 
-var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,scripts:loadScripts,sequences:loadSequences,vault:loadVault,brain:loadBrain,voice:loadVoiceLab,settings:loadSettings};
+var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,'auto-messages':loadAutoMessages,scripts:loadScripts,sequences:loadSequences,vault:loadVault,brain:loadBrain,voice:loadVoiceLab,settings:loadSettings};
 function navTo(tab,skipHash){
   if(!loaders[tab])tab='dashboard';
   currentTab=tab;
@@ -430,6 +449,64 @@ function sparkBars(seed){
   for(var i=0;i<18;i++){var height=18+((i*13+seed*7)%43);h+='<i style="height:'+height+'px"></i>'}
   return h+'</div>';
 }
+function autoState(requested,effective,blocked){
+  if(effective)return'<span class="auto-trigger-state on">● Active</span>';
+  if(requested&&blocked)return'<span class="auto-trigger-state blocked">● Saved · deployment blocked</span>';
+  return'<span class="auto-trigger-state">● Paused</span>';
+}
+function renderAutoTrigger(trigger,data){
+  var requested=(data.requested||{})[trigger]||{},effective=(data.effective||{})[trigger]||{},blocked=(data.blocked_reasons||{})[trigger]||'',online=trigger==='online';
+  var title=online?'Online trigger':'Stalled conversation trigger';
+  var description=online?'Start a contextual conversation when a known fan transitions online. Presence checks consume provider read credits.':'Reopen a fully-synced conversation after the creator message has gone unanswered for the configured period. No provider read poll is required.';
+  var h='<section class="block"><div class="auto-trigger"><div><h3>'+esc(title)+' '+autoState(requested.enabled,effective.enabled,blocked)+'</h3><p class="auto-trigger-summary">'+esc(description)+'</p></div><button class="btn-ghost" data-action="preview-auto-trigger" data-trigger="'+trigger+'">Preview eligibility</button></div>';
+  if(blocked)h+='<p class="muted-note" style="color:var(--amber)">'+esc(blocked)+'. You can save the configuration as a draft, but it cannot run until the Railway ceiling is opened and redeployed.</p>';
+  h+='<div class="auto-form"><div class="g3"><label class="auto-inline-check"><input id="auto-'+trigger+'-enabled" type="checkbox"'+(requested.enabled?' checked':'')+'> Trigger enabled</label><div><label for="auto-'+trigger+'-mode">Message strategy</label><select id="auto-'+trigger+'-mode"><option value="ai_contextual"'+(requested.response_mode==='ai_contextual'?' selected':'')+'>Contextual AI</option><option value="fixed"'+(requested.response_mode==='fixed'?' selected':'')+'>Fixed message</option></select></div><div><label for="auto-'+trigger+'-cooldown">Fan cooldown (hours)</label><input id="auto-'+trigger+'-cooldown" type="number" min="1" max="2160" value="'+Number(requested.cooldown_hours||72)+'"></div></div>';
+  h+='<div class="g2" style="margin-top:11px"><div><label for="auto-'+trigger+'-instructions">AI objective and instructions</label><textarea id="auto-'+trigger+'-instructions" maxlength="4000" style="min-height:120px">'+esc(requested.instructions||'')+'</textarea></div><div><label for="auto-'+trigger+'-fixed">Fixed message fallback</label><textarea id="auto-'+trigger+'-fixed" maxlength="500" style="min-height:120px" placeholder="Used only when Fixed message is selected">'+esc(requested.fixed_message||'')+'</textarea></div></div>';
+  h+='<div class="g3" style="margin-top:11px"><div><label for="auto-'+trigger+'-hour">Maximum per hour</label><input id="auto-'+trigger+'-hour" type="number" min="1" max="100" value="'+Number(requested.max_per_hour||3)+'"></div><div><label for="auto-'+trigger+'-day">Maximum per day</label><input id="auto-'+trigger+'-day" type="number" min="1" max="1000" value="'+Number(requested.max_per_day||15)+'"></div><div><label for="auto-'+trigger+'-fan-day">Maximum per fan/day</label><input id="auto-'+trigger+'-fan-day" type="number" min="1" max="3" value="'+Number(requested.max_per_fan_per_day||1)+'"></div></div>';
+  if(online){
+    h+='<div class="g3" style="margin-top:11px"><label class="auto-inline-check"><input id="auto-online-existing" type="checkbox"'+(requested.include_currently_online?' checked':'')+'> Include fans already online at startup</label><div><label for="auto-online-window">Online window (seconds)</label><input id="auto-online-window" type="number" min="60" max="3600" value="'+Number(requested.online_window_seconds||600)+'"></div><div><label for="auto-online-poll">Presence check interval (seconds)</label><input id="auto-online-poll" type="number" min="300" max="86400" value="'+Number(requested.poll_interval_seconds||1800)+'"></div></div>';
+  }else{
+    h+='<div class="g3" style="margin-top:11px"><div><label for="auto-stalled-after">Stalled after (hours)</label><input id="auto-stalled-after" type="number" min="6" max="8760" value="'+Number(requested.stalled_after_hours||48)+'"></div><div><label for="auto-stalled-scan">Scan interval (seconds)</label><input id="auto-stalled-scan" type="number" min="300" max="86400" value="'+Number(requested.scan_interval_seconds||3600)+'"></div><div><label for="auto-stalled-batch">Maximum candidates/scan</label><input id="auto-stalled-batch" type="number" min="1" max="500" value="'+Number(requested.scan_batch_size||5)+'"></div></div>';
+  }
+  h+='<div class="actions"><button class="btn" data-action="save-auto-trigger" data-trigger="'+trigger+'">Save trigger</button><span class="muted-note" id="auto-'+trigger+'-result"></span></div><div class="auto-preview" id="auto-'+trigger+'-preview">Run a preview to see aggregate eligibility. Preview never creates work or sends a message.</div></div></section>';
+  return h;
+}
+function renderAutoCampaigns(data){
+  var campaigns=data.campaigns||[],h='<section class="block">'+sectionIntro('Mass DM campaign drafts','Build and review conversation-only campaign copy. Live mass delivery and PPV remain blocked in this control center.','<button class="btn" data-action="new-auto-campaign">+ New campaign</button>');
+  if(autoCampaignEditor)h+='<div class="auto-form"><div class="g2"><div><label for="auto-campaign-name">Campaign name</label><input id="auto-campaign-name" maxlength="128" placeholder="Weekend check-in"></div><div><label for="auto-campaign-audience">Audience</label><select id="auto-campaign-audience"><option value="all">All known fans</option><option value="subscribers">Subscribers</option><option value="followers">Followers</option><option value="buyers">Previous buyers</option></select></div></div><label for="auto-campaign-message">Message draft</label><textarea id="auto-campaign-message" maxlength="2000" placeholder="Write the draft message. This action cannot send it."></textarea><div class="actions"><button class="btn" data-action="save-auto-campaign">Save draft</button><button class="btn-ghost" data-action="cancel-auto-campaign">Cancel</button><span class="muted-note" id="auto-campaign-result"></span></div></div>';
+  h+='</section>';
+  if(!campaigns.length)return h+emptyState('✦','No campaign drafts','Create a conversation-only draft. Sending remains unavailable until a separate delivery system is explicitly built and authorized.');
+  return h+'<div class="panel"><table><thead><tr><th>Created</th><th>Campaign</th><th>Audience</th><th>Message</th><th>Delivery</th><th>PPV</th></tr></thead><tbody>'+campaigns.map(function(c){return'<tr><td>'+esc(ft(c.created_at))+'</td><td style="color:var(--text);font-weight:650">'+esc(c.name)+'</td><td>'+esc((c.audience||{}).segment||'all')+'</td><td style="max-width:420px;overflow:hidden;text-overflow:ellipsis">'+esc(c.message_text)+'</td><td>'+B('low','Draft only')+'</td><td>'+B('bad','Blocked')+'</td></tr>'}).join('')+'</tbody></table></div>';
+}
+function loadAutoMessages(){
+  var c=document.getElementById('content');
+  c.innerHTML=pageHead('Set it once. Let it work while you sleep.','Auto Messages','Configure bounded contextual outreach while preserving trigger ownership, opt-outs, cooldowns, and exact outbox attribution.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>')+'<p class="muted-note">Loading Auto Messages controls…</p>';
+  F('/api/auto-messages').then(function(data){
+    if(!data){c.innerHTML=pageHead('Automation','Auto Messages','The control service is unavailable.','')+'<section class="block"><p class="muted-note">No trigger setting was changed.</p></section>';return}
+    var m=data.metrics||{},rate=m.delivery_rate==null?'—':Number(m.delivery_rate).toFixed(1)+'%',h=pageHead('Set it once. Let it work while you sleep.','Auto Messages','Online and stalled triggers use the same durable message brain and fan history as inbound replies. Campaigns remain draft-only.','<span class="auto-credit">'+Number(m.online_now||0)+' fans observed online</span>');
+    h+='<div class="dashboard-grid">'+metricCard('Active triggers',Number(m.active_triggers||0),Number(m.campaign_drafts||0)+' campaign drafts','<path d="M12 2 6 13h5l-1 9 8-13h-5z"/>','')+metricCard('Messages sent (30d)',Number(m.sent_30d||0).toLocaleString(),Number(m.pending_work||0)+' pending proactive work','<path d="m4 12 5 5L20 6"/>','good')+metricCard('Eligible now',Number(m.online_now||0)+' / '+Number(m.stalled_candidates||0),'online / stalled','<circle cx="12" cy="12" r="8"/><path d="M8 12h8"/>','')+metricCard('Delivery rate',rate,'proactive sends, last 30 days','<path d="M4 18 9 13l3 3 7-9"/>',m.delivery_rate==null?'warn':'good')+'</div>';
+    h+='<div class="auto-tabs"><button class="auto-tab '+(autoMessagesView==='triggers'?'active':'')+'" data-action="auto-messages-tab" data-view="triggers">⚡ Online & stalled triggers</button><button class="auto-tab '+(autoMessagesView==='campaigns'?'active':'')+'" data-action="auto-messages-tab" data-view="campaigns">✦ Mass DM drafts</button></div>';
+    if(autoMessagesView==='campaigns')h+=renderAutoCampaigns(data);else h+=renderAutoTrigger('online',data)+renderAutoTrigger('stalled',data);
+    if(Number(m.estimated_presence_read_credits_per_day||0)>0)h+='<section class="block"><p class="muted-note" style="color:var(--amber)">Estimated online-presence reads: '+Number(m.estimated_presence_read_credits_per_day)+' credits/day while the online trigger is effective. Stalled scans use stored database history and do not require a presence read.</p></section>';
+    c.innerHTML=h;
+  });
+}
+function autoTriggerPayload(trigger){
+  var payload={trigger:trigger,enabled:document.getElementById('auto-'+trigger+'-enabled').checked,response_mode:document.getElementById('auto-'+trigger+'-mode').value,instructions:document.getElementById('auto-'+trigger+'-instructions').value,fixed_message:document.getElementById('auto-'+trigger+'-fixed').value,cooldown_hours:Number(document.getElementById('auto-'+trigger+'-cooldown').value||1),max_per_hour:Number(document.getElementById('auto-'+trigger+'-hour').value||1),max_per_day:Number(document.getElementById('auto-'+trigger+'-day').value||1),max_per_fan_per_day:Number(document.getElementById('auto-'+trigger+'-fan-day').value||1)};
+  if(trigger==='online'){payload.include_currently_online=document.getElementById('auto-online-existing').checked;payload.online_window_seconds=Number(document.getElementById('auto-online-window').value||600);payload.poll_interval_seconds=Number(document.getElementById('auto-online-poll').value||1800)}
+  else{payload.stalled_after_hours=Number(document.getElementById('auto-stalled-after').value||48);payload.scan_interval_seconds=Number(document.getElementById('auto-stalled-scan').value||3600);payload.scan_batch_size=Number(document.getElementById('auto-stalled-batch').value||5)}
+  return payload;
+}
+async function saveAutoTrigger(trigger){
+  var payload=autoTriggerPayload(trigger),result=document.getElementById('auto-'+trigger+'-result');if(!result)return;
+  if(payload.enabled&&!confirm('Save and request activation of the '+trigger+' trigger? Deployment ceilings, limits, opt-outs, and contact policy will still apply.'))return;
+  result.textContent='Saving…';var r=await M('/api/auto-messages/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),d=await r.json();result.textContent=r.ok?'Saved':'Blocked: '+(d.error||'unknown');result.style.color=r.ok?'var(--green)':'var(--red)';if(r.ok)setTimeout(loadAutoMessages,500);
+}
+async function previewAutoTrigger(trigger){
+  var target=document.getElementById('auto-'+trigger+'-preview');if(!target)return;target.textContent='Calculating from durable state…';var r=await M('/api/auto-messages/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trigger:trigger})}),d=await r.json();if(!r.ok){target.textContent='Preview failed: '+(d.error||'unknown');return}target.innerHTML='<strong>'+Number(d.candidate_count||0)+' aggregate candidates</strong> · maximum '+Number(d.maximum_next_hour||0)+' next hour / '+Number(d.maximum_next_day||0)+' next day · '+Number(d.pending_work||0)+' pending. '+(d.blocked_reason?'<span style="color:var(--amber)">'+esc(d.blocked_reason)+'</span>':'No deployment block detected.')+' Preview sent nothing.';
+}
+async function saveAutoCampaign(){
+  var result=document.getElementById('auto-campaign-result'),name=document.getElementById('auto-campaign-name'),message=document.getElementById('auto-campaign-message'),audience=document.getElementById('auto-campaign-audience');if(!result||!name||!message||!audience)return;result.textContent='Saving draft…';var r=await M('/api/auto-messages/campaigns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name.value,message_text:message.value,audience:{segment:audience.value}})}),d=await r.json();result.textContent=r.ok?'Draft saved · nothing sent':'Failed: '+(d.error||'unknown');result.style.color=r.ok?'var(--green)':'var(--red)';if(r.ok){autoCampaignEditor=false;setTimeout(loadAutoMessages,500)}}
 function loadDashboard(){
   var c=document.getElementById('content');
   c.innerHTML=pageHead('Creator intelligence','Welcome back, Sunny Charm','A truthful view of conversations, revenue, provider readiness, and controlled-launch state.','<button class="btn-ghost" data-action="refresh-view">Refresh data</button><button class="btn" data-action="open-messages">Open inbox</button>')+
@@ -896,6 +973,12 @@ document.addEventListener('click',function(event){
   if(action==='refresh-view')refreshCurrent();
   else if(action==='open-messages')navTo('funnel');
   else if(action==='toggle-bot')toggleBot(control);
+  else if(action==='auto-messages-tab'){autoMessagesView=control.dataset.view||'triggers';autoCampaignEditor=false;loadAutoMessages()}
+  else if(action==='save-auto-trigger')saveAutoTrigger(control.dataset.trigger||'');
+  else if(action==='preview-auto-trigger')previewAutoTrigger(control.dataset.trigger||'');
+  else if(action==='new-auto-campaign'){autoCampaignEditor=true;loadAutoMessages()}
+  else if(action==='cancel-auto-campaign'){autoCampaignEditor=false;loadAutoMessages()}
+  else if(action==='save-auto-campaign')saveAutoCampaign();
   else if(action==='close-drawer')closeDrawer();
   else if(action==='fan-detail')fanDetail(control.dataset.fanId||'');
   else if(action==='select-conversation')selectConversation(control.dataset.fanId||'');

@@ -139,6 +139,24 @@ def test_native_plan_is_truthful_and_rejects_undocumented_online_trigger():
     assert row["message_hash"] == repository.fingerprint("welcome")
 
 
+def test_mass_campaign_is_persisted_as_conversation_only_draft():
+    engine = _engine()
+    repository = NativePlanRepository(engine)
+
+    campaign_id = repository.create_campaign(
+        creator_id="creator-a",
+        name="Subscriber check-in",
+        message_text="hey, how has your week been?",
+        audience={"segment": "subscribers"},
+    )
+
+    campaigns = repository.list_campaigns("creator-a")
+    assert campaigns[0]["id"] == campaign_id
+    assert campaigns[0]["status"] == "draft"
+    assert campaigns[0]["conversation_only"] is True
+    assert campaigns[0]["ppv_blocked"] is True
+
+
 def _pending_outbox(engine):
     repository = MessageProcessingRepository(engine)
     inbound, _ = repository.insert_inbound(

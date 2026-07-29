@@ -799,43 +799,50 @@ def test_zero_proactive_limits_mean_unlimited():
     assert reason is None
 
 
-def _seed_stalled_conversation(engine, bot):
+def _seed_stalled_conversation(
+    engine,
+    bot,
+    *,
+    fan_id="fan-a",
+    chat_id="chat-a",
+    suffix="1",
+):
     now = datetime.now(timezone.utc)
     old = now - timedelta(hours=48)
     bot.state_repo.ensure_conversation(
         "creator-a",
-        "fan-a",
-        "chat-a",
+        fan_id,
+        chat_id,
     )
     bot.message_store.save_message(
-        "fan-a",
+        fan_id,
         "creator-a",
         "fan",
         "working late",
-        "fan-message-1",
-        chat_id="chat-a",
+        f"fan-message-{suffix}",
+        chat_id=chat_id,
         created_at=old - timedelta(minutes=5),
     )
     bot.message_store.save_message(
-        "fan-a",
+        fan_id,
         "creator-a",
         "creator",
         "hope it goes smoothly babe",
-        "creator-message-1",
-        chat_id="chat-a",
+        f"creator-message-{suffix}",
+        chat_id=chat_id,
         created_at=old,
     )
     sync = CrmSyncRepository(engine)
     sync.discover_chat(
         creator_id="creator-a",
-        chat_id="chat-a",
-        fan_id="fan-a",
-        provider_head_message_id="creator-message-1",
+        chat_id=chat_id,
+        fan_id=fan_id,
+        provider_head_message_id=f"creator-message-{suffix}",
     )
     sync.complete_initial_page(
         creator_id="creator-a",
-        chat_id="chat-a",
-        provider_head_message_id="creator-message-1",
+        chat_id=chat_id,
+        provider_head_message_id=f"creator-message-{suffix}",
         backfill_cursor=None,
     )
 
@@ -859,6 +866,31 @@ def test_stalled_scan_queues_once_per_fan_response_episode():
     bot.processing_repo.complete_without_response(claimed.id)
     assert bot._poll_stalled_conversations() is False
     assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+
+
+def test_stalled_scan_uses_shared_proactive_hourly_limit():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        enable_stalled_outreach=True,
+        max_proactive_per_hour=1,
+        max_proactive_per_day=10,
+        max_proactive_per_fan_per_day=1,
+        stalled_after_hours=24,
+        stalled_scan_interval_seconds=0,
+    )
+    _seed_stalled_conversation(engine, bot)
+    _seed_stalled_conversation(
+        engine,
+        bot,
+        fan_id="fan-b",
+        chat_id="chat-b",
+        suffix="2",
+    )
+
+    assert bot._poll_stalled_conversations() is True
+    rows = _rows(engine, INBOUND_MESSAGES)
+    assert len(rows) == 1
+    assert rows[0]["trigger_kind"] == "stalled"
 
 
 def test_stalled_follow_up_is_cancelled_if_fan_replies_before_send():

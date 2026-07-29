@@ -80,6 +80,10 @@ from .persistence.purchases import PurchaseRepository
 from .persistence.presence import PresenceRepository
 
 if TYPE_CHECKING:
+    from .auto_messages.settings import (
+        AutoMessageTriggerSettings,
+        AutoMessagesSettings,
+    )
     from .persistence.state import ConversationStateRepository
     from .settings.chat_guidance import ChatGuidanceService
     from .human_delivery.service import HumanDeliveryService
@@ -185,6 +189,7 @@ class FanslyBot:
         self.episode_service = episode_service
         self.chat_guidance = chat_guidance
         self.human_delivery = human_delivery
+        self.auto_messages_settings = None
         self.enable_unread_replies = bool(enable_unread_replies)
         self.enable_online_outreach = bool(enable_online_outreach)
         self.enable_stalled_outreach = bool(enable_stalled_outreach)
@@ -346,6 +351,53 @@ class FanslyBot:
                 )
 
     # ─── MAIN LOOP ──────────────────────────────────────
+
+    def update_auto_messages(
+        self,
+        settings: "AutoMessagesSettings",
+    ) -> None:
+        """Apply bounded CRM trigger settings without restarting the bot."""
+        self.auto_messages_settings = settings
+        online = settings.online
+        stalled = settings.stalled
+        self.enable_online_outreach = bool(online.enabled)
+        self.enable_stalled_outreach = bool(stalled.enabled)
+        self.outreach_existing_online = bool(
+            online.include_currently_online
+        )
+        self.online_window_seconds = max(
+            60,
+            int(online.online_window_seconds),
+        )
+        self.presence_poll_interval_seconds = max(
+            300,
+            int(online.poll_interval_seconds),
+        )
+        self.stalled_after_hours = max(
+            6,
+            int(stalled.stalled_after_hours),
+        )
+        self.stalled_scan_interval_seconds = max(
+            300,
+            int(stalled.scan_interval_seconds),
+        )
+        self.stalled_scan_batch_size = min(
+            max(1, int(stalled.scan_batch_size)),
+            500,
+        )
+
+    def _trigger_settings(
+        self,
+        trigger_kind: str,
+    ) -> "AutoMessageTriggerSettings | None":
+        settings = self.auto_messages_settings
+        if settings is None:
+            return None
+        if trigger_kind == "online":
+            return settings.online
+        if trigger_kind == "stalled":
+            return settings.stalled
+        return None
 
     def reload_persona(self) -> None:
         """Reload and atomically replace the active creator persona."""
@@ -902,6 +954,27 @@ class FanslyBot:
             return False
         if self.client.capabilities.supports_user_presence is not True:
             return False
+        settings = self._trigger_settings("online")
+        cooldown_hours = (
+            settings.cooldown_hours
+            if settings is not None
+            else self.proactive_cooldown_hours
+        )
+        max_per_hour = (
+            settings.max_per_hour
+            if settings is not None
+            else self.max_proactive_per_hour
+        )
+        max_per_day = (
+            settings.max_per_day
+            if settings is not None
+            else self.max_proactive_per_day
+        )
+        max_per_fan_per_day = (
+            settings.max_per_fan_per_day
+            if settings is not None
+            else self.max_proactive_per_fan_per_day
+        )
         now = datetime.now(timezone.utc)
         if (
             self._last_presence_poll_at is not None
@@ -970,12 +1043,12 @@ class FanslyBot:
                 creator_id=self.creator_id,
                 fan_id=candidate.fan_id,
                 now=now,
-                cooldown_hours=self.proactive_cooldown_hours,
-                max_per_hour=self.max_proactive_per_hour,
-                max_per_day=self.max_proactive_per_day,
-                max_per_fan_per_day=(
-                    self.max_proactive_per_fan_per_day
-                ),
+                trigger_kind="online",
+                require_online=True,
+                cooldown_hours=cooldown_hours,
+                max_per_hour=max_per_hour,
+                max_per_day=max_per_day,
+                max_per_fan_per_day=max_per_fan_per_day,
             )
             if not eligible:
                 logger.info(
@@ -1010,6 +1083,27 @@ class FanslyBot:
         ):
             return False
         now = datetime.now(timezone.utc)
+        settings = self._trigger_settings("stalled")
+        cooldown_hours = (
+            settings.cooldown_hours
+            if settings is not None
+            else self.proactive_cooldown_hours
+        )
+        max_per_hour = (
+            settings.max_per_hour
+            if settings is not None
+            else self.max_proactive_per_hour
+        )
+        max_per_day = (
+            settings.max_per_day
+            if settings is not None
+            else self.max_proactive_per_day
+        )
+        max_per_fan_per_day = (
+            settings.max_per_fan_per_day
+            if settings is not None
+            else self.max_proactive_per_fan_per_day
+        )
         if (
             self._last_stalled_scan_at is not None
             and (
@@ -1029,26 +1123,41 @@ class FanslyBot:
             ),
             limit=self.stalled_scan_batch_size,
         )
-        work = []
+        queued = 0
         for candidate in candidates:
+            eligible, reason = self.presence_repo.eligible_for_outreach(
+                creator_id=self.creator_id,
+                fan_id=candidate.fan_id,
+                now=now,
+                trigger_kind="stalled",
+                require_online=False,
+                cooldown_hours=cooldown_hours,
+                max_per_hour=max_per_hour,
+                max_per_day=max_per_day,
+                max_per_fan_per_day=max_per_fan_per_day,
+            )
+            if not eligible:
+                logger.info(
+                    "Stalled outreach skipped: %s",
+                    reason,
+                )
+                continue
             digest = hashlib.sha256(
                 (
                     f"{self.creator_id}\0{candidate.fan_id}\0"
                     f"{candidate.episode_key}"
                 ).encode("utf-8")
             ).hexdigest()[:48]
-            work.append(
-                {
-                    "creator_id": self.creator_id,
-                    "platform_message_id": f"stalled:{digest}",
-                    "fan_id": candidate.fan_id,
-                    "chat_id": candidate.chat_id,
-                    "content": candidate.episode_key,
-                    "provider_created_at": now,
-                    "trigger_kind": "stalled",
-                }
+            _, created = self.processing_repo.insert_inbound(
+                creator_id=self.creator_id,
+                platform_message_id=f"stalled:{digest}",
+                fan_id=candidate.fan_id,
+                chat_id=candidate.chat_id,
+                content=candidate.episode_key,
+                provider_created_at=now,
+                trigger_kind="stalled",
             )
-        queued = self.processing_repo.insert_inbound_many(work)
+            queued += int(created)
         if queued:
             logger.info(
                 "Queued %s stalled conversation follow-up(s)",
@@ -1592,7 +1701,7 @@ class FanslyBot:
                 sending.content,
                 sent.message_id,
             )
-            if inbound.trigger_kind == "online":
+            if inbound.trigger_kind in {"online", "stalled"}:
                 self.presence_repo.mark_outreach_sent(
                     self.creator_id,
                     sending.fan_id,
@@ -1779,6 +1888,16 @@ class FanslyBot:
             and not self._stalled_episode_is_current(inbound)
         ):
             return None
+        trigger_settings = self._trigger_settings(inbound.trigger_kind)
+        if (
+            trigger_settings is not None
+            and trigger_settings.response_mode == "fixed"
+        ):
+            approved = self._approve_conversation_text(
+                inbound.fan_id,
+                trigger_settings.fixed_message,
+            )
+            return OutboundMessage.text(approved) if approved else None
         note = self.note_repo.get(inbound.fan_id, self.creator_id)
         self._backfill_memory_v2(note)
         history = (
@@ -1795,6 +1914,13 @@ class FanslyBot:
             if self.chat_guidance is not None
             else None
         )
+        instructions = guidance.chat_instructions if guidance else ""
+        if trigger_settings is not None and trigger_settings.instructions:
+            instructions = (
+                f"{instructions}\n\n"
+                f"AUTO MESSAGE OBJECTIVE ({inbound.trigger_kind}):\n"
+                f"{trigger_settings.instructions}"
+            ).strip()
         return self._conversation_brain_reply(
             inbound_id=inbound.id,
             trigger_kind=inbound.trigger_kind,
@@ -1806,9 +1932,7 @@ class FanslyBot:
             display_name=note.display_name if note else None,
             proactive=True,
             proactive_kind=inbound.trigger_kind,
-            chat_instructions=(
-                guidance.chat_instructions if guidance else ""
-            ),
+            chat_instructions=instructions,
             brand_bible=guidance.brand_bible if guidance else "",
         )
 

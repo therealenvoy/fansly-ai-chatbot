@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.fansly_client import ProviderCapabilities
+from src.auto_messages.control import AutoMessagesControlService
 from src.bot import LaunchGuardError
 from src.notes.repository import FAN_NOTES_TABLE
 from src.memory.store import MessageStore
@@ -61,6 +62,7 @@ class TestDashboardShell:
             "fans",
             "scripts",
             "kpis",
+            "auto-messages",
             "sequences",
             "settings",
         ):
@@ -149,6 +151,10 @@ class TestDashboardShell:
         assert "/api/human-delivery/status" in DASHBOARD_HTML
         assert "/api/human-delivery/documents" in DASHBOARD_HTML
         assert "/api/human-delivery/preview" in DASHBOARD_HTML
+        assert "/api/auto-messages" in DASHBOARD_HTML
+        assert "Online & stalled triggers" in DASHBOARD_HTML
+        assert "Mass DM drafts" in DASHBOARD_HTML
+        assert "Preview never creates work or sends a message" in DASHBOARD_HTML
         assert "zero provider calls and zero sends" in DASHBOARD_HTML
         assert "function pickMedia(idx)" in DASHBOARD_HTML
 
@@ -367,6 +373,16 @@ def running_server(db_url, tmp_path):
         ),
         legacy_brand_bible_path=tmp_path / "brand_bible.md",
     )
+    auto_messages_control = AutoMessagesControlService(
+        settings_store=SettingsStore(
+            engine=bot.note_repo.engine,
+            creator_id=bot.creator_id,
+        ),
+        environment={
+            "ENABLE_ONLINE_OUTREACH": "false",
+            "ENABLE_STALLED_OUTREACH": "false",
+        },
+    )
     inbound_wakeup = MagicMock()
     server = DashboardServer(
         bot,
@@ -383,6 +399,7 @@ def running_server(db_url, tmp_path):
         brand_bible_path=str(tmp_path / "brand_bible.md"),
         ai_settings=bot.ai_settings,
         chat_guidance=guidance,
+        auto_messages_control=auto_messages_control,
         webhook_endpoint_url=(
             "https://bot.example/webhooks/onlyfansapi/fansly"
         ),
@@ -397,6 +414,90 @@ def running_server(db_url, tmp_path):
 
     server.shutdown()
     thread.join(timeout=2)
+
+
+class TestAutoMessagesControlCenter:
+    def test_status_is_aggregate_only_and_deployment_gated(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body = _get(host, "/api/auto-messages")
+
+        assert status == 200
+        assert body["deployment"] == {
+            "online_allowed": False,
+            "stalled_allowed": False,
+        }
+        assert body["metrics"]["active_triggers"] == 0
+        assert body["mass_delivery_available"] is False
+        assert body["campaigns"] == []
+
+    def test_trigger_settings_save_as_blocked_draft_without_sending(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/auto-messages/settings",
+            {
+                "trigger": "online",
+                "enabled": True,
+                "max_per_hour": 3,
+                "max_per_day": 15,
+                "max_per_fan_per_day": 1,
+            },
+        )
+
+        assert status == 200
+        assert body["control"]["requested"]["online"]["enabled"] is True
+        assert body["control"]["effective"]["online"]["enabled"] is False
+        bot.client.send_message.assert_not_called()
+
+    def test_preview_is_no_send_and_contains_aggregate_counts(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/auto-messages/preview",
+            {"trigger": "online"},
+        )
+
+        assert status == 200
+        assert body["no_messages_sent"] is True
+        assert body["candidate_count"] == 0
+        assert "fan_id" not in json.dumps(body)
+        bot.client.send_message.assert_not_called()
+
+    def test_mass_campaign_action_saves_draft_only(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/auto-messages/campaigns",
+            {
+                "name": "Quiet check-in",
+                "message_text": "hey, how has your week been?",
+                "audience": {"segment": "subscribers"},
+            },
+        )
+
+        assert status == 201
+        assert body["sent"] is False
+        assert body["ppv_blocked"] is True
+        status, payload = _get(host, "/api/auto-messages")
+        assert status == 200
+        assert payload["campaigns"][0]["status"] == "draft"
+        bot.client.send_message.assert_not_called()
 
 
 class TestApifanslyPurchaseWebhook:

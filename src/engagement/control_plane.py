@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 
-from sqlalchemy import Engine, and_, insert, select, update
+from sqlalchemy import Engine, and_, desc, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -304,3 +304,79 @@ class NativePlanRepository:
                 )
             )
         return int(result.inserted_primary_key[0])
+
+    def create_campaign(
+        self,
+        *,
+        creator_id: str,
+        name: str,
+        message_text: str,
+        audience: dict | None = None,
+        cooldown_seconds: int = 0,
+    ) -> int:
+        """Store a conversation-only campaign draft without sending it."""
+        normalized_name = str(name or "").strip()
+        normalized_message = str(message_text or "").strip()
+        if not normalized_name:
+            raise ValueError("campaign name is required")
+        if not normalized_message:
+            raise ValueError("campaign message is required")
+        if len(normalized_message) > 2000:
+            raise ValueError("campaign message must be 2,000 characters or fewer")
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                insert(NATIVE_CAMPAIGNS).values(
+                    creator_id=creator_id,
+                    name=normalized_name[:128],
+                    audience=audience or {"segment": "all"},
+                    included_tiers=[],
+                    included_lists=[],
+                    excluded_lists=[],
+                    exclude_offline=False,
+                    exclude_creators=True,
+                    scheduled_time=None,
+                    cooldown_seconds=max(0, int(cooldown_seconds)),
+                    message_text=normalized_message,
+                    content_fingerprint=self.fingerprint(
+                        normalized_message,
+                    ),
+                    media_metadata={},
+                    conversation_only=True,
+                    ppv_blocked=True,
+                    operator_status="draft",
+                    sent_at=None,
+                    observed_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        return int(result.inserted_primary_key[0])
+
+    def list_campaigns(
+        self,
+        creator_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(NATIVE_CAMPAIGNS)
+                .where(NATIVE_CAMPAIGNS.c.creator_id == creator_id)
+                .order_by(desc(NATIVE_CAMPAIGNS.c.created_at))
+                .limit(min(max(int(limit), 1), 100))
+            ).mappings().all()
+        return [
+            {
+                "id": int(row["id"]),
+                "name": row["name"],
+                "message_text": row["message_text"],
+                "audience": row["audience"] or {},
+                "cooldown_seconds": int(row["cooldown_seconds"] or 0),
+                "status": row["operator_status"],
+                "conversation_only": bool(row["conversation_only"]),
+                "ppv_blocked": bool(row["ppv_blocked"]),
+                "created_at": row["created_at"].isoformat(),
+            }
+            for row in rows
+        ]
