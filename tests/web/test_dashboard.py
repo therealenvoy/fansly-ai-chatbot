@@ -16,13 +16,14 @@ import pytest
 from src.apifansly_client import ApifanslyAccountConnector
 from src.fansly_client import ProviderCapabilities
 from src.auto_messages.control import AutoMessagesControlService
-from src.bot import LaunchGuardError
+from src.bot import LaunchGuardError, UnreadBacklogBatchResult
 from src.creators import CreatorConnectionRepository
 from src.notes.repository import FAN_NOTES_TABLE
 from src.memory.store import MessageStore
 from src.persistence.crm import CrmSyncRepository
 from src.settings.chat_guidance import ChatGuidanceService
 from src.settings.store import SettingsStore
+from src.unread_backlog import UnreadBacklogController
 from src.persistence.database import create_database_engine
 from src.persistence.schema import metadata
 from src.persistence.state import ConversationStateRepository
@@ -164,6 +165,8 @@ class TestDashboardShell:
         assert "/api/human-delivery/documents" in DASHBOARD_HTML
         assert "/api/human-delivery/preview" in DASHBOARD_HTML
         assert "/api/auto-messages" in DASHBOARD_HTML
+        assert "/api/unread-backlog" in DASHBOARD_HTML
+        assert "Import next" in DASHBOARD_HTML
         assert "Online & stalled triggers" in DASHBOARD_HTML
         assert "Mass DM drafts" in DASHBOARD_HTML
         assert "Preview never creates work or sends a message" in DASHBOARD_HTML
@@ -249,6 +252,7 @@ def _make_bot(db_url):
     _bot_toggle's SettingsStore(db_url=...) reconstruction to use."""
     bot = MagicMock()
     bot.enabled = True
+    bot.enable_unread_replies = True
     bot.creator_id = "test_creator"
     bot.account_id = "account-123"
     bot.client.account_id = "fansly_acc_test"
@@ -305,6 +309,16 @@ def _make_bot(db_url):
     bot.ingest_webhook_domain.return_value = WebhookIngestResult(
         True,
         None,
+    )
+    bot.import_unread_backlog_batch.return_value = (
+        UnreadBacklogBatchResult(
+            discovered_chats=0,
+            processed_chats=0,
+            queued_inbound=0,
+            skipped_chats=0,
+            next_cursor=None,
+            exhausted=True,
+        )
     )
     bot.webhook_event_repo.webhook_metrics.return_value = {
         "delivery_count": 0,
@@ -371,6 +385,11 @@ def running_server(db_url, tmp_path):
         },
     )
     inbound_wakeup = MagicMock()
+    unread_backlog = UnreadBacklogController(
+        bot=bot,
+        state_repo=bot.state_repo,
+        inbound_wakeup=inbound_wakeup,
+    )
     server = DashboardServer(
         bot,
         port=0,
@@ -383,6 +402,7 @@ def running_server(db_url, tmp_path):
         apifansly_webhook_enabled=True,
         recovery_reconciliation_enabled=False,
         inbound_wakeup=inbound_wakeup,
+        unread_backlog=unread_backlog,
         persona_dir=str(tmp_path / "personas"),
         brand_bible_path=str(tmp_path / "brand_bible.md"),
         ai_settings=bot.ai_settings,
@@ -417,6 +437,59 @@ class TestAutoMessagesControlCenter:
         assert body["metrics"]["active_triggers"] == 0
         assert body["mass_delivery_available"] is False
         assert body["campaigns"] == []
+
+    def test_unread_backlog_status_is_aggregate_only(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body = _get(host, "/api/unread-backlog")
+
+        assert status == 200
+        assert body["available"] is True
+        assert body["phase"] == "not_started"
+        assert body["batch_limit"] == 5
+        assert body["automatic_polling"] is False
+        assert body["sends_from_control"] is False
+        assert "provider_cursor" not in body
+
+    def test_unread_backlog_start_is_bounded_and_owner_only(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+
+        status, body = _post(
+            host,
+            "/api/unread-backlog/start",
+            {"max_chats": 6},
+        )
+
+        assert status == 409
+        assert "between 1 and 5" in body["error"]
+        bot.import_unread_backlog_batch.assert_not_called()
+
+        request_body = json.dumps({"max_chats": 5})
+        va_status, va_body, _ = _request(
+            host,
+            "POST",
+            "/api/unread-backlog/start",
+            body=request_body,
+            headers={
+                "Authorization": _authorization(
+                    TEST_VA_USER,
+                    TEST_VA_PASSWORD,
+                ),
+                "X-CSRF-Token": TEST_CSRF_TOKEN,
+                "Origin": f"http://{host}",
+                "Content-Type": "application/json",
+            },
+        )
+        assert va_status == 403
+        assert va_body == {
+            "error": "forbidden for this dashboard role"
+        }
 
     def test_trigger_settings_save_as_blocked_draft_without_sending(
         self,

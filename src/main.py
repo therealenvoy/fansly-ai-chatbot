@@ -62,6 +62,7 @@ from .provider_credit import (
 )
 from .crm.sync import CrmSyncService
 from .persistence.crm import CrmSyncRepository
+from .unread_backlog import UnreadBacklogController
 from .conversation.llm import DeepSeekChatResponder
 from .conversation.mode import BotMode
 from .conversation.advanced import AdvancedBrainDecisionService
@@ -632,6 +633,12 @@ logger.info(
 running = True
 reply_wakeup = threading.Event()
 background_threads: list[threading.Thread] = []
+unread_backlog = UnreadBacklogController(
+    bot=bot,
+    state_repo=state_repo,
+    inbound_wakeup=reply_wakeup,
+    guard_factory=lambda: provider_worker("unread-backlog"),
+)
 
 
 def sleep_with_interrupt(seconds: int):
@@ -679,6 +686,7 @@ dashboard = DashboardServer(
         RECOVERY_RECONCILIATION_ENABLED
     ),
     inbound_wakeup=reply_wakeup,
+    unread_backlog=unread_backlog,
 )
 
 

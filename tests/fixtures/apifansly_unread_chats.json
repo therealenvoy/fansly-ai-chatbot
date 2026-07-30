@@ -1,0 +1,34 @@
+{
+  "statusCode": 200,
+  "message": "Success",
+  "data": {
+    "status_code": 200,
+    "data": {
+      "success": true,
+      "response": {
+        "data": [
+          {
+            "messageId": "message-sanitized-2",
+            "groupId": "chat-sanitized-1",
+            "senderId": "fan-sanitized-1",
+            "partnerUsername": "sanitized_fan",
+            "unreadCount": 2
+          }
+        ],
+        "aggregationData": {
+          "accounts": [
+            {
+              "id": "fan-sanitized-1",
+              "username": "sanitized_fan",
+              "displayName": "Sanitized Fan",
+              "avatar": {
+                "locations": []
+              }
+            }
+          ]
+        }
+      }
+    },
+    "nextCursor": "message-sanitized-2"
+  }
+}

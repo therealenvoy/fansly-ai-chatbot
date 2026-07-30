@@ -63,6 +63,7 @@ from ..conversation.brain2_repository import (
     PersistentExperimentRepository,
 )
 from ..settings.brain import BrainSettingsError
+from ..unread_backlog import UnreadBacklogError
 from ..settings.chat_guidance import (
     MAX_CHAT_INSTRUCTIONS_CHARS,
     ChatGuidanceError,
@@ -1247,6 +1248,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/human-delivery/memory": return self._human_delivery_memory(q)
         if p=="/api/human-delivery/review": return self._human_delivery_review()
         if p=="/api/auto-messages": return self._auto_messages_status()
+        if p=="/api/unread-backlog": return self._unread_backlog_status()
         if p=="/api/bulk-posting": return self._bulk_posting_status()
         if p=="/api/fyp-analytics": return self._fyp_analytics_status(q)
         if p=="/api/models": return self._models_status()
@@ -1302,6 +1304,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/auto-messages/settings": return self._auto_messages_settings_save(b)
         if p=="/api/auto-messages/preview": return self._auto_messages_preview(b)
         if p=="/api/auto-messages/campaigns": return self._auto_messages_campaign_save(b)
+        if p=="/api/unread-backlog/start": return self._unread_backlog_start(b)
         if p=="/api/bulk-posting/schedule":
             return self._bulk_posting_schedule(b)
         if p=="/api/fyp-analytics/refresh":
@@ -1311,6 +1314,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/models/verify-2fa": return self._model_verify_2fa(b)
         if p=="/api/models/select": return self._model_select(b)
         self.j({"error":"not found"},404)
+
+    def _unread_backlog_status(self):
+        controller = self.server.unread_backlog
+        if controller is None:
+            return self.j(
+                {
+                    "available": False,
+                    "reason": "Unread backlog control is unavailable",
+                    "phase": "unavailable",
+                    "running": False,
+                    "webhook_first": True,
+                    "automatic_polling": False,
+                    "sends_from_control": False,
+                },
+                503,
+            )
+        return self.j(controller.snapshot())
+
+    def _unread_backlog_start(self, body):
+        controller = self.server.unread_backlog
+        if controller is None:
+            return self.j(
+                {"error": "Unread backlog control is unavailable"},
+                503,
+            )
+        try:
+            payload = json.loads(body or "{}")
+        except ValueError:
+            return self.j({"error": "invalid JSON"}, 400)
+        if not isinstance(payload, dict):
+            return self.j({"error": "invalid request body"}, 400)
+        try:
+            result = controller.start(
+                max_chats=int(payload.get("max_chats", 5))
+            )
+        except (TypeError, ValueError):
+            return self.j({"error": "max_chats must be an integer"}, 400)
+        except UnreadBacklogError as error:
+            return self.j({"error": str(error)}, 409)
+        return self.j(result, 202)
 
     def _models_status(self):
         service = getattr(self.server, "creator_connections", None)
@@ -4933,6 +4976,7 @@ class DashboardServer:
         apifansly_webhook_enabled: bool = False,
         recovery_reconciliation_enabled: bool = False,
         inbound_wakeup=None,
+        unread_backlog=None,
         runtime_monitor=None,
         crm_sync=None,
         ai_settings=None,
@@ -5053,6 +5097,7 @@ class DashboardServer:
                 ),
             )
         self.server.credit_governor = credit_governor
+        self.server.unread_backlog = unread_backlog
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
             if bot is not None and hasattr(bot, "persona_loader")

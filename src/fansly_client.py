@@ -131,6 +131,20 @@ class FanslyApiClient(ABC):
         order: str = "newest",
     ) -> tuple[list[ChatInfo], int | str | None]: ...
 
+    def list_unread_chats_page(
+        self,
+        *,
+        cursor: str | None = None,
+    ) -> tuple[list[ChatInfo], str | None]:
+        """Return one provider page from its dedicated unread-chat feed.
+
+        Providers without a dedicated unread endpoint must fail closed instead
+        of silently falling back to a routine full-inbox poll.
+        """
+        raise NotImplementedError(
+            f"{self.provider_name} does not expose a dedicated unread feed"
+        )
+
     @abstractmethod
     def get_all_chats(
         self,

@@ -182,6 +182,33 @@ def test_lists_cursor_paginated_chats_from_documented_shape():
     }
 
 
+def test_lists_dedicated_unread_feed_with_message_cursor_fixture():
+    client = _client()
+    fixture = json.loads(
+        (FIXTURES / "apifansly_unread_chats.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    client.client.request = MagicMock(return_value=_response(fixture))
+
+    chats, cursor = client.list_unread_chats_page(
+        cursor="message-sanitized-1"
+    )
+
+    assert cursor == "message-sanitized-2"
+    assert len(chats) == 1
+    assert chats[0].chat_id == "chat-sanitized-1"
+    assert chats[0].last_unread_message_id == "message-sanitized-2"
+    assert chats[0].unread_count == 2
+    assert client.client.request.call_args.args == (
+        "GET",
+        "/fansly_acc_test/chats/unread",
+    )
+    assert client.client.request.call_args.kwargs["params"] == {
+        "cursor": "message-sanitized-1"
+    }
+
+
 def test_message_author_uses_numeric_creator_id():
     client = _client()
     client._creator_fansly_id = "creator-123"

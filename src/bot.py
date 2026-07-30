@@ -9,6 +9,7 @@ aftercare, and tier systems before a response is generated.
 import json
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING
 
@@ -102,6 +103,18 @@ logger = logging.getLogger(__name__)
 
 class LaunchGuardError(RuntimeError):
     """Raised when an operator tries to enable an unsafe pilot launch."""
+
+
+@dataclass(frozen=True)
+class UnreadBacklogBatchResult:
+    """Aggregate-only result for one bounded unread discovery batch."""
+
+    discovered_chats: int
+    processed_chats: int
+    queued_inbound: int
+    skipped_chats: int
+    next_cursor: str | None
+    exhausted: bool
 
 
 class FanslyBot:
@@ -559,6 +572,76 @@ class FanslyBot:
             )
 
         return ledger_updates, ingested
+
+    def import_unread_backlog_batch(
+        self,
+        *,
+        cursor: str | None,
+        max_chats: int = 5,
+    ) -> UnreadBacklogBatchResult:
+        """Queue one bounded, resumable APIFansly unread-chat batch.
+
+        This method performs provider reads and durable inbound inserts only.
+        It never runs generation or delivery. The normal reply workers remain
+        the sole path that can turn queued inbound work into an outbox send.
+        """
+        if self.bot_mode != BotMode.CONVERSATION:
+            raise LaunchGuardError(
+                "Unread backlog import requires conversation mode"
+            )
+        if not self.enable_unread_replies:
+            raise LaunchGuardError("Unread replies are disabled")
+        if not self.enabled:
+            raise LaunchGuardError("The bot is disabled")
+        batch_limit = min(max(1, int(max_chats)), 5)
+        chats, provider_cursor = self.client.list_unread_chats_page(
+            cursor=cursor
+        )
+        if not chats:
+            return UnreadBacklogBatchResult(
+                discovered_chats=0,
+                processed_chats=0,
+                queued_inbound=0,
+                skipped_chats=0,
+                next_cursor=cursor,
+                exhausted=True,
+            )
+
+        processed = 0
+        queued = 0
+        skipped = 0
+        next_cursor = cursor
+        seen_chat_ids: set[str] = set()
+        for chat in chats:
+            row_cursor = (
+                chat.last_unread_message_id or chat.last_message_id
+            )
+            if row_cursor:
+                next_cursor = row_cursor
+            if chat.chat_id in seen_chat_ids:
+                continue
+            seen_chat_ids.add(chat.chat_id)
+            if not self._fan_allowed(chat.partner_account_id):
+                skipped += 1
+                continue
+            if processed >= batch_limit:
+                break
+            processed += 1
+            inserted, _ = self._ingest_chat_messages(chat)
+            queued += inserted
+            if processed >= batch_limit:
+                break
+
+        if processed < batch_limit and provider_cursor:
+            next_cursor = provider_cursor
+        return UnreadBacklogBatchResult(
+            discovered_chats=len(chats),
+            processed_chats=processed,
+            queued_inbound=queued,
+            skipped_chats=skipped,
+            next_cursor=next_cursor,
+            exhausted=False,
+        )
 
     def poll_presence_outreach(self) -> bool:
         if not self.enable_online_outreach:

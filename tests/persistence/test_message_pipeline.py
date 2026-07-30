@@ -259,6 +259,84 @@ def test_signed_webhook_path_bypasses_full_chat_reconciliation():
     assert len(_rows(engine, INBOUND_MESSAGES)) == 1
 
 
+def test_unread_backlog_batch_queues_at_most_five_without_sending():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        reply_delay_min_seconds=0,
+        reply_delay_max_seconds=0,
+    )
+    chats = [
+        _chat(
+            unread_count=1,
+            last_message_id=f"message-{number}",
+            chat_id=f"chat-{number}",
+            fan_id=f"fan-{number}",
+        )
+        for number in range(1, 7)
+    ]
+    bot.client.list_unread_chats_page.return_value = (
+        chats,
+        "message-6",
+    )
+    bot.client.list_messages.side_effect = [
+        (
+            [
+                MessageInfo(
+                    message_id=f"message-{number}",
+                    content=f"inbound-{number}",
+                    sender_id=f"fan-{number}",
+                    created_at=float(number),
+                    is_from_fan=True,
+                )
+            ],
+            None,
+        )
+        for number in range(1, 6)
+    ]
+
+    result = bot.import_unread_backlog_batch(
+        cursor=None,
+        max_chats=5,
+    )
+
+    assert result.discovered_chats == 6
+    assert result.processed_chats == 5
+    assert result.queued_inbound == 5
+    assert result.next_cursor == "message-5"
+    assert result.exhausted is False
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 5
+    bot.client.send_message.assert_not_called()
+    bot.client.list_unread_chats_page.assert_called_once_with(
+        cursor=None
+    )
+
+
+def test_unread_backlog_skips_chat_when_creator_already_replied():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    chat = _chat(
+        unread_count=1,
+        last_message_id="message-2",
+    )
+    bot.client.list_unread_chats_page.return_value = (
+        [chat],
+        "message-2",
+    )
+    bot.client.list_messages.return_value = (
+        [_message(2, fan=False), _message(1)],
+        None,
+    )
+
+    result = bot.import_unread_backlog_batch(
+        cursor=None,
+        max_chats=5,
+    )
+
+    assert result.processed_chats == 1
+    assert result.queued_inbound == 0
+    assert _rows(engine, INBOUND_MESSAGES) == []
+    bot.client.send_message.assert_not_called()
+
+
 def test_conversation_generation_failure_is_retried_not_dropped():
     engine, bot = _bot(
         bot_mode=BotMode.CONVERSATION,

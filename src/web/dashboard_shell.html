@@ -334,6 +334,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 .auto-inline-check input{width:auto}
 .auto-preview{margin-top:12px;padding:12px;border:1px dashed var(--line-strong);border-radius:12px;background:rgba(255,255,255,.015);font-size:10px;line-height:1.55;color:var(--muted)}
 .auto-credit{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border-radius:999px;background:rgba(68,215,146,.08);border:1px solid rgba(68,215,146,.18);color:var(--green);font-size:9px;font-weight:700}
+.backlog-stat{padding:12px;border:1px solid var(--line);border-radius:12px;background:rgba(255,255,255,.018)}.backlog-stat strong{display:block;color:var(--text);font-size:16px;text-transform:capitalize}.backlog-stat span{display:block;margin-top:3px;color:var(--muted);font-size:9px}
 .bulk-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin-bottom:16px}
 .bulk-kpi{min-height:98px;padding:16px;border:1px solid var(--line);border-radius:15px;background:var(--surface)}
 .bulk-kpi .label{font-size:9px;color:var(--muted)}.bulk-kpi strong{display:block;margin-top:8px;font-size:22px}.bulk-kpi small{display:block;margin-top:4px;color:var(--faint);font-size:8px}
@@ -659,13 +660,27 @@ function renderAutoCampaigns(data){
   if(!campaigns.length)return h+emptyState('✦','No campaign drafts','Create a conversation-only draft. Sending remains unavailable until a separate delivery system is explicitly built and authorized.');
   return h+'<div class="panel"><table><thead><tr><th>Created</th><th>Campaign</th><th>Audience</th><th>Message</th><th>Delivery</th><th>PPV</th></tr></thead><tbody>'+campaigns.map(function(c){return'<tr><td>'+esc(ft(c.created_at))+'</td><td style="color:var(--text);font-weight:650">'+esc(c.name)+'</td><td>'+esc((c.audience||{}).segment||'all')+'</td><td style="max-width:420px;overflow:hidden;text-overflow:ellipsis">'+esc(c.message_text)+'</td><td>'+B('low','Draft only')+'</td><td>'+B('bad','Blocked')+'</td></tr>'}).join('')+'</tbody></table></div>';
 }
+function renderUnreadBacklog(data){
+  data=data||{};
+  var phase=String(data.phase||'not_started').replace(/_/g,' ');
+  var unavailable=!data.available,complete=data.phase==='complete',running=Boolean(data.running);
+  var action=running?'Importing next batch…':complete?'Backlog scan complete':'Import next '+Number(data.batch_limit||5);
+  var disabled=unavailable||running||complete?' disabled':'';
+  var note=unavailable?esc(data.reason||'Unavailable'):'Uses one bounded APIFansly unread read, checks the newest chat history, and queues at most five safe text replies. It never becomes a polling loop.';
+  return'<section class="block">'+sectionIntro('Unread reply backlog','One-time, resumable recovery for conversations that were already unread before the webhook cutover. Future messages stay webhook-first.','<button class="btn" data-action="start-unread-backlog"'+disabled+'>'+esc(action)+'</button>')+
+    '<div class="g3"><div class="backlog-stat"><strong>'+esc(phase)+'</strong><span>Current state</span></div><div class="backlog-stat"><strong>'+Number(data.processed_chats||0)+'</strong><span>Chats checked</span></div><div class="backlog-stat"><strong>'+Number(data.queued_inbound||0)+'</strong><span>Replies queued</span></div></div>'+
+    '<p class="muted-note" id="unread-backlog-result">'+note+'</p>'+
+    '<p class="muted-note">Review delivery evidence between every five-chat batch. This control performs provider reads and durable queue inserts only; the existing Brain 2.0 reply worker remains the only sender. PPV, media, online outreach, and stalled outreach are unchanged.</p></section>';
+}
 function loadAutoMessages(){
   var c=document.getElementById('content');
   c.innerHTML=pageHead('Set it once. Let it work while you sleep.','Auto Messages','Configure bounded contextual outreach while preserving trigger ownership, opt-outs, cooldowns, and exact outbox attribution.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>')+'<p class="muted-note">Loading Auto Messages controls…</p>';
-  F('/api/auto-messages').then(function(data){
+  Promise.all([F('/api/auto-messages'),F('/api/unread-backlog')]).then(function(result){
+    var data=result[0],backlog=result[1]||{};
     if(!data){c.innerHTML=pageHead('Automation','Auto Messages','The control service is unavailable.','')+'<section class="block"><p class="muted-note">No trigger setting was changed.</p></section>';return}
     var m=data.metrics||{},rate=m.delivery_rate==null?'—':Number(m.delivery_rate).toFixed(1)+'%',h=pageHead('Set it once. Let it work while you sleep.','Auto Messages','Online and stalled triggers use the same durable message brain and fan history as inbound replies. Campaigns remain draft-only.','<span class="auto-credit">'+Number(m.online_now||0)+' fans observed online</span>');
     h+='<div class="dashboard-grid">'+metricCard('Active triggers',Number(m.active_triggers||0),Number(m.campaign_drafts||0)+' campaign drafts','<path d="M12 2 6 13h5l-1 9 8-13h-5z"/>','')+metricCard('Messages sent (30d)',Number(m.sent_30d||0).toLocaleString(),Number(m.pending_work||0)+' pending proactive work','<path d="m4 12 5 5L20 6"/>','good')+metricCard('Eligible now',Number(m.online_now||0)+' / '+Number(m.stalled_candidates||0),'online / stalled','<circle cx="12" cy="12" r="8"/><path d="M8 12h8"/>','')+metricCard('Delivery rate',rate,'proactive sends, last 30 days','<path d="M4 18 9 13l3 3 7-9"/>',m.delivery_rate==null?'warn':'good')+'</div>';
+    h+=renderUnreadBacklog(backlog);
     h+='<div class="auto-tabs"><button class="auto-tab '+(autoMessagesView==='triggers'?'active':'')+'" data-action="auto-messages-tab" data-view="triggers">⚡ Online & stalled triggers</button><button class="auto-tab '+(autoMessagesView==='campaigns'?'active':'')+'" data-action="auto-messages-tab" data-view="campaigns">✦ Mass DM drafts</button></div>';
     if(autoMessagesView==='campaigns')h+=renderAutoCampaigns(data);else h+=renderAutoTrigger('online',data)+renderAutoTrigger('stalled',data);
     if(Number(m.estimated_presence_read_credits_per_day||0)>0)h+='<section class="block"><p class="muted-note" style="color:var(--amber)">Estimated online-presence reads: '+Number(m.estimated_presence_read_credits_per_day)+' credits/day while the online trigger is effective. Stalled scans use stored database history and do not require a presence read.</p></section>';
@@ -714,6 +729,19 @@ function loadDashboard(){
     c.innerHTML=pageHead('Creator intelligence','Welcome back, Sunny Charm','A truthful view of conversations, revenue, provider readiness, and controlled-launch state.','<button class="btn-ghost" data-action="refresh-view">Refresh data</button><button class="btn" data-action="open-messages">Open inbox</button>')+
       '<div class="dashboard-grid">'+pulse+hero+readiness+metrics+activity+next+'</div>';
   });
+}
+async function startUnreadBacklog(){
+  if(!confirm('Import the next maximum five unread chats? Safe eligible chats will enter the live text-reply queue. Nothing proactive, paid, or media-based will be sent.'))return;
+  var target=document.getElementById('unread-backlog-result');if(target)target.textContent='Starting bounded unread import…';
+  var r=await M('/api/unread-backlog/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({max_chats:5})}),d=await r.json();
+  if(!r.ok){if(target){target.textContent='Blocked: '+(d.error||'unknown');target.style.color='var(--red)'}return}
+  if(target){target.textContent='Batch started. Waiting for aggregate result…';target.style.color='var(--amber)'}
+  pollUnreadBacklog();
+}
+async function pollUnreadBacklog(){
+  var d=await F('/api/unread-backlog');
+  if(d&&d.running){setTimeout(pollUnreadBacklog,1200);return}
+  loadAutoMessages();
 }
 
 function renderConversationList(fans){
@@ -1513,6 +1541,7 @@ document.addEventListener('click',function(event){
   else if(action==='new-auto-campaign'){autoCampaignEditor=true;loadAutoMessages()}
   else if(action==='cancel-auto-campaign'){autoCampaignEditor=false;loadAutoMessages()}
   else if(action==='save-auto-campaign')saveAutoCampaign();
+  else if(action==='start-unread-backlog')startUnreadBacklog();
   else if(action==='bulk-tab'){captureBulkForms();bulkPostingView=control.dataset.view||'schedule';renderBulkPosting()}
   else if(action==='add-bulk-card'){captureBulkForms();bulkPostingCards.push(newBulkCard());renderBulkPosting()}
   else if(action==='remove-bulk-card'){captureBulkForms();bulkPostingCards=bulkPostingCards.filter(function(card){return card.id!==Number(control.dataset.cardId)});renderBulkPosting()}

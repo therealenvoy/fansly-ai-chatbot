@@ -426,6 +426,142 @@ class ApifanslyClient(FanslyApiClient):
             )
         return chats, ResponseParser.cursor(payload)
 
+    def list_unread_chats_page(
+        self,
+        *,
+        cursor: str | None = None,
+    ) -> tuple[list[ChatInfo], str | None]:
+        """Read one page from APIFansly's dedicated unread-chat feed.
+
+        The provider documents the cursor as the previous page's final
+        ``messageId``. The parser deliberately accepts the provider's two
+        observed response containers while still rejecting incomplete rows.
+        """
+        params: dict[str, Any] = {}
+        if cursor:
+            params["cursor"] = cursor
+        payload = self._request(
+            "GET",
+            f"/{self.account_id}/chats/unread",
+            params=params,
+        )
+        response = ResponseParser.parse(payload, default=[])
+        aggregation: dict[str, Any] = {}
+        if isinstance(response, list):
+            rows = response
+        elif isinstance(response, dict):
+            candidate = (
+                response.get("data")
+                or response.get("chats")
+                or response.get("messages")
+                or []
+            )
+            if not isinstance(candidate, list):
+                raise ValueError("Unexpected APIFansly unread response")
+            rows = candidate
+            raw_aggregation = response.get("aggregationData", {})
+            if isinstance(raw_aggregation, dict):
+                aggregation = raw_aggregation
+        else:
+            raise ValueError("Unexpected APIFansly unread response")
+
+        accounts = {
+            str(account.get("id")): account
+            for account in aggregation.get("accounts", [])
+            if isinstance(account, dict) and account.get("id")
+        }
+        chats: list[ChatInfo] = []
+        for raw_row in rows:
+            if not isinstance(raw_row, dict):
+                raise ValueError("Unexpected APIFansly unread row")
+            nested_chat = raw_row.get("chat")
+            chat = nested_chat if isinstance(nested_chat, dict) else {}
+            nested_message = raw_row.get("message")
+            message = (
+                nested_message if isinstance(nested_message, dict) else {}
+            )
+            chat_id = str(
+                raw_row.get("groupId")
+                or raw_row.get("chatId")
+                or chat.get("groupId")
+                or chat.get("id")
+                or message.get("groupId")
+                or ""
+            ).strip()
+            message_id = str(
+                raw_row.get("messageId")
+                or raw_row.get("lastMessageId")
+                or message.get("id")
+                or ""
+            ).strip()
+            partner_id = str(
+                raw_row.get("partnerAccountId")
+                or raw_row.get("senderId")
+                or chat.get("partnerAccountId")
+                or message.get("senderId")
+                or ""
+            ).strip()
+            if not chat_id or not message_id or not partner_id:
+                raise ValueError("Incomplete APIFansly unread row")
+            account = accounts.get(partner_id, {})
+            locations = account.get("avatar", {}).get("locations", [])
+            chats.append(
+                ChatInfo(
+                    chat_id=chat_id,
+                    partner_account_id=partner_id,
+                    partner_username=str(
+                        raw_row.get("partnerUsername")
+                        or chat.get("partnerUsername")
+                        or account.get("username")
+                        or ""
+                    ),
+                    partner_display_name=str(
+                        raw_row.get("partnerDisplayName")
+                        or account.get("displayName")
+                        or raw_row.get("partnerUsername")
+                        or chat.get("partnerUsername")
+                        or ""
+                    ),
+                    unread_count=max(
+                        1,
+                        int(
+                            raw_row.get("unreadCount")
+                            or chat.get("unreadCount")
+                            or 1
+                        ),
+                    ),
+                    last_message_id=message_id,
+                    last_unread_message_id=message_id,
+                    subscription_tier_id=(
+                        str(
+                            raw_row.get("subscriptionTierId")
+                            or chat.get("subscriptionTierId")
+                        )
+                        if (
+                            raw_row.get("subscriptionTierId")
+                            or chat.get("subscriptionTierId")
+                        )
+                        else None
+                    ),
+                    avatar_url=(
+                        locations[0].get("location")
+                        if locations
+                        else account.get("avatar", {}).get("location")
+                    ),
+                )
+            )
+
+        provider_cursor = ResponseParser.cursor(payload)
+        if (
+            provider_cursor is None
+            and isinstance(response, dict)
+            and response.get("cursor")
+        ):
+            provider_cursor = str(response["cursor"])
+        if provider_cursor is None and chats:
+            provider_cursor = chats[-1].last_unread_message_id
+        return chats, provider_cursor
+
     def get_all_chats(self, filter_type: str = "all") -> list[ChatInfo]:
         all_chats: list[ChatInfo] = []
         cursor: int | str | None = 0
