@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.apifansly_client import ApifanslyAccountConnector
 from src.fansly_client import ProviderCapabilities
 from src.auto_messages.control import AutoMessagesControlService
 from src.bot import LaunchGuardError
@@ -1249,8 +1250,87 @@ class TestDashboardSecurity:
         assert 'class="model-rail"' in body
         assert 'id="model-rail-list"' in body
         assert 'data-action="open-model-setup"' in body
+        assert 'data-action="sync-models"' in body
+        assert "/api/models/sync" in body
         assert "async function loadModelRail()" in body
+        assert "async function syncManagedModels(showStatus)" in body
         assert "await loaders[currentTab]()" in body
+
+    def test_owner_can_sync_all_apifansly_managed_models(
+        self,
+        running_server,
+        monkeypatch,
+    ):
+        host, _, _ = running_server
+        monkeypatch.setattr(
+            ApifanslyAccountConnector,
+            "list_accounts",
+            lambda _self: [
+                {
+                    "account_id": "managed-provider-one",
+                    "name": "First Managed Creator",
+                    "country_code": "US",
+                },
+                {
+                    "account_id": "managed-provider-two",
+                    "name": "Second Managed Creator",
+                    "country_code": "GB",
+                },
+                {
+                    "account_id": "managed-provider-three",
+                    "name": "Third Managed Creator",
+                    "country_code": "DE",
+                },
+            ],
+        )
+
+        status, body, _ = _request(
+            host,
+            "POST",
+            "/api/models/sync",
+            body="{}",
+            headers={
+                "Authorization": _authorization(),
+                "X-CSRF-Token": TEST_CSRF_TOKEN,
+                "Origin": f"http://{host}",
+                "Content-Type": "application/json",
+            },
+        )
+
+        assert status == 200
+        assert body["provider_count"] == 3
+        assert body["imported"] == 3
+        assert len(body["models"]) >= 3
+        assert all(
+            "provider_account_id" not in model
+            and "native_account_id" not in model
+            for model in body["models"]
+        )
+
+    def test_posting_va_cannot_sync_models(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+
+        status, body, _ = _request(
+            host,
+            "POST",
+            "/api/models/sync",
+            body="{}",
+            headers={
+                "Authorization": _authorization(
+                    TEST_VA_USER,
+                    TEST_VA_PASSWORD,
+                ),
+                "X-CSRF-Token": TEST_CSRF_TOKEN,
+                "Origin": f"http://{host}",
+                "Content-Type": "application/json",
+            },
+        )
+
+        assert status == 403
+        assert body == {"error": "forbidden for this dashboard role"}
 
     def test_posting_va_sees_only_posting_and_fyp_shell(self, running_server):
         host, _, _ = running_server

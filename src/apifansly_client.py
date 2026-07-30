@@ -129,6 +129,61 @@ class ApifanslyAccountConnector:
             },
         )
 
+    def list_accounts(self) -> list[dict[str, str]]:
+        """Return the API key's connected accounts without retaining emails."""
+        if not self.api_key:
+            raise AuthError("APIFANSLY_API_KEY is not configured")
+        try:
+            response = self.client.get("/accounts")
+        except httpx.TimeoutException as error:
+            raise TimeoutError("APIFansly account listing timed out") from error
+        except httpx.HTTPError as error:
+            raise RuntimeError("APIFansly account listing failed") from error
+        if response.status_code in (401, 403):
+            raise AuthError("APIFansly rejected the API key")
+        if response.status_code == 402:
+            raise PaymentRequiredError("APIFansly credits are required")
+        if response.status_code == 429:
+            raise RuntimeError("APIFansly account listing is rate limited")
+        if response.status_code >= 400:
+            raise RuntimeError("APIFansly could not list connected accounts")
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise RuntimeError("APIFansly returned an invalid response") from error
+        if not isinstance(body, dict):
+            raise RuntimeError("APIFansly returned an invalid response")
+        status = body.get("statusCode")
+        if status and not 200 <= int(status) < 300:
+            raise RuntimeError("APIFansly could not list connected accounts")
+        data = body.get("data", body)
+        accounts = data.get("accounts") if isinstance(data, dict) else None
+        if not isinstance(accounts, list):
+            raise RuntimeError("APIFansly returned an invalid account list")
+        normalized: list[dict[str, str]] = []
+        for account in accounts:
+            if not isinstance(account, dict):
+                continue
+            account_id = str(
+                account.get("accountId")
+                or account.get("account_id")
+                or ""
+            ).strip()
+            if not account_id:
+                continue
+            normalized.append(
+                {
+                    "account_id": account_id,
+                    "name": str(
+                        account.get("name") or "Fansly model"
+                    ).strip(),
+                    "country_code": str(
+                        account.get("country") or ""
+                    ).strip().upper(),
+                }
+            )
+        return normalized
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
             raise AuthError("APIFANSLY_API_KEY is not configured")

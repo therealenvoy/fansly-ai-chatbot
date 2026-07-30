@@ -1004,7 +1004,7 @@ function saveBible(){var c=document.getElementById('bed').value,done=document.ge
 
 async function loadModelSetup(){
   var c=document.getElementById('content');
-  c.innerHTML=pageHead('Workspace','Model Setup','Connect and select Fansly creator accounts through APIFansly.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>')+'<p class="muted-note">Loading connected models…</p>';
+  c.innerHTML=pageHead('Workspace','Model Setup','Connect and select Fansly creator accounts through APIFansly.','<button class="btn-ghost" data-action="sync-models">Sync APIFansly accounts</button>')+'<p class="muted-note">Loading connected models…</p>';
   var data=await F('/api/models');modelSetupData=data;renderModelRail(data);
   if(!data||!data.available){c.innerHTML=pageHead('Workspace','Model Setup','APIFansly model management is unavailable.','')+'<section class="block"><p class="block-copy" style="color:var(--amber)">The creator registry or APIFansly API key is not ready.</p></section>';return}
   var models=data.models||[],cards=models.map(function(model){
@@ -1012,8 +1012,9 @@ async function loadModelSetup(){
     var runtime=model.chat_runtime_active?'Chat runtime active':'Posting + analytics only · chat bot off';
     return'<article class="model-card'+(model.selected?' selected':'')+'">'+avatar+'<div class="model-card-copy"><h3>'+esc(model.display_name||model.creator_id)+'</h3><p>'+(model.username?'@'+esc(model.username):esc(model.creator_id))+'</p><div class="model-state '+(model.chat_runtime_active?'':'limited')+'">'+esc(runtime)+'</div></div>'+(model.selected?'<span class="badge avg">Selected</span>':'<button class="btn-ghost" data-action="select-model" data-creator-id="'+attr(model.creator_id)+'">Select</button>')+'</article>';
   }).join('');
-  var h=pageHead('Workspace','Model Setup','Each model has isolated APIFansly posting, analytics, CRM data, and settings. New models start with chat automation disabled.','');
+  var h=pageHead('Workspace','Model Setup','Each model has isolated APIFansly posting, analytics, CRM data, and settings. New models start with chat automation disabled.','<button class="btn-ghost" data-action="sync-models">Sync APIFansly accounts</button>');
   h+='<section class="block"><h3>Connected models</h3><p class="block-copy">Changing the selected model never changes the production chat runtime. It only switches the owner dashboard workspace.</p><div class="model-grid">'+(cards||'<p class="muted-note">No connected models.</p>')+'</div></section>';
+  h+='<p class="muted-note" id="model-sync-result">Accounts already connected in APIFansly are imported without another login or 2FA.</p>';
   h+='<section class="block model-connect"><h3>Connect another model</h3><p class="block-copy">Your Fansly password is sent directly to APIFansly for connection and is never written to this database or logs. A pending 2FA attempt stays in server memory for at most ten minutes.</p><div id="model-connect-form"><div class="g2"><div><label for="model-label">Model name</label><input id="model-label" maxlength="64" autocomplete="off" placeholder="Creator display name"></div><div><label for="model-country">Country code</label><input id="model-country" maxlength="2" value="US" autocomplete="country"></div><div><label for="model-username">Fansly login</label><input id="model-username" maxlength="255" autocomplete="username" spellcheck="false"></div><div><label for="model-password">Fansly password</label><input id="model-password" type="password" maxlength="512" autocomplete="current-password"></div></div><div style="margin-top:12px"><button class="btn" data-action="connect-model">Connect model</button> <span id="model-connect-result"></span></div></div></section>';
   c.innerHTML=h;
 }
@@ -1059,7 +1060,31 @@ function renderModelRail(data){
 
 async function loadModelRail(){
   if(IS_POSTING_VA)return;
-  renderModelRail(await F('/api/models'));
+  var data=await F('/api/models');
+  renderModelRail(data);
+  var lastSync=0;
+  try{lastSync=Number(localStorage.getItem('fansly-model-sync-at')||0)}catch(error){}
+  if(data&&data.available&&(data.models||[]).length<=1&&!lastSync)await syncManagedModels(false);
+}
+
+async function syncManagedModels(showStatus){
+  if(IS_POSTING_VA)return null;
+  var result=document.getElementById('model-sync-result');
+  document.querySelectorAll('[data-action="sync-models"]').forEach(function(button){button.disabled=true});
+  if(showStatus&&result)result.textContent='Syncing connected APIFansly accounts…';
+  try{
+    var response=await M('/api/models/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Account sync failed');
+    modelSetupData=data;renderModelRail(data);
+    try{localStorage.setItem('fansly-model-sync-at',String(Date.now()))}catch(error){}
+    if(showStatus&&currentTab==='model-setup'){await loadModelSetup();result=document.getElementById('model-sync-result');if(result){result.textContent='Synced '+Number(data.provider_count||0)+' connected APIFansly accounts.';result.style.color='var(--green)'}}
+    return data;
+  }catch(error){
+    if(showStatus&&result){result.textContent=error.message||'Account sync failed';result.style.color='var(--red)'}
+    return null;
+  }finally{
+    document.querySelectorAll('[data-action="sync-models"]').forEach(function(button){button.disabled=false});
+  }
 }
 
 function loadSequences(){
@@ -1309,6 +1334,7 @@ document.addEventListener('click',function(event){
   else if(action==='fyp-tab'){fypAnalyticsView=control.dataset.view||'overview';renderFypAnalytics()}
   else if(action==='connect-model')connectModel();
   else if(action==='verify-model')verifyModel();
+  else if(action==='sync-models')syncManagedModels(true);
   else if(action==='select-model')selectModel(control.dataset.creatorId||'');
   else if(action==='open-model-setup')navTo('model-setup');
   else if(action==='close-drawer')closeDrawer();

@@ -1080,6 +1080,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return path in {
                 "/api/models/connect",
                 "/api/models/verify-2fa",
+                "/api/models/sync",
                 "/api/models/select",
                 "/api/bulk-posting/media",
                 "/api/bulk-posting/schedule",
@@ -1252,6 +1253,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._bulk_posting_schedule(b)
         if p=="/api/fyp-analytics/refresh":
             return self._fyp_analytics_refresh(b)
+        if p=="/api/models/sync": return self._model_sync()
         if p=="/api/models/connect": return self._model_connect(b)
         if p=="/api/models/verify-2fa": return self._model_verify_2fa(b)
         if p=="/api/models/select": return self._model_select(b)
@@ -1269,6 +1271,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 },
                 503,
             )
+        return self.j(self._models_payload(service))
+
+    def _models_payload(self, service, **extra):
         models = service.list_public()
         selected = self.creator_id
         for model in models:
@@ -1276,14 +1281,41 @@ class DashboardHandler(BaseHTTPRequestHandler):
             model["chat_runtime_active"] = (
                 model["creator_id"] == self.server.creator_id
             )
-        return self.j(
-            {
-                "available": True,
-                "selected_creator_id": selected,
-                "runtime_creator_id": self.server.creator_id,
-                "models": models,
-            }
-        )
+        return {
+            "available": True,
+            "selected_creator_id": selected,
+            "runtime_creator_id": self.server.creator_id,
+            "models": models,
+            **extra,
+        }
+
+    def _model_sync(self):
+        service = getattr(self.server, "creator_connections", None)
+        if service is None:
+            return self.j({"error": "Model Setup is unavailable"}, 503)
+        try:
+            result = service.sync_connected_accounts()
+            return self.j(
+                self._models_payload(
+                    service,
+                    provider_count=result["provider_count"],
+                    imported=result["imported"],
+                )
+            )
+        except TimeoutError:
+            return self.j(
+                {"error": "APIFansly account sync timed out"},
+                504,
+            )
+        except Exception as error:
+            logger.warning(
+                "APIFansly account sync failed: %s",
+                type(error).__name__,
+            )
+            return self.j(
+                {"error": "APIFansly could not sync connected accounts"},
+                502,
+            )
 
     def _model_connect(self, body):
         service = getattr(self.server, "creator_connections", None)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
 import re
 import secrets
 import threading
@@ -185,6 +186,86 @@ class CreatorConnectionRepository:
             value = connection.execute(statement).scalar_one_or_none()
         return str(value) if value else None
 
+    def creator_id_for_provider_account(
+        self,
+        provider_account_id: str,
+    ) -> str | None:
+        statement = select(
+            CREATOR_CONNECTIONS.c.creator_id
+        ).where(
+            CREATOR_CONNECTIONS.c.provider == "apifansly",
+            CREATOR_CONNECTIONS.c.provider_account_id
+            == provider_account_id,
+        )
+        with self.engine.connect() as connection:
+            value = connection.execute(statement).scalar_one_or_none()
+        return str(value) if value else None
+
+    def creator_id_exists(self, creator_id: str) -> bool:
+        statement = select(CREATORS.c.id).where(CREATORS.c.id == creator_id)
+        with self.engine.connect() as connection:
+            return connection.execute(statement).scalar_one_or_none() is not None
+
+    def sync_managed_account(
+        self,
+        *,
+        creator_id: str,
+        provider_account_id: str,
+        display_name: str,
+        country_code: str | None,
+    ) -> None:
+        """Upsert provider control-plane metadata without enabling chat."""
+        now = utcnow()
+        with self.engine.begin() as connection:
+            creator = self._insert(CREATORS).values(
+                id=creator_id,
+                created_at=now,
+                updated_at=now,
+            )
+            if hasattr(creator, "on_conflict_do_update"):
+                creator = creator.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_={"updated_at": now},
+                )
+            connection.execute(creator)
+            values = {
+                "creator_id": creator_id,
+                "provider": "apifansly",
+                "provider_account_id": provider_account_id,
+                "display_name": display_name,
+                "country_code": country_code,
+                "status": "connected",
+                "last_verified_at": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+            statement = self._insert(CREATOR_CONNECTIONS).values(**values)
+            if hasattr(statement, "on_conflict_do_update"):
+                statement = statement.on_conflict_do_update(
+                    index_elements=["creator_id"],
+                    set_={
+                        "provider": "apifansly",
+                        "provider_account_id": provider_account_id,
+                        "display_name": display_name,
+                        "country_code": country_code,
+                        "status": "connected",
+                        "last_verified_at": now,
+                        "updated_at": now,
+                    },
+                )
+            connection.execute(statement)
+            disabled = self._insert(CREATOR_SETTINGS).values(
+                creator_id=creator_id,
+                key="bot_enabled",
+                value="false",
+                updated_at=now,
+            )
+            if hasattr(disabled, "on_conflict_do_nothing"):
+                disabled = disabled.on_conflict_do_nothing(
+                    index_elements=["creator_id", "key"]
+                )
+            connection.execute(disabled)
+
     def contains(self, creator_id: str) -> bool:
         return self.provider_account_id(creator_id) is not None
 
@@ -267,6 +348,41 @@ class CreatorConnectionService:
 
     def list_public(self) -> list[dict[str, Any]]:
         return self.repository.list_public()
+
+    def sync_connected_accounts(self) -> dict[str, Any]:
+        """Import APIFansly-managed accounts into the local model registry."""
+        accounts = self.connector.list_accounts()
+        imported = 0
+        for account in accounts:
+            provider_account_id = account["account_id"]
+            creator_id = self.repository.creator_id_for_provider_account(
+                provider_account_id
+            )
+            if creator_id is None:
+                creator_id = self._available_creator_id(
+                    account.get("name") or "Fansly model",
+                    provider_account_id,
+                )
+                imported += 1
+            country_code = str(
+                account.get("country_code") or ""
+            ).strip().upper()
+            if not COUNTRY_CODE_PATTERN.fullmatch(country_code):
+                country_code = None
+            display_name = str(
+                account.get("name") or "Fansly model"
+            ).strip() or "Fansly model"
+            self.repository.sync_managed_account(
+                creator_id=creator_id,
+                provider_account_id=provider_account_id,
+                display_name=display_name,
+                country_code=country_code,
+            )
+        return {
+            "provider_count": len(accounts),
+            "imported": imported,
+            "models": self.repository.list_public(),
+        }
 
     def connect(
         self,
@@ -385,6 +501,33 @@ class CreatorConnectionService:
                 "status": "connected",
             },
         }
+
+    def _available_creator_id(
+        self,
+        label: str,
+        provider_account_id: str,
+    ) -> str:
+        digest = hashlib.sha256(
+            provider_account_id.encode("utf-8")
+        ).hexdigest()
+        try:
+            base = _creator_id(label)
+        except CreatorConnectionError:
+            base = f"fansly_model_{digest[:10]}"
+        if not self.repository.creator_id_exists(base):
+            return base
+        candidate = f"{base[:54].rstrip('_')}_{digest[:8]}"
+        if not self.repository.creator_id_exists(candidate):
+            return candidate
+        for offset in range(8, len(digest) - 3, 4):
+            candidate = (
+                f"{base[:49].rstrip('_')}_{digest[:offset + 4]}"
+            )[:64].rstrip("_")
+            if not self.repository.creator_id_exists(candidate):
+                return candidate
+        raise CreatorConnectionError(
+            "Could not assign a unique local model identifier"
+        )
 
     def _validate(
         self,
