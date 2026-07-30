@@ -636,6 +636,7 @@ background_threads: list[threading.Thread] = []
 unread_backlog = UnreadBacklogController(
     bot=bot,
     state_repo=state_repo,
+    creator_id=CREATOR_ID,
     inbound_wakeup=reply_wakeup,
     guard_factory=lambda: provider_worker("unread-backlog"),
 )

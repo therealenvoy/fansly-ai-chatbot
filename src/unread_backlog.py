@@ -31,11 +31,19 @@ class UnreadBacklogController:
         *,
         bot: FanslyBot | None,
         state_repo: ConversationStateRepository,
+        creator_id: str | None = None,
         inbound_wakeup=None,
         guard_factory: Callable[[], ContextManager] | None = None,
     ):
         self.bot = bot
         self.state_repo = state_repo
+        resolved_creator_id = creator_id or getattr(bot, "creator_id", None)
+        self.creator_id = (
+            resolved_creator_id.strip()
+            if isinstance(resolved_creator_id, str)
+            and resolved_creator_id.strip()
+            else "unavailable"
+        )
         self.inbound_wakeup = inbound_wakeup
         self.guard_factory = guard_factory or nullcontext
         self._lock = threading.Lock()
@@ -201,7 +209,7 @@ class UnreadBacklogController:
 
     def _load(self) -> dict:
         raw = self.state_repo.get_poll_cursor(
-            self.bot.creator_id if self.bot is not None else "unavailable",
+            self.creator_id,
             self.SCOPE,
         )
         if not raw:
@@ -213,11 +221,8 @@ class UnreadBacklogController:
         return state if isinstance(state, dict) else self._default_state()
 
     def _save(self, state: dict) -> None:
-        creator_id = (
-            self.bot.creator_id if self.bot is not None else "unavailable"
-        )
         self.state_repo.set_poll_cursor(
-            creator_id,
+            self.creator_id,
             self.SCOPE,
             json.dumps(state, separators=(",", ":"), sort_keys=True),
         )

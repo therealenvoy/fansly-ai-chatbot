@@ -75,3 +75,26 @@ def test_empty_page_completes_without_waking_or_sending():
     assert snapshot["phase"] == "complete"
     assert snapshot["queued_inbound"] == 0
     wakeup.set.assert_not_called()
+
+
+def test_explicit_creator_id_avoids_mock_runtime_identifier():
+    engine = create_database_engine(
+        "sqlite:///:memory:",
+        environment={"APP_ENV": "test"},
+    )
+    metadata.create_all(engine)
+    repository = ConversationStateRepository(engine)
+    bot = MagicMock()
+    bot.creator_id = MagicMock()
+    bot.enabled = True
+    bot.enable_unread_replies = True
+    bot.client.list_unread_chats_page = MagicMock()
+
+    controller = UnreadBacklogController(
+        bot=bot,
+        state_repo=repository,
+        creator_id="creator-config",
+    )
+
+    assert controller.creator_id == "creator-config"
+    assert controller.snapshot()["phase"] == "not_started"
