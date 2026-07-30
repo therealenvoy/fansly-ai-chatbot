@@ -814,8 +814,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     @property
     def creator_id(self):
-        if getattr(self, "_dashboard_role", "owner") != "owner":
-            return self.server.creator_id
         raw = self.headers.get("Cookie", "")
         try:
             cookies = SimpleCookie()
@@ -1044,10 +1042,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "GET": {
                 "/",
                 "/dashboard",
+                "/api/models",
                 "/api/bulk-posting",
                 "/api/fyp-analytics",
             },
             "POST": {
+                "/api/models/select",
                 "/api/bulk-posting/media",
                 "/api/bulk-posting/schedule",
                 "/api/fyp-analytics/refresh",

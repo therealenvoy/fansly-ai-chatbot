@@ -19,6 +19,7 @@ from src.apifansly_client import ApifanslyAccountConnector
 from src.fansly_client import ProviderCapabilities
 from src.auto_messages.control import AutoMessagesControlService
 from src.bot import LaunchGuardError
+from src.creators import CreatorConnectionRepository
 from src.notes.repository import FAN_NOTES_TABLE
 from src.memory.store import MessageStore
 from src.persistence.crm import CrmSyncRepository
@@ -1352,6 +1353,73 @@ class TestDashboardSecurity:
         assert "Posting + FYP Analytics" in body
         assert "data-tab=\"bulk-posting\"" in body
         assert "data-tab=\"fyp-analytics\"" in body
+        assert 'class="model-rail"' in body
+        assert ".role-posting_va .model-rail{display:none!important}" not in body
+        assert "loadModelRail();\n  navTo(vaStart===" in body
+
+    def test_posting_va_can_list_and_select_connected_models(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        CreatorConnectionRepository(
+            bot.note_repo.engine
+        ).sync_managed_account(
+            creator_id="second_creator",
+            provider_account_id="fansly_second_account",
+            display_name="Second Creator",
+            country_code="US",
+        )
+        authorization = _authorization(
+            TEST_VA_USER,
+            TEST_VA_PASSWORD,
+        )
+
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/api/models",
+            headers={"Authorization": authorization},
+        )
+
+        assert status == 200
+        assert len(body["models"]) == 2
+        assert all(
+            "provider_account_id" not in model
+            and "native_account_id" not in model
+            for model in body["models"]
+        )
+
+        status, body, headers = _request(
+            host,
+            "POST",
+            "/api/models/select",
+            body=json.dumps({"creator_id": "second_creator"}),
+            headers={
+                "Authorization": authorization,
+                "X-CSRF-Token": TEST_CSRF_TOKEN,
+                "Origin": f"http://{host}",
+                "Content-Type": "application/json",
+            },
+        )
+
+        assert status == 200
+        assert body == {"selected_creator_id": "second_creator"}
+        selection_cookie = headers["set-cookie"].split(";", 1)[0]
+
+        status, selected, _ = _request(
+            host,
+            "GET",
+            "/api/models",
+            headers={
+                "Authorization": authorization,
+                "Cookie": selection_cookie,
+            },
+        )
+
+        assert status == 200
+        assert selected["selected_creator_id"] == "second_creator"
+        assert sum(model["selected"] for model in selected["models"]) == 1
 
     def test_posting_va_is_forbidden_from_owner_api(self, running_server):
         host, _, _ = running_server
