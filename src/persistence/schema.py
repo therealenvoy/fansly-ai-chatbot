@@ -127,6 +127,28 @@ CREATORS = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
 
+CREATOR_CONNECTIONS = Table(
+    "creator_connections",
+    metadata,
+    Column(
+        "creator_id",
+        String(64),
+        ForeignKey("creators.id"),
+        primary_key=True,
+    ),
+    Column("provider", String(32), nullable=False, default="apifansly"),
+    Column("provider_account_id", String(128), nullable=False, unique=True),
+    Column("native_account_id", String(128), nullable=True, unique=True),
+    Column("display_name", String(255), nullable=False),
+    Column("username", String(255), nullable=True),
+    Column("avatar_url", Text, nullable=True),
+    Column("country_code", String(2), nullable=True),
+    Column("status", String(32), nullable=False, default="connected"),
+    Column("last_verified_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+
 FANS = Table(
     "fans",
     metadata,

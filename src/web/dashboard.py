@@ -15,6 +15,7 @@ import secrets
 import tempfile
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
+from http.cookies import SimpleCookie
 
 import yaml
 from pathlib import Path
@@ -27,8 +28,10 @@ from sqlalchemy.exc import IntegrityError
 
 from ..auto_messages.control import AutoMessagesControlError
 from ..auto_messages.metrics import AutoMessagesMetrics
-from ..bulk_posting import BulkPostingError
-from ..fyp_analytics import FypAnalyticsError
+from ..bulk_posting import BulkPostingError, BulkPostingService
+from ..creators import CreatorConnectionRepository, CreatorConnectionService
+from ..creators.connections import CreatorConnectionError
+from ..fyp_analytics import FypAnalyticsError, FypAnalyticsService
 from ..engagement.control_plane import NativePlanRepository
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
@@ -800,11 +803,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     @property
     def client(self):
+        service = getattr(self.server, "creator_connections", None)
+        if self.creator_id != self.server.creator_id:
+            return (
+                service.client_for(self.creator_id)
+                if service is not None
+                else None
+            )
         return self.server.client
 
     @property
     def creator_id(self):
-        return self.server.creator_id
+        if getattr(self, "_dashboard_role", "owner") != "owner":
+            return self.server.creator_id
+        raw = self.headers.get("Cookie", "")
+        try:
+            cookies = SimpleCookie()
+            cookies.load(raw)
+            value = cookies["fansly_creator"].value
+            creator_id, signature = value.rsplit(".", 1)
+        except (KeyError, ValueError):
+            return self.server.creator_id
+        expected = hmac.new(
+            self.server.model_selection_secret,
+            creator_id.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return self.server.creator_id
+        repository = getattr(self.server, "creator_connection_repository", None)
+        if repository is None or not repository.contains(creator_id):
+            return self.server.creator_id
+        return creator_id
 
     @property
     def dashboard_repo(self) -> DashboardReadRepository | None:
@@ -818,11 +848,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     @property
     def script_repo(self) -> ScriptTemplateRepository | None:
-        return getattr(self.server, "script_repo", None)
+        if self.engine is None:
+            return None
+        return ScriptTemplateRepository(self.engine, self.creator_id)
 
     @property
     def media_repo(self) -> MediaAssetRepository | None:
-        return getattr(self.server, "media_repo", None)
+        if self.engine is None:
+            return None
+        return MediaAssetRepository(self.engine, self.creator_id)
 
     @property
     def ai_settings(self):
@@ -842,11 +876,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     @property
     def bulk_posting(self):
-        return getattr(self.server, "bulk_posting", None)
+        if self.creator_id == self.server.creator_id:
+            return getattr(self.server, "bulk_posting", None)
+        service = getattr(self.server, "creator_connections", None)
+        if service is None or self.engine is None:
+            return None
+        cache = self.server.creator_bulk_posting
+        if self.creator_id not in cache:
+            cache[self.creator_id] = BulkPostingService(
+                self.engine,
+                creator_id=self.creator_id,
+                client=service.client_for(self.creator_id),
+            )
+        return cache[self.creator_id]
 
     @property
     def fyp_analytics(self):
-        return getattr(self.server, "fyp_analytics", None)
+        if self.creator_id == self.server.creator_id:
+            return getattr(self.server, "fyp_analytics", None)
+        service = getattr(self.server, "creator_connections", None)
+        if service is None:
+            return None
+        cache = self.server.creator_fyp_analytics
+        if self.creator_id not in cache:
+            cache[self.creator_id] = FypAnalyticsService(
+                client=service.client_for(self.creator_id)
+            )
+        return cache[self.creator_id]
 
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
@@ -999,6 +1055,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
         }
         return path in allowed.get(self.command, set())
 
+    def _model_scope_can_access(self) -> bool:
+        if getattr(self, "_dashboard_role", "owner") != "owner":
+            return True
+        if self.creator_id == self.server.creator_id:
+            return True
+        path = self.path.split("?", 1)[0]
+        allowed_get = {
+            "/",
+            "/dashboard",
+            "/api/models",
+            "/api/bulk-posting",
+            "/api/fyp-analytics",
+            "/api/fans",
+            "/api/conversations",
+            "/api/kpis",
+        }
+        if self.command == "GET":
+            return (
+                path in allowed_get
+                or path.startswith("/api/conversations/")
+            )
+        if self.command == "POST":
+            return path in {
+                "/api/models/connect",
+                "/api/models/verify-2fa",
+                "/api/models/select",
+                "/api/bulk-posting/media",
+                "/api/bulk-posting/schedule",
+                "/api/fyp-analytics/refresh",
+            }
+        return False
+
     def _csrf_is_valid(self):
         supplied = self.headers.get("X-CSRF-Token", "")
         token_ok = hmac.compare_digest(
@@ -1040,6 +1128,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return False
         if not self._role_can_access():
             self.j({"error": "forbidden for this dashboard role"}, 403)
+            return False
+        if not self._model_scope_can_access():
+            self.j(
+                {
+                    "error": (
+                        "This model has posting and analytics access only; "
+                        "its chat runtime is disabled"
+                    )
+                },
+                409,
+            )
             return False
         if require_csrf and not self._csrf_is_valid():
             self.j({"error": "invalid CSRF token or request origin"}, 403)
@@ -1096,6 +1195,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/auto-messages": return self._auto_messages_status()
         if p=="/api/bulk-posting": return self._bulk_posting_status()
         if p=="/api/fyp-analytics": return self._fyp_analytics_status(q)
+        if p=="/api/models": return self._models_status()
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1152,7 +1252,119 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._bulk_posting_schedule(b)
         if p=="/api/fyp-analytics/refresh":
             return self._fyp_analytics_refresh(b)
+        if p=="/api/models/connect": return self._model_connect(b)
+        if p=="/api/models/verify-2fa": return self._model_verify_2fa(b)
+        if p=="/api/models/select": return self._model_select(b)
         self.j({"error":"not found"},404)
+
+    def _models_status(self):
+        service = getattr(self.server, "creator_connections", None)
+        if service is None:
+            return self.j(
+                {
+                    "available": False,
+                    "selected_creator_id": self.server.creator_id,
+                    "runtime_creator_id": self.server.creator_id,
+                    "models": [],
+                },
+                503,
+            )
+        models = service.list_public()
+        selected = self.creator_id
+        for model in models:
+            model["selected"] = model["creator_id"] == selected
+            model["chat_runtime_active"] = (
+                model["creator_id"] == self.server.creator_id
+            )
+        return self.j(
+            {
+                "available": True,
+                "selected_creator_id": selected,
+                "runtime_creator_id": self.server.creator_id,
+                "models": models,
+            }
+        )
+
+    def _model_connect(self, body):
+        service = getattr(self.server, "creator_connections", None)
+        if service is None:
+            return self.j({"error": "Model Setup is unavailable"}, 503)
+        try:
+            payload = json.loads(body or "{}")
+            result = service.connect(
+                username=str(payload.get("username") or ""),
+                password=str(payload.get("password") or ""),
+                label=str(payload.get("label") or ""),
+                country_code=str(
+                    payload.get("country_code") or ""
+                ).strip().upper(),
+            )
+            return self.j(result, 202 if result.get("requires_2fa") else 201)
+        except (
+            CreatorConnectionError,
+            json.JSONDecodeError,
+            TimeoutError,
+        ) as error:
+            return self.j({"error": str(error)}, 400)
+        except Exception as error:
+            logger.warning(
+                "APIFansly model connection failed: %s",
+                type(error).__name__,
+            )
+            return self.j(
+                {"error": "APIFansly could not connect this model"},
+                502,
+            )
+
+    def _model_verify_2fa(self, body):
+        service = getattr(self.server, "creator_connections", None)
+        if service is None:
+            return self.j({"error": "Model Setup is unavailable"}, 503)
+        try:
+            payload = json.loads(body or "{}")
+            result = service.verify_2fa(
+                attempt=str(payload.get("attempt") or ""),
+                code=str(payload.get("code") or ""),
+            )
+            return self.j(result, 201)
+        except (CreatorConnectionError, json.JSONDecodeError) as error:
+            return self.j({"error": str(error)}, 400)
+        except Exception as error:
+            logger.warning(
+                "APIFansly model verification failed: %s",
+                type(error).__name__,
+            )
+            return self.j(
+                {"error": "APIFansly could not verify this model"},
+                502,
+            )
+
+    def _model_select(self, body):
+        repository = getattr(
+            self.server,
+            "creator_connection_repository",
+            None,
+        )
+        try:
+            payload = json.loads(body or "{}")
+            creator_id = str(payload.get("creator_id") or "")
+        except json.JSONDecodeError:
+            return self.j({"error": "invalid selection"}, 400)
+        if repository is None or not repository.contains(creator_id):
+            return self.j({"error": "unknown model"}, 404)
+        signature = hmac.new(
+            self.server.model_selection_secret,
+            creator_id.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        cookie = (
+            f"fansly_creator={creator_id}.{signature}; Path=/; "
+            "Max-Age=2592000; HttpOnly; Secure; SameSite=Strict"
+        )
+        return self.j(
+            {"selected_creator_id": creator_id},
+            extra_headers={"Set-Cookie": cookie},
+        )
 
     def _bulk_posting_status(self):
         service = self.bulk_posting
@@ -4617,6 +4829,42 @@ class DashboardServer:
         self.server.auto_messages_control = auto_messages_control
         self.server.bulk_posting = bulk_posting
         self.server.fyp_analytics = fyp_analytics
+        self.server.creator_bulk_posting = {}
+        self.server.creator_fyp_analytics = {}
+        self.server.creator_connection_repository = None
+        self.server.creator_connections = None
+        if self.server.engine is not None:
+            connection_repository = CreatorConnectionRepository(
+                self.server.engine
+            )
+            try:
+                connection_repository.ensure_legacy(
+                    self.server.creator_id,
+                    (
+                        os.getenv("FANSLY_ACCOUNT_ID", "").strip()
+                        or self.server.provider_account_id
+                    ),
+                    display_name=(
+                        os.getenv("CREATOR_DISPLAY_NAME", "").strip()
+                        or self.server.creator_id.replace("_", " ").title()
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "Could not initialize the creator connection registry"
+                )
+            self.server.creator_connection_repository = connection_repository
+            self.server.creator_connections = CreatorConnectionService(
+                connection_repository,
+                api_key=os.getenv(
+                    "APIFANSLY_API_KEY",
+                    os.getenv("FANSLY_API_KEY", ""),
+                ),
+                webhook_token=os.getenv(
+                    "APIFANSLY_WEBHOOK_TOKEN",
+                    "",
+                ),
+            )
         self.server.credit_governor = credit_governor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
@@ -4636,6 +4884,7 @@ class DashboardServer:
             if dashboard_password is None
             else dashboard_password
         )
+        self.server.model_selection_secret = secrets.token_bytes(32)
         self.server.va_dashboard_user = (
             os.getenv("VA_DASHBOARD_USER", "")
             if va_dashboard_user is None

@@ -69,6 +69,102 @@ class ResponseParser:
         return str(value) if value not in (None, "") else None
 
 
+class ApifanslyAccountConnector:
+    """Account onboarding client that never retains Fansly credentials."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = BASE_URL,
+        timeout: float = 30.0,
+    ):
+        self.api_key = api_key.strip()
+        self.client = httpx.Client(
+            base_url=base_url,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": self.api_key,
+            },
+            timeout=timeout,
+        )
+
+    def connect(
+        self,
+        *,
+        username: str,
+        password: str,
+        name: str,
+        country_code: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/connect",
+            {
+                "username": username,
+                "password": password,
+                "name": name,
+                "countryCode": country_code,
+            },
+        )
+
+    def verify_2fa(
+        self,
+        *,
+        username: str,
+        password: str,
+        two_factor_token: str,
+        two_factor_code: str,
+        name: str,
+        country_code: str,
+    ) -> dict[str, Any]:
+        return self._post(
+            "/verify-2fa",
+            {
+                "username": username,
+                "password": password,
+                "twoFactorToken": two_factor_token,
+                "twoFactorCode": two_factor_code,
+                "name": name,
+                "countryCode": country_code,
+            },
+        )
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.api_key:
+            raise AuthError("APIFANSLY_API_KEY is not configured")
+        try:
+            response = self.client.post(path, json=payload)
+        except httpx.TimeoutException as error:
+            raise TimeoutError("APIFansly account connection timed out") from error
+        except httpx.HTTPError as error:
+            raise RuntimeError("APIFansly account connection failed") from error
+        if response.status_code in (401, 403):
+            raise AuthError("APIFansly rejected the account credentials")
+        if response.status_code == 402:
+            raise PaymentRequiredError("APIFansly credits are required")
+        if response.status_code == 429:
+            raise RuntimeError("APIFansly account connection is rate limited")
+        if response.status_code >= 400:
+            raise RuntimeError("APIFansly could not connect this account")
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise RuntimeError("APIFansly returned an invalid response") from error
+        if not isinstance(body, dict):
+            raise RuntimeError("APIFansly returned an invalid response")
+        status = body.get("statusCode")
+        if status and not 200 <= int(status) < 300:
+            raise RuntimeError("APIFansly could not connect this account")
+        data = body.get("data", body)
+        if isinstance(data, dict) and isinstance(data.get("data"), dict):
+            data = data["data"]
+        if isinstance(data, dict) and isinstance(data.get("response"), dict):
+            data = data["response"]
+        if not isinstance(data, dict):
+            raise RuntimeError("APIFansly returned an invalid response")
+        return data
+
+
 class ApifanslyClient(FanslyApiClient):
     """Synchronous HTTP adapter for apifansly.com."""
 
@@ -135,6 +231,13 @@ class ApifanslyClient(FanslyApiClient):
     def verify_auth(self) -> bool:
         self._resolve_creator_id()
         return True
+
+    def current_account(self) -> dict[str, Any]:
+        """Return the documented /me response for this connected account."""
+        self._validate_credentials()
+        payload = self._request("GET", f"/{self.account_id}/me")
+        response = ResponseParser.parse(payload, default={})
+        return response if isinstance(response, dict) else {}
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         self._validate_credentials()
