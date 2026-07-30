@@ -204,8 +204,14 @@ Current live Create Post rules, re-verified from the rendered page HTML on 2026-
 - `mediaIds` contains media IDs returned by Vault Media or Upload Media; the simple documented form is a string array.
 - `postToFYP` is optional and requires a public video of at least three seconds.
 - `scheduledFor` and `expiresAt` are Unix timestamps in milliseconds.
-- The dashboard `datetime-local` picker is interpreted in the operator's
-  browser timezone, converted to UTC, and then sent as Unix milliseconds.
+- The dashboard `datetime-local` picker is fixed to
+  `America/New_York`, independent of the operator's device timezone. It
+  converts New York wall time to UTC and then sends Unix milliseconds.
+  EST/EDT changes are handled by the IANA timezone; nonexistent spring-forward
+  wall times are rejected instead of silently shifted.
+- Daily, weekly, and monthly recurrences are advanced in New York wall time
+  before conversion back to UTC, so their displayed hour stays stable across
+  daylight-saving changes.
 - `wallIds` is optional; omitting it posts to the default wall.
 - The success response contains generated `attachments`, but `attachments` is not the current create request field.
 - Update behavior must be separately verified before assuming omitted current content/media are preserved.

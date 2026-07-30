@@ -10,6 +10,7 @@ import os
 import re
 import threading
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import and_, case, func, insert, select, update
@@ -24,6 +25,7 @@ logger = logging.getLogger("fansly-bot.bulk-posting")
 
 TAG_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,50}$")
 RECURRENCES = {"one_time", "daily", "weekly", "monthly"}
+SCHEDULING_TIMEZONE = ZoneInfo("America/New_York")
 
 
 class BulkPostingError(ValueError):
@@ -55,16 +57,19 @@ def _utc(value: datetime) -> datetime:
 def _next_occurrence(value: datetime, recurrence: str) -> datetime | None:
     if recurrence == "one_time":
         return None
+    local_value = _utc(value).astimezone(SCHEDULING_TIMEZONE)
     if recurrence == "daily":
-        return value + timedelta(days=1)
-    if recurrence == "weekly":
-        return value + timedelta(days=7)
-    if recurrence == "monthly":
-        year = value.year + (1 if value.month == 12 else 0)
-        month = 1 if value.month == 12 else value.month + 1
-        day = min(value.day, calendar.monthrange(year, month)[1])
-        return value.replace(year=year, month=month, day=day)
-    raise BulkPostingError("Unsupported recurrence")
+        following = local_value + timedelta(days=1)
+    elif recurrence == "weekly":
+        following = local_value + timedelta(days=7)
+    elif recurrence == "monthly":
+        year = local_value.year + (1 if local_value.month == 12 else 0)
+        month = 1 if local_value.month == 12 else local_value.month + 1
+        day = min(local_value.day, calendar.monthrange(year, month)[1])
+        following = local_value.replace(year=year, month=month, day=day)
+    else:
+        raise BulkPostingError("Unsupported recurrence")
+    return following.astimezone(timezone.utc)
 
 
 class BulkPostingService:
@@ -227,6 +232,11 @@ class BulkPostingService:
         recurrence = str(payload.get("recurrence", "one_time")).strip()
         if recurrence not in RECURRENCES:
             raise BulkPostingError("Unsupported recurrence")
+        requested_timezone = str(
+            payload.get("scheduling_timezone") or SCHEDULING_TIMEZONE.key
+        ).strip()
+        if requested_timezone != SCHEDULING_TIMEZONE.key:
+            raise BulkPostingError("Scheduling timezone must be America/New_York")
         try:
             scheduled_for = _utc(
                 datetime.fromisoformat(
@@ -634,6 +644,7 @@ class BulkPostingService:
                 )
         status.update(
             {
+                "scheduling_timezone": SCHEDULING_TIMEZONE.key,
                 "walls": walls,
                 "provider_cache": {
                     "walls": {

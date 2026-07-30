@@ -1246,25 +1246,52 @@ async function loadBulkPosting(force){
   }
 }
 function bulkMetric(label,value,foot){return'<article class="bulk-kpi"><span class="label">'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(foot||'')+'</small></article>'}
-function browserTimezoneLabel(){
-  var zone='Local browser time',offset='';
+var BULK_SCHEDULING_TIME_ZONE='America/New_York';
+function bulkSchedulingTimezoneLabel(at){
+  var offset='';
   try{
-    zone=Intl.DateTimeFormat().resolvedOptions().timeZone||zone;
-    var part=new Intl.DateTimeFormat('en',{timeZoneName:'shortOffset'}).formatToParts(new Date()).find(function(item){return item.type==='timeZoneName'});
+    var part=new Intl.DateTimeFormat('en',{timeZone:BULK_SCHEDULING_TIME_ZONE,timeZoneName:'shortOffset'}).formatToParts(at||new Date()).find(function(item){return item.type==='timeZoneName'});
     offset=part&&part.value?part.value:'';
   }catch(error){}
-  return zone+(offset?' ('+offset.replace('GMT','UTC')+')':'');
+  return'New York · '+BULK_SCHEDULING_TIME_ZONE+(offset?' ('+offset.replace('GMT','UTC')+')':'');
+}
+function bulkSchedulingParts(date){
+  var parts={};
+  new Intl.DateTimeFormat('en-US',{timeZone:BULK_SCHEDULING_TIME_ZONE,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(date).forEach(function(part){if(part.type!=='literal')parts[part.type]=Number(part.value)});
+  return parts;
+}
+function bulkSchedulingIso(value){
+  if(!value)return'';
+  var match=String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if(!match)return'';
+  var wanted={year:Number(match[1]),month:Number(match[2]),day:Number(match[3]),hour:Number(match[4]),minute:Number(match[5]),second:Number(match[6]||0)};
+  var wall=Date.UTC(wanted.year,wanted.month-1,wanted.day,wanted.hour,wanted.minute,wanted.second),instant=wall;
+  for(var attempt=0;attempt<4;attempt++){
+    var observed=bulkSchedulingParts(new Date(instant));
+    var offset=Date.UTC(observed.year,observed.month-1,observed.day,observed.hour,observed.minute,observed.second)-instant;
+    var candidate=wall-offset;
+    if(candidate===instant)break;
+    instant=candidate;
+  }
+  var confirmed=bulkSchedulingParts(new Date(instant));
+  if(Object.keys(wanted).some(function(key){return wanted[key]!==confirmed[key]}))return'';
+  return new Date(instant).toISOString();
+}
+function formatBulkSchedulingTime(value){
+  var date=new Date(value);
+  if(isNaN(date.getTime()))return'—';
+  return new Intl.DateTimeFormat('en-US',{timeZone:BULK_SCHEDULING_TIME_ZONE,year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',timeZoneName:'short'}).format(date);
 }
 function renderBulkPosting(){
   var d=bulkPostingData||{},m=d.metrics||{},c=document.getElementById('content');
-  var next=m.next_post?new Date(m.next_post).toLocaleString():'—',rate=m.delivery_rate==null?'—':Number(m.delivery_rate).toFixed(1)+'%';
+  var next=m.next_post?formatBulkSchedulingTime(m.next_post):'—',rate=m.delivery_rate==null?'—':Number(m.delivery_rate).toFixed(1)+'%';
   var h=pageHead('Bulk Posting','Bulk Posting','Plan your content. Drop on autopilot.','');
   h+='<div class="bulk-kpis">'+bulkMetric('Scheduled Posts',m.scheduled_posts||0,'')+bulkMetric('Next Post',next,'')+bulkMetric('Recurring Rules',m.recurring_rules||0,'')+bulkMetric('Delivery Rate',rate,'last 30 days')+'</div>';
   h+='<div class="bulk-tabs"><div class="bulk-tab-list"><button class="bulk-tab'+(bulkPostingView==='schedule'?' active':'')+'" data-action="bulk-tab" data-view="schedule">Schedule Posts</button><button class="bulk-tab'+(bulkPostingView==='scheduled'?' active':'')+'" data-action="bulk-tab" data-view="scheduled">Already Scheduled</button></div>'+(bulkPostingView==='schedule'?'<button class="btn-ghost" data-action="add-bulk-card">Add post</button>':'')+'</div>';
   if(!d.available)h+='<section class="block"><p class="block-copy" style="color:var(--amber)">'+esc(d.reason||'Bulk Posting is not configured')+'</p></section>';
   if(bulkPostingView==='scheduled'){
     var rows=d.posts||[];
-    h+=rows.length?'<section class="block"><table class="bulk-table"><thead><tr><th>Schedule · '+esc(browserTimezoneLabel())+'</th><th>Caption</th><th>Media</th><th>Recurrence</th><th>Status</th></tr></thead><tbody>'+rows.map(function(p){return'<tr><td>'+esc(new Date(p.scheduled_for).toLocaleString())+'</td><td>'+esc(String(p.caption||'').slice(0,90)||'Media post')+'</td><td>'+Number(p.media_count||0)+'</td><td>'+esc(String(p.recurrence||'one_time').replace('_',' '))+'</td><td>'+esc(p.status||'')+'</td></tr>'}).join('')+'</tbody></table></section>':emptyState('□','No scheduled posts','Your scheduled posts will appear here.');
+    h+=rows.length?'<section class="block"><table class="bulk-table"><thead><tr><th>Schedule · New York (EST/EDT)</th><th>Caption</th><th>Media</th><th>Recurrence</th><th>Status</th></tr></thead><tbody>'+rows.map(function(p){return'<tr><td>'+esc(formatBulkSchedulingTime(p.scheduled_for))+'</td><td>'+esc(String(p.caption||'').slice(0,90)||'Media post')+'</td><td>'+Number(p.media_count||0)+'</td><td>'+esc(String(p.recurrence||'one_time').replace('_',' '))+'</td><td>'+esc(p.status||'')+'</td></tr>'}).join('')+'</tbody></table></section>':emptyState('□','No scheduled posts','Your scheduled posts will appear here.');
   }else{
     h+='<div class="bulk-grid">'+bulkPostingCards.map(function(card,index){return bulkCardMarkup(card,index,d)}).join('')+'</div>';
   }
@@ -1274,7 +1301,7 @@ function bulkCardMarkup(card,index,data){
   var walls=data.walls||[],disabled=!data.available?' disabled':'',remove=index?'<button class="bulk-card-remove" data-action="remove-bulk-card" data-card-id="'+card.id+'" aria-label="Remove post">×</button>':'';
   var wallOptions=walls.map(function(w){return'<option value="'+attr(w.id)+'"'+((card.wall_ids||[]).indexOf(String(w.id))>=0?' selected':'')+'>'+esc(w.name||'Wall')+'</option>'}).join('');
   var paidDisabled=data.paid_preview_supported?'':' disabled title="'+attr(data.paid_preview_reason||'Not supported by the provider')+'"';
-  return'<section class="bulk-card" data-bulk-card="'+card.id+'">'+remove+'<h3>Schedule a new post</h3><p class="bulk-card-copy">Drop content on autopilot. Recurring or one-time.</p><div class="bulk-fields"><div class="bulk-field-full"><label>Caption</label><textarea data-bulk-field="caption" maxlength="10000" placeholder="What’s your fans gonna read?">'+esc(card.caption||'')+'</textarea></div><div class="bulk-field-full"><label>Tags (comma or space separated, # optional)</label><div class="bulk-tags-row"><input data-bulk-field="tags" value="'+attr(card.tags||'')+'" placeholder="petite, kawaii, #fyp"><button class="bulk-spark" data-action="bulk-suggest-tags" data-card-id="'+card.id+'" title="Suggest tags from caption">✦</button></div></div><div><label>Schedule for</label><input data-bulk-field="scheduled_for" type="datetime-local" value="'+attr(card.scheduled_for||'')+'"><small class="bulk-timezone-note">'+esc(browserTimezoneLabel())+' · converted to UTC automatically</small></div><div><label>Recurrence</label><select data-bulk-field="recurrence">'+['one_time','daily','weekly','monthly'].map(function(value){return'<option value="'+value+'"'+(card.recurrence===value?' selected':'')+'>'+esc(value==='one_time'?'One-time':value.charAt(0).toUpperCase()+value.slice(1))+'</option>'}).join('')+'</select></div><div><label>Expires at (optional)</label><input data-bulk-field="expires_at" type="datetime-local" value="'+attr(card.expires_at||'')+'"><small class="bulk-timezone-note">'+esc(browserTimezoneLabel())+'</small></div><div><label>Walls</label><select data-bulk-field="walls" multiple size="'+Math.max(2,Math.min(4,walls.length||2))+'"'+disabled+'>'+wallOptions+'</select></div></div><div class="bulk-checks"><label><input data-bulk-field="carousel" type="checkbox"'+(card.carousel?' checked':'')+'> Group multiple media as one carousel</label><label'+(paidDisabled?' title="'+attr(data.paid_preview_reason||'Not supported')+'"':'')+'><input data-bulk-field="paid_preview" type="checkbox"'+paidDisabled+'> Use first image as paid-post preview</label></div><label>Media</label><div class="bulk-drop" data-action="choose-bulk-media" data-card-id="'+card.id+'"><input type="file" data-bulk-upload="'+card.id+'" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm" multiple hidden><span>⇧ &nbsp;<strong>Drop media here</strong> or click to upload — videos, photos, GIFs</span></div><div class="bulk-media-list" data-bulk-media-list="'+card.id+'">'+bulkMediaMarkup(card)+'</div><div class="bulk-status" data-bulk-status="'+card.id+'"></div><button class="btn" style="margin-top:10px" data-action="schedule-bulk-post" data-card-id="'+card.id+'"'+disabled+'>+ Schedule Post</button></section>'
+  return'<section class="bulk-card" data-bulk-card="'+card.id+'">'+remove+'<h3>Schedule a new post</h3><p class="bulk-card-copy">Drop content on autopilot. Recurring or one-time.</p><div class="bulk-fields"><div class="bulk-field-full"><label>Caption</label><textarea data-bulk-field="caption" maxlength="10000" placeholder="What’s your fans gonna read?">'+esc(card.caption||'')+'</textarea></div><div class="bulk-field-full"><label>Tags (comma or space separated, # optional)</label><div class="bulk-tags-row"><input data-bulk-field="tags" value="'+attr(card.tags||'')+'" placeholder="petite, kawaii, #fyp"><button class="bulk-spark" data-action="bulk-suggest-tags" data-card-id="'+card.id+'" title="Suggest tags from caption">✦</button></div></div><div><label>Schedule for · New York time</label><input data-bulk-field="scheduled_for" type="datetime-local" value="'+attr(card.scheduled_for||'')+'"><small class="bulk-timezone-note">'+esc(bulkSchedulingTimezoneLabel())+' · EST/EDT handled automatically</small></div><div><label>Recurrence</label><select data-bulk-field="recurrence">'+['one_time','daily','weekly','monthly'].map(function(value){return'<option value="'+value+'"'+(card.recurrence===value?' selected':'')+'>'+esc(value==='one_time'?'One-time':value.charAt(0).toUpperCase()+value.slice(1))+'</option>'}).join('')+'</select></div><div><label>Expires at (optional) · New York time</label><input data-bulk-field="expires_at" type="datetime-local" value="'+attr(card.expires_at||'')+'"><small class="bulk-timezone-note">New York scheduling time</small></div><div><label>Walls</label><select data-bulk-field="walls" multiple size="'+Math.max(2,Math.min(4,walls.length||2))+'"'+disabled+'>'+wallOptions+'</select></div></div><div class="bulk-checks"><label><input data-bulk-field="carousel" type="checkbox"'+(card.carousel?' checked':'')+'> Group multiple media as one carousel</label><label'+(paidDisabled?' title="'+attr(data.paid_preview_reason||'Not supported')+'"':'')+'><input data-bulk-field="paid_preview" type="checkbox"'+paidDisabled+'> Use first image as paid-post preview</label></div><label>Media</label><div class="bulk-drop" data-action="choose-bulk-media" data-card-id="'+card.id+'"><input type="file" data-bulk-upload="'+card.id+'" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm" multiple hidden><span>⇧ &nbsp;<strong>Drop media here</strong> or click to upload — videos, photos, GIFs</span></div><div class="bulk-media-list" data-bulk-media-list="'+card.id+'">'+bulkMediaMarkup(card)+'</div><div class="bulk-status" data-bulk-status="'+card.id+'"></div><button class="btn" style="margin-top:10px" data-action="schedule-bulk-post" data-card-id="'+card.id+'"'+disabled+'>+ Schedule Post</button></section>'
 }
 function bulkMediaMarkup(card){return(card.media||[]).map(function(media,index){return'<div class="bulk-media-chip"><span>'+esc(media.name||media.media_type||'Media')+'</span><button data-action="remove-bulk-media" data-card-id="'+card.id+'" data-media-index="'+index+'" aria-label="Remove media">×</button></div>'}).join('')}
 function bulkCardById(cardId){return bulkPostingCards.find(function(card){return card.id===Number(cardId)})}
@@ -1294,13 +1321,16 @@ async function uploadBulkFiles(cardId,files){
   }
 }
 function parseBulkTags(value){return String(value||'').split(/[\s,]+/).map(function(tag){return tag.replace(/^#/,'').trim()}).filter(Boolean)}
-function bulkLocalIso(value){if(!value)return'';var date=new Date(value);return isNaN(date.getTime())?'':date.toISOString()}
 async function scheduleBulkPost(cardId){
   var card=bulkCardById(cardId),el=bulkCardElement(cardId);if(!card||!el)return;
   var field=function(name){return el.querySelector('[data-bulk-field="'+name+'"]')};
-  var schedule=bulkLocalIso(field('scheduled_for').value),expires=bulkLocalIso(field('expires_at').value);
+  var rawSchedule=field('scheduled_for').value,rawExpires=field('expires_at').value;
+  var schedule=bulkSchedulingIso(rawSchedule),expires=bulkSchedulingIso(rawExpires);
+  if(!rawSchedule){setBulkStatus(cardId,'Choose a New York schedule time','error');return}
+  if(!schedule){setBulkStatus(cardId,'That New York time does not exist because of the daylight-saving change. Choose another time.','error');return}
+  if(rawExpires&&!expires){setBulkStatus(cardId,'That New York expiry time does not exist because of the daylight-saving change. Choose another time.','error');return}
   var walls=Array.from(field('walls').selectedOptions).map(function(option){return option.value});
-  var payload={caption:field('caption').value,tags:parseBulkTags(field('tags').value),scheduled_for:schedule,expires_at:expires,recurrence:field('recurrence').value,wall_ids:walls,carousel:field('carousel').checked,paid_preview:field('paid_preview').checked,media:card.media};
+  var payload={caption:field('caption').value,tags:parseBulkTags(field('tags').value),scheduled_for:schedule,expires_at:expires,scheduling_timezone:BULK_SCHEDULING_TIME_ZONE,recurrence:field('recurrence').value,wall_ids:walls,carousel:field('carousel').checked,paid_preview:field('paid_preview').checked,media:card.media};
   setBulkStatus(cardId,'Scheduling…','');
   try{
     var response=await M('/api/bulk-posting/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

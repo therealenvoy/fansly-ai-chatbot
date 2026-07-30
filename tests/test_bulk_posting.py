@@ -5,7 +5,11 @@ import pytest
 from sqlalchemy import create_engine, insert, select
 
 from src.bulk_posting.schema import BULK_POST_OCCURRENCES, BULK_POST_RULES
-from src.bulk_posting.service import BulkPostingError, BulkPostingService
+from src.bulk_posting.service import (
+    BulkPostingError,
+    BulkPostingService,
+    _next_occurrence,
+)
 from src.fansly_client import PaymentRequiredError
 from src.persistence.schema import CREATORS, metadata
 from src.web.dashboard import DASHBOARD_HTML
@@ -87,8 +91,53 @@ def test_schedule_submits_documented_post_and_updates_metrics():
     )
     assert status["metrics"]["scheduled_posts"] == 1
     assert status["metrics"]["delivery_rate"] == 100.0
+    assert status["scheduling_timezone"] == "America/New_York"
     assert status["posts"][0]["status"] == "submitted"
     assert created_by == "posting-va"
+
+
+def test_daily_recurrence_keeps_new_york_wall_time_across_dst():
+    before_spring_forward = datetime(
+        2026,
+        3,
+        7,
+        14,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    following = _next_occurrence(before_spring_forward, "daily")
+
+    assert following == datetime(
+        2026,
+        3,
+        8,
+        13,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+
+def test_monthly_recurrence_keeps_new_york_wall_time_across_dst():
+    before_fall_back = datetime(
+        2026,
+        10,
+        31,
+        13,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    following = _next_occurrence(before_fall_back, "monthly")
+
+    assert following == datetime(
+        2026,
+        11,
+        30,
+        14,
+        0,
+        tzinfo=timezone.utc,
+    )
 
 
 def test_walls_use_durable_creator_cache_across_service_instances():
@@ -170,6 +219,13 @@ def test_paid_preview_fails_closed():
         assert "not supported" in str(error)
     else:
         raise AssertionError("paid preview must fail closed")
+
+
+def test_schedule_rejects_another_timezone():
+    service, _ = _service()
+
+    with pytest.raises(BulkPostingError, match="America/New_York"):
+        service.schedule(_payload(scheduling_timezone="Asia/Manila"))
 
 
 def test_snapshot_degrades_cleanly_when_provider_requires_payment():

@@ -1263,8 +1263,10 @@ class TestDashboardSecurity:
         assert "function sortedFypMedia(rows)" in body
         assert "data-action=\"fyp-media-open\"" in body
         assert "Per-video hashtags not exposed by APIFansly" in body
-        assert "function browserTimezoneLabel()" in body
-        assert "converted to UTC automatically" in body
+        assert "BULK_SCHEDULING_TIME_ZONE='America/New_York'" in body
+        assert "function bulkSchedulingIso(value)" in body
+        assert "New York scheduling time" in body
+        assert "EST/EDT handled automatically" in body
         assert "data.models||[]" not in (
             body.split("async function selectModel(creatorId){", 1)[1]
             .split("function renderModelRail", 1)[0]
