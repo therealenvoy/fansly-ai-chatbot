@@ -1,0 +1,22 @@
+{
+  "name": "Sunny Charm",
+  "short_name": "Sunny Charm",
+  "description": "Sunny Charm creator intelligence dashboard",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b0a11",
+  "theme_color": "#0b0a11",
+  "icons": [
+    {
+      "src": "/assets/pegasus-app-icon-256.png",
+      "sizes": "256x256",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/pegasus-app-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="theme-color" content="#0b0a11">
 <title>Sunny Charm</title>
+<link rel="icon" href="/assets/pegasus-app-icon.svg" type="image/svg+xml">
+<link rel="icon" href="/assets/pegasus-app-icon-16.png" type="image/png" sizes="16x16">
+<link rel="icon" href="/assets/pegasus-app-icon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/assets/pegasus-app-icon-64.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="/assets/pegasus-app-icon-256.png">
+<link rel="manifest" href="/assets/manifest.webmanifest">
 <style nonce="__CSP_NONCE__">
 :root{
   color-scheme:dark;
@@ -115,11 +121,9 @@ svg{display:block}
 }
 .brand{display:flex;align-items:center;gap:11px;height:50px;padding:0 8px;margin-bottom:15px}
 .brand-mark{
-  width:36px;height:36px;display:grid;grid-template-columns:repeat(2,1fr);gap:3px;padding:6px;
-  border-radius:11px;background:linear-gradient(145deg,#bd9cff,#7456dc);box-shadow:0 9px 24px rgba(126,83,226,.32)
+  width:36px;height:36px;display:grid;place-items:center;flex:0 0 auto
 }
-.brand-mark span{border-radius:3px;background:rgba(255,255,255,.88)}
-.brand-mark span:nth-child(2),.brand-mark span:nth-child(3){border-radius:50%}
+.brand-mark img{display:block;width:32px;height:32px;object-fit:contain}
 .brand-name{font-size:14px;font-weight:720;letter-spacing:-.2px}
 .brand-kicker{font-size:10px;color:var(--faint);margin-top:2px}
 .nav-label{
@@ -407,7 +411,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 <div class="app-shell">
   <aside class="model-rail" aria-label="Creator models">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <div class="brand-mark" aria-hidden="true"><img src="/assets/pegasus-mark-reversed.svg" alt=""></div>
       <div><div class="brand-name">Sunny Charm</div><div class="brand-kicker">Creator intelligence</div></div>
     </div>
     <div class="model-rail-heading"><span>Models</span><span class="model-rail-heading-actions"><button type="button" class="model-rail-refresh" data-action="sync-models" aria-label="Refresh connected models" title="Refresh connected models">↻</button><span id="model-rail-count">—</span></span></div>
@@ -418,7 +422,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
   </aside>
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <div class="brand-mark" aria-hidden="true"><img src="/assets/pegasus-mark-reversed.svg" alt=""></div>
       <div><div class="brand-name">Sunny Charm</div><div class="brand-kicker">Creator intelligence</div></div>
     </div>
     <nav aria-label="Primary">

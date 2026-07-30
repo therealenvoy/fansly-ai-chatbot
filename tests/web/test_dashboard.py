@@ -58,6 +58,20 @@ def _authorization(user=TEST_USER, password=TEST_PASSWORD):
 class TestDashboardShell:
     """Regression checks for the responsive dashboard navigation."""
 
+    def test_pegasus_branding_uses_reversed_mark_and_app_icons(self):
+        assert (
+            DASHBOARD_HTML.count(
+                'src="/assets/pegasus-mark-reversed.svg"'
+            )
+            == 2
+        )
+        assert 'rel="icon" href="/assets/pegasus-app-icon.svg"' in DASHBOARD_HTML
+        assert (
+            'rel="apple-touch-icon" href="/assets/pegasus-app-icon-256.png"'
+            in DASHBOARD_HTML
+        )
+        assert 'rel="manifest" href="/assets/manifest.webmanifest"' in DASHBOARD_HTML
+
     def test_all_primary_destinations_are_semantic_buttons(self):
         for tab in (
             "dashboard",
@@ -1208,6 +1222,52 @@ class TestCrmConversationHistory:
 
 
 class TestDashboardSecurity:
+    @pytest.mark.parametrize(
+        ("path", "content_type", "prefix"),
+        (
+            (
+                "/assets/pegasus-app-icon.svg",
+                "image/svg+xml; charset=utf-8",
+                b"<svg",
+            ),
+            (
+                "/assets/pegasus-app-icon-32.png",
+                "image/png",
+                b"\x89PNG\r\n\x1a\n",
+            ),
+            (
+                "/assets/manifest.webmanifest",
+                "application/manifest+json; charset=utf-8",
+                b"{",
+            ),
+        ),
+    )
+    def test_brand_assets_are_public_and_strictly_allowlisted(
+        self,
+        running_server,
+        path,
+        content_type,
+        prefix,
+    ):
+        host, _, _ = running_server
+        connection = HTTPConnection(host)
+        connection.request("GET", path)
+        response = connection.getresponse()
+        payload = response.read()
+        connection.close()
+
+        assert response.status == 200
+        assert response.headers["Content-Type"] == content_type
+        assert payload.lstrip().startswith(prefix)
+        assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+    def test_unknown_asset_path_is_not_exposed_publicly(self, running_server):
+        host, _, _ = running_server
+        status, body, _ = _request(host, "GET", "/assets/not-allowlisted")
+
+        assert status == 401
+        assert body == {"error": "authentication required"}
+
     def test_dashboard_requires_authentication(self, running_server):
         host, _, _ = running_server
         status, body, headers = _request(host, "GET", "/")

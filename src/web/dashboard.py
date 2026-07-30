@@ -710,6 +710,32 @@ DASHBOARD_HTML = (
     Path(__file__).with_name("dashboard_shell.html").read_text(encoding="utf-8")
 )
 
+WEB_ASSET_DIRECTORY = Path(__file__).with_name("assets")
+WEB_ASSETS = {
+    "/assets/manifest.webmanifest": (
+        "manifest.webmanifest",
+        "application/manifest+json; charset=utf-8",
+    ),
+    "/assets/pegasus-app-icon.svg": (
+        "pegasus-app-icon.svg",
+        "image/svg+xml; charset=utf-8",
+    ),
+    "/assets/pegasus-mark-master.svg": (
+        "pegasus-mark-master.svg",
+        "image/svg+xml; charset=utf-8",
+    ),
+    "/assets/pegasus-mark-reversed.svg": (
+        "pegasus-mark-reversed.svg",
+        "image/svg+xml; charset=utf-8",
+    ),
+    "/assets/pegasus-app-icon-16.png": ("pegasus-app-icon-16.png", "image/png"),
+    "/assets/pegasus-app-icon-32.png": ("pegasus-app-icon-32.png", "image/png"),
+    "/assets/pegasus-app-icon-64.png": ("pegasus-app-icon-64.png", "image/png"),
+    "/assets/pegasus-app-icon-256.png": ("pegasus-app-icon-256.png", "image/png"),
+    "/assets/pegasus-app-icon-512.png": ("pegasus-app-icon-512.png", "image/png"),
+    "/assets/pegasus-mark-master.png": ("pegasus-mark-master.png", "image/png"),
+}
+
 # ─── Backend (unchanged API logic) ────────────────────
 
 def _list_vault(vault_dir):
@@ -966,6 +992,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             {"Content-Security-Policy": csp},
         )
 
+    def _web_asset(self, request_path):
+        asset = WEB_ASSETS.get(request_path)
+        if asset is None:
+            return False
+        filename, content_type = asset
+        try:
+            payload = (WEB_ASSET_DIRECTORY / filename).read_bytes()
+        except OSError:
+            self.j({"error": "asset unavailable"}, 404)
+            return True
+        self._write(payload, content_type)
+        return True
+
     def _host_is_allowed(self):
         host = self.headers.get("Host", "")
         try:
@@ -1162,6 +1201,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {"status":"ready" if ready else "not_ready","service":"fansly-bot"},
                 200 if ready else 503,
             )
+        if self._web_asset(p):
+            return
         if not self._authorize():
             return
         if p in ("/","/dashboard"): return self.h(DASHBOARD_HTML)
