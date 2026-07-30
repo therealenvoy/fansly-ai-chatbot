@@ -9,7 +9,7 @@ import secrets
 import threading
 from typing import Any
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -277,6 +277,10 @@ class CreatorConnectionService:
         country_code: str,
     ) -> dict[str, Any]:
         self._validate(username, password, label, country_code)
+        if self.repository.contains(_creator_id(label)):
+            raise CreatorConnectionError(
+                "That model name is already connected"
+            )
         result = self.connector.connect(
             username=username.strip(),
             password=password,
