@@ -538,6 +538,50 @@ var fypAnalyticsData=null;
 var modelSetupData=null;
 var modelRailData=null;
 var modelConnectAttempt='';
+var workspaceSnapshots=new Map();
+var workspaceRequestController=null;
+var workspaceRequestGeneration=0;
+
+function selectedWorkspaceCreator(){
+  var data=modelRailData||{},models=data.models||[];
+  var selected=models.find(function(model){return model.selected});
+  return String((selected&&selected.creator_id)||data.selected_creator_id||'');
+}
+function workspaceSnapshotKey(tab,suffix,creatorId){
+  return [String(creatorId||selectedWorkspaceCreator()),tab,String(suffix||'')].join(':');
+}
+function getWorkspaceSnapshot(tab,suffix,maxAgeMs,creatorId){
+  var item=workspaceSnapshots.get(workspaceSnapshotKey(tab,suffix,creatorId));
+  if(!item||Date.now()-item.savedAt>maxAgeMs)return null;
+  return item.data;
+}
+function saveWorkspaceSnapshot(tab,suffix,data){
+  if(!data||!data.workspace_creator_id)return;
+  workspaceSnapshots.set(
+    workspaceSnapshotKey(tab,suffix,data.workspace_creator_id),
+    {savedAt:Date.now(),data:data}
+  );
+}
+function beginWorkspaceRequest(){
+  if(workspaceRequestController)workspaceRequestController.abort();
+  workspaceRequestController=new AbortController();
+  workspaceRequestGeneration+=1;
+  return {
+    controller:workspaceRequestController,
+    generation:workspaceRequestGeneration,
+    creatorId:selectedWorkspaceCreator()
+  };
+}
+function workspaceResponseIsCurrent(request,data){
+  return request.generation===workspaceRequestGeneration&&
+    (!request.creatorId||request.creatorId===selectedWorkspaceCreator())&&
+    (!data.workspace_creator_id||!request.creatorId||data.workspace_creator_id===request.creatorId);
+}
+function cancelWorkspaceRequest(){
+  if(workspaceRequestController)workspaceRequestController.abort();
+  workspaceRequestController=null;
+  workspaceRequestGeneration+=1;
+}
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function attr(s){return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
@@ -556,6 +600,7 @@ var loaders={dashboard:loadDashboard,'fyp-analytics':loadFypAnalytics,funnel:loa
 function navTo(tab,skipHash){
   if(IS_POSTING_VA&&['bulk-posting','fyp-analytics'].indexOf(tab)<0)tab='bulk-posting';
   if(!loaders[tab])tab='dashboard';
+  cancelWorkspaceRequest();
   currentTab=tab;
   document.querySelectorAll('.nav-item').forEach(function(item){item.classList.toggle('active',item.dataset.tab===tab);if(item.dataset.tab===tab)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current')});
   document.getElementById('content').scrollTop=0;
@@ -1033,11 +1078,33 @@ async function verifyModel(){
   try{var r=await M('/api/models/verify-2fa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({attempt:modelConnectAttempt,code:(document.getElementById('model-2fa')||{}).value||''})}),d=await r.json();if(!r.ok)throw new Error(d.error||'Verification failed');modelConnectAttempt='';await selectModel(d.model.creator_id)}catch(error){if(result){result.textContent=error.message||'Verification failed';result.style.color='var(--red)'}if(button)button.disabled=false}}
 async function selectModel(creatorId){
   if(!creatorId)return;
+  if(selectedWorkspaceCreator()===String(creatorId))return;
+  var previous=modelRailData;
+  if(modelRailData&&modelRailData.models){
+    modelRailData=Object.assign({},modelRailData,{
+      selected_creator_id:creatorId,
+      models:modelRailData.models.map(function(model){
+        return Object.assign({},model,{selected:model.creator_id===creatorId});
+      })
+    });
+    renderModelRail(modelRailData);
+  }
+  cancelWorkspaceRequest();
   document.querySelectorAll('.model-rail-card').forEach(function(card){card.disabled=true});
   var r=await M('/api/models/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({creator_id:creatorId})}),d=await r.json();
-  if(!r.ok){document.querySelectorAll('.model-rail-card').forEach(function(card){card.disabled=false});alert(d.error||'Could not select model');return}
-  modelSetupData=null;modelRailData=null;bulkPostingData=null;fypAnalyticsData=null;
-  await loadModelRail();
+  if(!r.ok){
+    modelRailData=previous;
+    renderModelRail(previous);
+    document.querySelectorAll('.model-rail-card').forEach(function(card){card.disabled=false});
+    alert(d.error||'Could not select model');
+    return
+  }
+  modelSetupData=null;
+  bulkPostingData=null;
+  bulkPostingCards=[];
+  fypAnalyticsData=null;
+  modelRailData=d;
+  renderModelRail(d);
   if(loaders[currentTab])await loaders[currentTab]();
 }
 
@@ -1065,9 +1132,7 @@ function renderModelRail(data){
 async function loadModelRail(){
   var data=await F('/api/models');
   renderModelRail(data);
-  var lastSync=0;
-  try{lastSync=Number(localStorage.getItem('fansly-model-sync-at')||0)}catch(error){}
-  if(!IS_POSTING_VA&&data&&data.available&&(data.models||[]).length<=1&&(!lastSync||Date.now()-lastSync>=900000))await syncManagedModels(false);
+  return data;
 }
 
 async function syncManagedModels(showStatus){
@@ -1149,13 +1214,31 @@ function newBulkCard(){return{id:bulkPostingNextCardId++,media:[],caption:'',tag
 function captureBulkForms(){
   bulkPostingCards.forEach(function(card){var el=bulkCardElement(card.id);if(!el)return;var field=function(name){return el.querySelector('[data-bulk-field="'+name+'"]')};card.caption=field('caption').value;card.tags=field('tags').value;card.scheduled_for=field('scheduled_for').value;card.expires_at=field('expires_at').value;card.recurrence=field('recurrence').value;card.wall_ids=Array.from(field('walls').selectedOptions).map(function(option){return option.value});card.carousel=field('carousel').checked})
 }
-function loadBulkPosting(){
-  document.getElementById('content').innerHTML=pageHead('Bulk Posting','Bulk Posting','Plan your content. Drop on autopilot.','');
-  F('/api/bulk-posting').then(function(data){
-    bulkPostingData=data||{available:false,reason:'Bulk Posting status is unavailable',walls:[],posts:[],metrics:{}};
+async function loadBulkPosting(force){
+  var creatorId=selectedWorkspaceCreator();
+  var cached=!force&&getWorkspaceSnapshot('bulk-posting','status',120000,creatorId);
+  if(cached){
+    bulkPostingData=cached;
     if(!bulkPostingCards.length)bulkPostingCards=[newBulkCard(),newBulkCard()];
     renderBulkPosting();
-  });
+    return
+  }
+  document.getElementById('content').innerHTML=pageHead('Bulk Posting','Bulk Posting','Loading the local posting workspace...','');
+  var request=beginWorkspaceRequest();
+  try{
+    var response=await fetch('/api/bulk-posting',{credentials:'same-origin',cache:'no-store',signal:request.controller.signal});
+    var data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Bulk Posting status is unavailable');
+    if(!workspaceResponseIsCurrent(request,data))return;
+    bulkPostingData=data;
+    saveWorkspaceSnapshot('bulk-posting','status',data);
+    if(!bulkPostingCards.length)bulkPostingCards=[newBulkCard(),newBulkCard()];
+    renderBulkPosting();
+  }catch(error){
+    if(error.name==='AbortError')return;
+    bulkPostingData={available:false,reason:error.message||'Bulk Posting status is unavailable',walls:[],posts:[],metrics:{}};
+    renderBulkPosting();
+  }
 }
 function bulkMetric(label,value,foot){return'<article class="bulk-kpi"><span class="label">'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(foot||'')+'</small></article>'}
 function renderBulkPosting(){
@@ -1208,7 +1291,7 @@ async function scheduleBulkPost(cardId){
   try{
     var response=await M('/api/bulk-posting/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     var data=await response.json();if(!response.ok)throw new Error(data.error||'Scheduling failed');
-    setBulkStatus(cardId,'Scheduled successfully','ok');bulkPostingCards=bulkPostingCards.filter(function(item){return item.id!==Number(cardId)});bulkPostingCards.push(newBulkCard());setTimeout(loadBulkPosting,500);
+    setBulkStatus(cardId,'Scheduled successfully','ok');bulkPostingCards=bulkPostingCards.filter(function(item){return item.id!==Number(cardId)});bulkPostingCards.push(newBulkCard());setTimeout(function(){loadBulkPosting(true)},500);
   }catch(error){setBulkStatus(cardId,error.message||'Scheduling failed','error')}
 }
 function suggestBulkTags(cardId){var el=bulkCardElement(cardId);if(!el)return;var caption=el.querySelector('[data-bulk-field="caption"]').value.toLowerCase(),stop={this:1,that:1,with:1,from:1,your:1,have:1,what:1,when:1,where:1,will:1,just:1,about:1};var tags=(caption.match(/[a-z0-9_]{4,}/g)||[]).filter(function(word,index,all){return!stop[word]&&all.indexOf(word)===index}).slice(0,6);el.querySelector('[data-bulk-field="tags"]').value=tags.join(', ')}
@@ -1228,25 +1311,41 @@ function loadFypAnalytics(force){
     if(!after||!before){return}
   }
   c.innerHTML=pageHead('FYP Analytics','FYP Performance','Loading live APIFansly profile statistics…','')+fypRangeMarkup()+fypCustomMarkup();
+  var creatorId=selectedWorkspaceCreator();
+  var cacheSuffix=[fypAnalyticsRange,after,before].join('|');
+  var cached=!force&&getWorkspaceSnapshot('fyp-analytics',cacheSuffix,1800000,creatorId);
+  if(cached){
+    fypAnalyticsData=cached;
+    renderFypAnalytics();
+    return
+  }
+  var workspaceRequest=beginWorkspaceRequest();
   var request;
   if(force){
-    request=M('/api/fyp-analytics/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({range:fypAnalyticsRange,after:after||null,before:before||null})});
+    request=M('/api/fyp-analytics/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({range:fypAnalyticsRange,after:after||null,before:before||null}),signal:workspaceRequest.controller.signal});
   }else{
     var query='?range='+encodeURIComponent(fypAnalyticsRange)+(after?'&after='+encodeURIComponent(after):'')+(before?'&before='+encodeURIComponent(before):'');
-    request=fetch('/api/fyp-analytics'+query,{credentials:'same-origin',cache:'no-store'});
+    request=fetch('/api/fyp-analytics'+query,{credentials:'same-origin',cache:'no-store',signal:workspaceRequest.controller.signal});
   }
   request.then(function(response){return response.json().then(function(data){return{ok:response.ok,data:data}})}).then(function(result){
     if(!result.ok)throw new Error(result.data.error||result.data.reason||'Analytics request failed');
-    fypAnalyticsData=result.data;renderFypAnalytics();
+    if(!workspaceResponseIsCurrent(workspaceRequest,result.data))return;
+    fypAnalyticsData=result.data;
+    saveWorkspaceSnapshot('fyp-analytics',cacheSuffix,result.data);
+    renderFypAnalytics();
   }).catch(function(error){
+    if(error.name==='AbortError')return;
     c.innerHTML=pageHead('FYP Analytics','FYP Performance','Real post and media analytics from APIFansly.','')+fypRangeMarkup()+fypCustomMarkup()+'<section class="block"><p class="block-copy" style="color:var(--red)">'+esc(error.message||'Analytics request failed')+'</p></section>';
   });
 }
 function renderFypAnalytics(){
   var d=fypAnalyticsData||{},m=d.metrics||{},c=document.getElementById('content');
-  var refresh='<button class="btn-ghost" data-action="fyp-refresh">↻ Refresh from APIFansly</button>';
+  var refresh='<button class="btn-ghost" data-action="fyp-refresh">↻ Refresh (provider read)</button>';
   var h=pageHead('FYP Analytics','FYP Performance','Real FYP, tag, media, and engagement analytics from APIFansly.',refresh);
-  h+='<div class="fyp-toolbar">'+fypRangeMarkup()+'<div class="fyp-source"><b>● '+esc(d.provider||'APIFansly')+'</b><span>'+(d.fetched_at?'Updated '+esc(new Date(d.fetched_at).toLocaleString()):'Not loaded')+(d.cached?' · cached':' · live refresh')+'</span></div></div>'+fypCustomMarkup();
+  var cacheLabel=d.cache_layer&&d.cache_layer!=='provider'?' · '+esc(String(d.cache_layer).replace(/_/g,' ')):' · live refresh';
+  var cooldown=d.refresh_cooldown_seconds?' · refresh available in '+Number(d.refresh_cooldown_seconds)+'s':'';
+  var previewNote=d.media_thumbnails_available===false?' · previews omitted from durable cache':'';
+  h+='<div class="fyp-toolbar">'+fypRangeMarkup()+'<div class="fyp-source"><b>● '+esc(d.provider||'APIFansly')+'</b><span>'+(d.fetched_at?'Updated '+esc(new Date(d.fetched_at).toLocaleString()):'Not loaded')+cacheLabel+cooldown+previewNote+'</span></div></div>'+fypCustomMarkup();
   if(!d.available){h+='<section class="block"><p class="block-copy" style="color:var(--amber)">'+esc(d.reason||'FYP Analytics is not configured')+'</p></section>';c.innerHTML=h;return}
   h+=fypTabMarkup();
   if(fypAnalyticsView==='overview'){
@@ -1402,13 +1501,15 @@ if(IS_POSTING_VA){
   if(workspaceTitle)workspaceTitle.textContent='Sunny Charm / Posting';
   if(workspaceSubtitle)workspaceSubtitle.textContent='Posting + FYP Analytics';
   var vaStart=location.hash.slice(1);
-  loadModelRail();
-  navTo(vaStart==='fyp-analytics'?'fyp-analytics':'bulk-posting',true);
+  loadModelRail().then(function(){
+    navTo(vaStart==='fyp-analytics'?'fyp-analytics':'bulk-posting',true);
+  });
 }else{
   loadBotStatus();
-  loadModelRail();
+  loadModelRail().then(function(){
+    navTo(location.hash.slice(1)||'dashboard',true);
+  });
   setInterval(loadBotStatus,15000);
-  navTo(location.hash.slice(1)||'dashboard',true);
 }
 setInterval(function(){if(currentTab==='funnel'&&!activeConversationId)loadFunnel()},60000);
 setInterval(function(){if(currentTab==='funnel'&&!activeConversationId&&!conversationDiscoveryComplete)loadConversationList(true)},5000);

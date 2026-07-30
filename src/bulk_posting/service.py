@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import os
 import re
+import threading
 from typing import Any
 
 import httpx
@@ -16,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 
 from ..apifansly_client import ApifanslyClient
 from ..fansly_client import AuthError, NotFoundError, PaymentRequiredError
+from ..provider_read_cache import ProviderReadCache
 from .schema import BULK_POST_OCCURRENCES, BULK_POST_RULES
 
 logger = logging.getLogger("fansly-bot.bulk-posting")
@@ -75,13 +77,22 @@ class BulkPostingService:
         creator_id: str,
         client: ApifanslyClient | None,
         submit_horizon: timedelta = timedelta(hours=24),
+        walls_cache_ttl: timedelta = timedelta(hours=24),
+        read_cache: ProviderReadCache | None = None,
     ):
         self.engine = engine
         self.creator_id = creator_id
         self.client = client
         self.submit_horizon = submit_horizon
+        self.walls_cache_ttl = walls_cache_ttl
+        self.read_cache = read_cache or ProviderReadCache(
+            engine,
+            creator_id=creator_id,
+        )
         self._walls_cache: list[dict[str, str]] = []
         self._walls_cached_at: datetime | None = None
+        self._walls_cache_layer = "none"
+        self._walls_lock = threading.Lock()
 
     @property
     def available(self) -> bool:
@@ -108,13 +119,68 @@ class BulkPostingService:
         if self.client is None:
             return []
         now = datetime.now(timezone.utc)
-        if (
-            self._walls_cached_at is None
-            or now - self._walls_cached_at > timedelta(minutes=5)
-        ):
-            self._walls_cache = self.client.list_post_walls()
+        with self._walls_lock:
+            if (
+                self._walls_cached_at is not None
+                and now - self._walls_cached_at <= self.walls_cache_ttl
+            ):
+                self._walls_cache_layer = "memory"
+                return list(self._walls_cache)
+
+            durable = None
+            try:
+                durable = self.read_cache.get("posting", "walls")
+            except Exception as error:
+                logger.warning(
+                    "Provider walls cache read failed: %s",
+                    type(error).__name__,
+                )
+            if durable is not None and durable.is_fresh(now):
+                walls = durable.payload.get("walls", [])
+                if isinstance(walls, list):
+                    self._walls_cache = [
+                        dict(item)
+                        for item in walls
+                        if isinstance(item, dict)
+                    ]
+                    self._walls_cached_at = durable.fetched_at
+                    self._walls_cache_layer = "durable"
+                    return list(self._walls_cache)
+
+            try:
+                walls = self.client.list_post_walls()
+            except Exception:
+                if durable is not None and durable.is_usable_stale(now):
+                    walls = durable.payload.get("walls", [])
+                    if isinstance(walls, list):
+                        self._walls_cache = [
+                            dict(item)
+                            for item in walls
+                            if isinstance(item, dict)
+                        ]
+                        self._walls_cached_at = durable.fetched_at
+                        self._walls_cache_layer = "stale_if_error"
+                        return list(self._walls_cache)
+                raise
+
+            self._walls_cache = list(walls)
             self._walls_cached_at = now
-        return list(self._walls_cache)
+            self._walls_cache_layer = "provider"
+            try:
+                self.read_cache.put(
+                    "posting",
+                    "walls",
+                    {"walls": list(walls)},
+                    fetched_at=now,
+                    ttl=self.walls_cache_ttl,
+                    stale_ttl=timedelta(days=7),
+                )
+            except Exception as error:
+                logger.warning(
+                    "Provider walls cache write failed: %s",
+                    type(error).__name__,
+                )
+            return list(self._walls_cache)
 
     def upload_media(
         self,
@@ -569,6 +635,19 @@ class BulkPostingService:
         status.update(
             {
                 "walls": walls,
+                "provider_cache": {
+                    "walls": {
+                        "layer": self._walls_cache_layer,
+                        "fetched_at": (
+                            self._walls_cached_at.isoformat()
+                            if self._walls_cached_at is not None
+                            else None
+                        ),
+                        "ttl_seconds": int(
+                            self.walls_cache_ttl.total_seconds()
+                        ),
+                    }
+                },
                 "metrics": {
                     "scheduled_posts": int(scheduled_count or 0),
                     "next_post": next_post.isoformat() if next_post else None,

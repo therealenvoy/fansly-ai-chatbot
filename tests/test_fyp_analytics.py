@@ -2,8 +2,11 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import create_engine, insert
 
 from src.fyp_analytics import FypAnalyticsError, FypAnalyticsService
+from src.persistence.schema import CREATORS, metadata
+from src.provider_read_cache import ProviderReadCache
 
 
 def _provider_response():
@@ -172,6 +175,63 @@ def test_caches_each_range_for_ten_minutes_and_force_refreshes():
     assert client.get_profile_statistics.call_count == 2
     params = client.get_profile_statistics.call_args.kwargs
     assert params["period"] == 6 * 60 * 60 * 1000
+
+
+def test_durable_cache_survives_service_restart_without_signed_urls():
+    engine = create_engine("sqlite://")
+    metadata.create_all(engine)
+    now = datetime(2026, 7, 30, 10, tzinfo=timezone.utc)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(CREATORS).values(
+                id="creator-1",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    read_cache = ProviderReadCache(engine, creator_id="creator-1")
+    first_client = MagicMock()
+    first_client.get_profile_statistics.return_value = _provider_response()
+    first_service = FypAnalyticsService(
+        client=first_client,
+        read_cache=read_cache,
+    )
+
+    fresh = first_service.snapshot("24h", now=now)
+    second_client = MagicMock()
+    second_service = FypAnalyticsService(
+        client=second_client,
+        read_cache=read_cache,
+    )
+    durable = second_service.snapshot(
+        "24h",
+        now=now + timedelta(minutes=5),
+    )
+
+    assert fresh["media"][0]["thumbnail_url"].startswith("https://")
+    assert durable["cache_layer"] == "durable"
+    assert durable["provider_request_made"] is False
+    assert durable["media"][0]["thumbnail_url"] is None
+    assert durable["media_thumbnails_available"] is False
+    second_client.get_profile_statistics.assert_not_called()
+
+
+def test_forced_refresh_has_one_minute_provider_cooldown():
+    client = MagicMock()
+    client.get_profile_statistics.return_value = _provider_response()
+    service = FypAnalyticsService(client=client)
+    now = datetime(2026, 7, 30, 10, tzinfo=timezone.utc)
+
+    service.snapshot("24h", now=now)
+    result = service.snapshot(
+        "24h",
+        force_refresh=True,
+        now=now + timedelta(seconds=10),
+    )
+
+    assert result["provider_request_made"] is False
+    assert result["refresh_cooldown_seconds"] == 50
+    assert client.get_profile_statistics.call_count == 1
 
 
 def test_custom_range_validation_is_bounded():

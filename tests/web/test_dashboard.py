@@ -1256,6 +1256,14 @@ class TestDashboardSecurity:
         assert "async function loadModelRail()" in body
         assert "async function syncManagedModels(showStatus)" in body
         assert "await loaders[currentTab]()" in body
+        assert "workspaceSnapshots=new Map()" in body
+        assert "getWorkspaceSnapshot('fyp-analytics'" in body
+        assert "getWorkspaceSnapshot('bulk-posting'" in body
+        assert "bulkPostingCards=[]" in body
+        assert "data.models||[]" not in (
+            body.split("async function selectModel(creatorId){", 1)[1]
+            .split("function renderModelRail", 1)[0]
+        )
 
     def test_owner_can_sync_all_apifansly_managed_models(
         self,
@@ -1355,7 +1363,7 @@ class TestDashboardSecurity:
         assert "data-tab=\"fyp-analytics\"" in body
         assert 'class="model-rail"' in body
         assert ".role-posting_va .model-rail{display:none!important}" not in body
-        assert "loadModelRail();\n  navTo(vaStart===" in body
+        assert "loadModelRail().then(function()" in body
 
     def test_posting_va_can_list_and_select_connected_models(
         self,
@@ -1404,7 +1412,9 @@ class TestDashboardSecurity:
         )
 
         assert status == 200
-        assert body == {"selected_creator_id": "second_creator"}
+        assert body["selected_creator_id"] == "second_creator"
+        assert len(body["models"]) == 2
+        assert sum(model["selected"] for model in body["models"]) == 1
         selection_cookie = headers["set-cookie"].split(";", 1)[0]
 
         status, selected, _ = _request(

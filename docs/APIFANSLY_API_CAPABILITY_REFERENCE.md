@@ -214,7 +214,7 @@ Documentation-drift warning: the page has changed between `mediaIds`/millisecond
 
 | Capability | Method and route | Important inputs and result | Project |
 |---|---|---|---|
-| [Profile Statistics](https://docs.apifansly.com/api-reference/profile-stats) | `GET /{accountId}/analytics/profilestats` | Optional millisecond `afterDate`, `beforeDate`, `period`; or `year`, `month`. Returns datapoints, traffic sources, top FYP tags/media, and media aggregation. | **Implemented** and consumed by FYP Analytics with a 10-minute cache. |
+| [Profile Statistics](https://docs.apifansly.com/api-reference/profile-stats) | `GET /{accountId}/analytics/profilestats` | Optional millisecond `afterDate`, `beforeDate`, `period`; or `year`, `month`. Returns datapoints, traffic sources, top FYP tags/media, and media aggregation. | **Implemented** and consumed by FYP Analytics with a 30-minute creator/range cache, durable aggregate fallback, and a one-minute forced-refresh cooldown. |
 
 Useful period values are `3,600,000` for one hour and `86,400,000` for one day. The response exposes media/profile time series, traffic sources, `topMediaOffers`, `topFypMediaOffers`, `topFypTags`, and aggregated account media. Keep signed media URLs short-lived and out of logs.
 
@@ -299,7 +299,7 @@ Never merge earnings base units with subscriber cents or PPV dollars before expl
 | [Get Current Account](https://docs.apifansly.com/api-reference/account/get-current-account) | `GET /{account_id}/me` | Returns the connected account's native Fansly profile/session-facing data. | **Implemented** |
 | [Disconnect Account](https://docs.apifansly.com/api-reference/account/disconnect-account) | `DELETE /accounts/{accountId}` | Destructive provider mutation. Must also safely retire local creator-scoped runtime state. | **Missing** |
 
-Listing models must call `/accounts` once, cache briefly, and upsert by the stable connected-account ID. Never create a second local creator because a 2FA completion response was retried. Selecting a model is a local signed creator-scoped action; merely listing or selecting must not enable its chatbot.
+Model discovery calls `/accounts` only when the owner explicitly presses Sync, then upserts by the stable connected-account ID. Ordinary listing and selection use the local registry and consume no APIFansly credits. Never create a second local creator because a 2FA completion response was retried. Selecting a model is a local signed creator-scoped action; merely listing or selecting must not enable its chatbot.
 
 ## Connecting accounts and 2FA
 
@@ -372,10 +372,13 @@ This is cheaper and more reliable for the documented native triggers than simula
 ### FYP analytics
 
 1. Query Profile Statistics with a bounded time range and suitable bucket.
-2. Cache for at least 10 minutes unless the operator explicitly refreshes.
+2. Cache each creator/range for 30 minutes and enforce a one-minute
+   forced-refresh cooldown.
 3. Normalize top FYP tags/media from the response, not from fabricated scores.
 4. Store aggregate measurements, not temporary signed media URLs.
 5. Compare periods locally rather than repeatedly calling overlapping provider ranges.
+6. Persist aggregate snapshots without temporary signed media URLs, and use
+   stale data only as a visible fallback when the provider read fails.
 
 ### Audience and CRM
 
@@ -387,12 +390,15 @@ This is cheaper and more reliable for the documented native triggers than simula
 
 ### Multi-model management
 
-1. Discover with one cached `GET /accounts`.
+1. Discover with an explicit owner-triggered `GET /accounts`; never call it
+   during ordinary model listing or selection.
 2. Upsert by connected-account ID.
 3. Fetch `/me` only when profile data is absent/stale or activation requires identity verification.
 4. Keep every cache, cursor, webhook, outbox row, automation, vault choice, post, and analytic range creator-scoped.
 5. New models default to bot disabled.
 6. Model selection changes dashboard context only; it does not activate chat/post automation.
+7. Return the sanitized model registry with the selection response so the
+   browser does not immediately repeat `GET /api/models`.
 
 ## Known documentation and implementation hazards
 

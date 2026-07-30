@@ -162,6 +162,28 @@ Index(
     CREATOR_CONNECTIONS.c.status,
 )
 
+PROVIDER_READ_CACHE = Table(
+    "provider_read_cache",
+    metadata,
+    Column(
+        "creator_id",
+        String(64),
+        ForeignKey("creators.id"),
+        primary_key=True,
+    ),
+    Column("namespace", String(64), primary_key=True),
+    Column("cache_key", String(255), primary_key=True),
+    Column("payload", JSON, nullable=False),
+    Column("fetched_at", DateTime(timezone=True), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("stale_until", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+)
+Index(
+    "ix_provider_read_cache_expiry",
+    PROVIDER_READ_CACHE.c.expires_at,
+)
+
 FANS = Table(
     "fans",
     metadata,

@@ -30,6 +30,7 @@ from .client_factory import get_fansly_client
 from .apifansly_client import ApifanslyClient, ApifanslyConfig
 from .bulk_posting import BulkPostingService
 from .fyp_analytics import FypAnalyticsService
+from .provider_read_cache import ProviderReadCache
 from .persona.loader import PersonaLoader
 from .notes.repository import FanNoteRepository
 from .memory.store import MessageStore
@@ -321,7 +322,13 @@ bulk_posting = BulkPostingService(
     creator_id=CREATOR_ID,
     client=bulk_posting_client,
 )
-fyp_analytics = FypAnalyticsService(client=bulk_posting_client)
+fyp_analytics = FypAnalyticsService(
+    client=bulk_posting_client,
+    read_cache=ProviderReadCache(
+        database_engine,
+        creator_id=CREATOR_ID,
+    ),
+)
 persona_target = Path(PERSONA_CONFIG_DIR) / f"{CREATOR_ID}.yaml"
 persona_default = Path("config/creators") / f"{CREATOR_ID}.yaml"
 if not persona_target.exists() and persona_default.exists():

@@ -91,6 +91,22 @@ def test_schedule_submits_documented_post_and_updates_metrics():
     assert created_by == "posting-va"
 
 
+def test_walls_use_durable_creator_cache_across_service_instances():
+    service, client = _service()
+
+    first = service.walls()
+    second_service = BulkPostingService(
+        service.engine,
+        creator_id="creator-1",
+        client=client,
+    )
+    second = second_service.walls()
+
+    assert first == [{"id": "wall-1", "name": "Subscribers"}]
+    assert second == first
+    assert second_service._walls_cache_layer == "durable"
+
+
 def test_unchecked_carousel_creates_one_post_per_media():
     service, client = _service()
     payload = _payload(

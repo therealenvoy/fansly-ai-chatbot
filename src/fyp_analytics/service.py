@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import copy
 from datetime import datetime, timedelta, timezone
 import math
 import threading
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
+
+from ..provider_read_cache import ProviderReadCache
 
 if TYPE_CHECKING:
     from ..apifansly_client import ApifanslyClient
@@ -102,10 +105,16 @@ class FypAnalyticsService:
         self,
         *,
         client: "ApifanslyClient | None",
-        cache_ttl: timedelta = timedelta(minutes=10),
+        cache_ttl: timedelta = timedelta(minutes=30),
+        refresh_cooldown: timedelta = timedelta(minutes=1),
+        stale_ttl: timedelta = timedelta(hours=24),
+        read_cache: ProviderReadCache | None = None,
     ):
         self.client = client
         self.cache_ttl = cache_ttl
+        self.refresh_cooldown = refresh_cooldown
+        self.stale_ttl = stale_ttl
+        self.read_cache = read_cache
         self._cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
         self._lock = threading.Lock()
 
@@ -194,13 +203,69 @@ class FypAnalyticsService:
         with self._lock:
             cached = self._cache.get(cache_key)
             if (
+                force_refresh
+                and cached is not None
+                and current - cached[0] < self.refresh_cooldown
+            ):
+                return self._cache_result(
+                    cached[1],
+                    fetched_at=cached[0],
+                    current=current,
+                    layer="memory",
+                    cooldown=True,
+                )
+            if (
                 not force_refresh
                 and cached is not None
                 and current - cached[0] < self.cache_ttl
             ):
-                result = dict(cached[1])
-                result["cached"] = True
-                return result
+                return self._cache_result(
+                    cached[1],
+                    fetched_at=cached[0],
+                    current=current,
+                    layer="memory",
+                )
+
+            durable = None
+            if self.read_cache is not None:
+                try:
+                    durable = self.read_cache.get(
+                        "fyp_analytics",
+                        cache_key,
+                    )
+                except Exception:
+                    durable = None
+            if (
+                force_refresh
+                and durable is not None
+                and current - durable.fetched_at < self.refresh_cooldown
+            ):
+                self._cache[cache_key] = (
+                    durable.fetched_at,
+                    durable.payload,
+                )
+                return self._cache_result(
+                    durable.payload,
+                    fetched_at=durable.fetched_at,
+                    current=current,
+                    layer="durable",
+                    cooldown=True,
+                )
+            if (
+                not force_refresh
+                and durable is not None
+                and durable.is_fresh(current)
+            ):
+                self._cache[cache_key] = (
+                    durable.fetched_at,
+                    durable.payload,
+                )
+                return self._cache_result(
+                    durable.payload,
+                    fetched_at=durable.fetched_at,
+                    current=current,
+                    layer="durable",
+                )
 
             try:
                 raw = self.client.get_profile_statistics(
@@ -209,6 +274,18 @@ class FypAnalyticsService:
                     period=period,
                 )
             except Exception as exc:
+                if (
+                    durable is not None
+                    and durable.is_usable_stale(current)
+                ):
+                    result = self._cache_result(
+                        durable.payload,
+                        fetched_at=durable.fetched_at,
+                        current=current,
+                        layer="stale_if_error",
+                    )
+                    result["stale"] = True
+                    return result
                 raise FypAnalyticsError(
                     "APIFansly could not load profile analytics"
                 ) from exc
@@ -220,8 +297,72 @@ class FypAnalyticsService:
                 period=period,
                 fetched_at=current,
             )
+            result["provider_request_made"] = True
+            result["cache_layer"] = "provider"
+            result["cache_age_seconds"] = 0
+            result["media_thumbnails_available"] = any(
+                item.get("thumbnail_url")
+                for item in result.get("media", [])
+                if isinstance(item, dict)
+            )
             self._cache[cache_key] = (current, result)
+            if self.read_cache is not None:
+                try:
+                    self.read_cache.put(
+                        "fyp_analytics",
+                        cache_key,
+                        self._durable_payload(result),
+                        fetched_at=current,
+                        ttl=self.cache_ttl,
+                        stale_ttl=self.stale_ttl,
+                    )
+                except Exception:
+                    pass
             return dict(result)
+
+    def _cache_result(
+        self,
+        payload: dict[str, Any],
+        *,
+        fetched_at: datetime,
+        current: datetime,
+        layer: str,
+        cooldown: bool = False,
+    ) -> dict[str, Any]:
+        result = copy.deepcopy(payload)
+        result["cached"] = True
+        result["provider_request_made"] = False
+        result["cache_layer"] = layer
+        result["cache_age_seconds"] = max(
+            0,
+            int((current - fetched_at).total_seconds()),
+        )
+        if cooldown:
+            elapsed = current - fetched_at
+            result["refresh_cooldown_seconds"] = max(
+                1,
+                int(
+                    (
+                        self.refresh_cooldown - elapsed
+                    ).total_seconds()
+                ),
+            )
+        return result
+
+    @staticmethod
+    def _durable_payload(
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist metrics, never temporary signed media URLs."""
+        durable = copy.deepcopy(payload)
+        for item in durable.get("media", []):
+            if isinstance(item, dict):
+                item["thumbnail_url"] = None
+        durable["media_thumbnails_available"] = False
+        durable["provider_request_made"] = False
+        durable["cache_layer"] = "durable"
+        durable["cached"] = True
+        return durable
 
     @staticmethod
     def _normalize(

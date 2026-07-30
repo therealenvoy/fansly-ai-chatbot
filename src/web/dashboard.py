@@ -32,6 +32,7 @@ from ..bulk_posting import BulkPostingError, BulkPostingService
 from ..creators import CreatorConnectionRepository, CreatorConnectionService
 from ..creators.connections import CreatorConnectionError
 from ..fyp_analytics import FypAnalyticsError, FypAnalyticsService
+from ..provider_read_cache import ProviderReadCache
 from ..engagement.control_plane import NativePlanRepository
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
@@ -898,7 +899,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         cache = self.server.creator_fyp_analytics
         if self.creator_id not in cache:
             cache[self.creator_id] = FypAnalyticsService(
-                client=service.client_for(self.creator_id)
+                client=service.client_for(self.creator_id),
+                read_cache=ProviderReadCache(
+                    self.engine,
+                    creator_id=self.creator_id,
+                ),
             )
         return cache[self.creator_id]
 
@@ -1273,9 +1278,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
         return self.j(self._models_payload(service))
 
-    def _models_payload(self, service, **extra):
+    def _models_payload(
+        self,
+        service,
+        *,
+        selected_creator_id=None,
+        **extra,
+    ):
         models = service.list_public()
-        selected = self.creator_id
+        selected = selected_creator_id or self.creator_id
         for model in models:
             model["selected"] = model["creator_id"] == selected
             model["chat_runtime_active"] = (
@@ -1377,12 +1388,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "creator_connection_repository",
             None,
         )
+        service = getattr(self.server, "creator_connections", None)
         try:
             payload = json.loads(body or "{}")
             creator_id = str(payload.get("creator_id") or "")
         except json.JSONDecodeError:
             return self.j({"error": "invalid selection"}, 400)
-        if repository is None or not repository.contains(creator_id):
+        if (
+            repository is None
+            or service is None
+            or not repository.contains(creator_id)
+        ):
             return self.j({"error": "unknown model"}, 404)
         signature = hmac.new(
             self.server.model_selection_secret,
@@ -1394,7 +1410,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "Max-Age=2592000; HttpOnly; Secure; SameSite=Strict"
         )
         return self.j(
-            {"selected_creator_id": creator_id},
+            self._models_payload(
+                service,
+                selected_creator_id=creator_id,
+            ),
             extra_headers={"Set-Cookie": cookie},
         )
 
@@ -1412,7 +1431,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 503,
             )
         try:
-            return self.j(service.snapshot())
+            payload = service.snapshot()
+            payload["workspace_creator_id"] = self.creator_id
+            return self.j(payload)
         except Exception as error:
             logger.warning(
                 "Bulk Posting status failed: %s",
@@ -1544,13 +1565,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ).strip()
             after = (query.get("after") or [None])[0]
             before = (query.get("before") or [None])[0]
-            return self.j(
-                service.snapshot(
-                    range_key,
-                    after=after,
-                    before=before,
-                )
+            payload = service.snapshot(
+                range_key,
+                after=after,
+                before=before,
             )
+            payload["workspace_creator_id"] = self.creator_id
+            return self.j(payload)
         except FypAnalyticsError as error:
             return self.j({"error": str(error)}, 400)
         except Exception as error:
@@ -1574,14 +1595,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = json.loads(body or "{}")
             if not isinstance(payload, dict):
                 raise FypAnalyticsError("Invalid analytics refresh payload")
-            return self.j(
-                service.snapshot(
-                    str(payload.get("range", "24h")),
-                    after=payload.get("after"),
-                    before=payload.get("before"),
-                    force_refresh=True,
-                )
+            result = service.snapshot(
+                str(payload.get("range", "24h")),
+                after=payload.get("after"),
+                before=payload.get("before"),
+                force_refresh=True,
             )
+            result["workspace_creator_id"] = self.creator_id
+            return self.j(result)
         except (FypAnalyticsError, json.JSONDecodeError) as error:
             return self.j({"error": str(error)}, 400)
         except Exception as error:
