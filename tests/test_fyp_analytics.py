@@ -48,6 +48,7 @@ def _provider_response():
                     "views": 90,
                     "uniqueViewers": 45,
                     "interactionTime": 180000,
+                    "tagIds": ["tag-1", "tag-2"],
                 }
             ],
         },
@@ -117,7 +118,9 @@ def test_normalizes_real_fyp_tag_media_and_time_metrics():
         "unique_viewers": 45,
         "avg_engagement_seconds": 4.0,
         "thumbnail_url": "https://cdn.example/fyp.jpg",
+        "playback_url": "https://cdn.example/fyp.mp4",
         "media_type": "video",
+        "hashtags": ["cosplay", "fyp"],
     }
     assert result["best_times"]["hours"][0] == {
         "hour_utc": 8,
@@ -149,7 +152,26 @@ def test_matches_fyp_offer_to_account_media_provider_media_id():
     assert result["media"][0]["thumbnail_url"] == (
         "https://cdn.example/fyp.jpg"
     )
+    assert result["media"][0]["playback_url"] == (
+        "https://cdn.example/fyp.mp4"
+    )
     assert result["media"][0]["media_type"] == "video"
+
+
+def test_does_not_assign_range_tags_to_media_without_provider_mapping():
+    response = _provider_response()
+    response["dataset"]["topFypMediaOffers"][0].pop("tagIds")
+    client = MagicMock()
+    client.get_profile_statistics.return_value = response
+    service = FypAnalyticsService(client=client)
+
+    result = service.snapshot(
+        "24h",
+        now=datetime(2026, 7, 30, 10, tzinfo=timezone.utc),
+    )
+
+    assert result["tags"]
+    assert result["media"][0]["hashtags"] == []
 
 
 def test_caches_each_range_for_ten_minutes_and_force_refreshes():
@@ -212,6 +234,7 @@ def test_durable_cache_survives_service_restart_without_signed_urls():
     assert durable["cache_layer"] == "durable"
     assert durable["provider_request_made"] is False
     assert durable["media"][0]["thumbnail_url"] is None
+    assert durable["media"][0]["playback_url"] is None
     assert durable["media_thumbnails_available"] is False
     second_client.get_profile_statistics.assert_not_called()
 

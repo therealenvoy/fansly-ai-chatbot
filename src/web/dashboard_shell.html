@@ -340,6 +340,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 .bulk-card:first-child{border-color:rgba(161,124,255,.6)}.bulk-card h3{font-size:13px}.bulk-card-copy{margin:4px 0 14px;color:var(--muted);font-size:9px}
 .bulk-card-remove{position:absolute;top:12px;right:12px;width:25px;height:25px;border:1px solid rgba(255,107,125,.22);border-radius:50%;background:rgba(255,107,125,.08);color:var(--red);cursor:pointer}
 .bulk-fields{display:grid;grid-template-columns:1fr 1fr;gap:11px}.bulk-field-full{grid-column:1/-1}.bulk-tags-row{display:grid;grid-template-columns:1fr 34px;gap:6px}
+.bulk-timezone-note{display:block;margin-top:5px;color:var(--faint);font-size:8px;line-height:1.4}
 .bulk-spark{border:1px solid rgba(161,124,255,.25);border-radius:9px;background:rgba(161,124,255,.12);color:var(--violet);cursor:pointer}
 .bulk-checks{display:flex;flex-wrap:wrap;gap:17px;margin:10px 0}.bulk-checks label{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:9px}.bulk-checks input{width:auto}
 .bulk-drop{min-height:76px;display:flex;align-items:center;justify-content:center;padding:15px;border:1px dashed rgba(161,124,255,.35);border-radius:11px;background:rgba(161,124,255,.035);color:var(--muted);font-size:9px;text-align:center;cursor:pointer}.bulk-drop.drag{border-color:var(--violet);background:rgba(161,124,255,.1)}.bulk-drop strong{color:var(--text)}
@@ -353,7 +354,9 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 .fyp-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-bottom:16px}.fyp-kpi{min-height:112px;padding:16px;border:1px solid var(--line);border-radius:15px;background:var(--surface)}.fyp-kpi span{display:block;color:var(--muted);font-size:9px}.fyp-kpi strong{display:block;margin-top:12px;font-size:26px;letter-spacing:-.6px}.fyp-kpi small{display:block;margin-top:6px;color:var(--faint);font-size:8px;line-height:1.4}
 .fyp-source{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:8px}.fyp-source b{color:var(--green);font-weight:700}.fyp-tags{display:flex;flex-wrap:wrap;gap:8px}.fyp-tag{display:inline-flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid rgba(161,124,255,.28);border-radius:999px;background:rgba(161,124,255,.06);color:var(--text);font-size:9px;font-weight:680}.fyp-tag small{padding:2px 5px;border-radius:999px;background:rgba(255,255,255,.07);color:var(--muted);font-size:7px}
 .fyp-trend{display:flex;align-items:flex-end;gap:4px;height:210px;padding:20px 14px 12px;border:1px solid var(--line);border-radius:15px;background:var(--surface);overflow:hidden}.fyp-bar{flex:1;min-width:3px;border-radius:4px 4px 1px 1px;background:linear-gradient(180deg,#b794ff,#6d4dc1);opacity:.82}.fyp-bar:hover{opacity:1}
-.fyp-media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:11px}.fyp-media-card{padding:10px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}.fyp-media-thumb{height:120px;border-radius:10px;background:linear-gradient(145deg,#242432,#171721);overflow:hidden;display:grid;place-items:center;color:var(--faint);font-size:20px}.fyp-media-thumb img{width:100%;height:100%;object-fit:cover}.fyp-media-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:9px;font-size:8px;color:var(--muted)}.fyp-media-meta strong{color:var(--text);font-size:10px}
+.fyp-media-controls{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;padding:12px;border:1px solid var(--line);border-radius:13px;background:var(--surface)}.fyp-media-filters{display:flex;gap:8px;flex-wrap:wrap}.fyp-media-filters label{min-width:150px;margin:0}.fyp-media-range-tags{display:flex;align-items:center;gap:7px;flex-wrap:wrap;color:var(--faint);font-size:8px}.fyp-media-range-tags .fyp-tag{padding:5px 8px;font-size:8px}
+.fyp-media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:11px}.fyp-media-card{display:block;width:100%;padding:10px;border:1px solid var(--line);border-radius:14px;background:var(--surface);color:inherit;text-align:left;cursor:pointer;transition:border-color .16s ease,transform .16s ease}.fyp-media-card:hover,.fyp-media-card:focus-visible{border-color:rgba(161,124,255,.65);transform:translateY(-1px);outline:none}.fyp-media-thumb{position:relative;height:120px;border-radius:10px;background:linear-gradient(145deg,#242432,#171721);overflow:hidden;display:grid;place-items:center;color:var(--faint);font-size:20px}.fyp-media-thumb img{width:100%;height:100%;object-fit:cover}.fyp-media-play{position:absolute;right:8px;bottom:8px;display:grid;place-items:center;width:28px;height:28px;border-radius:50%;background:rgba(10,10,16,.82);color:#fff;font-size:11px;box-shadow:0 4px 14px rgba(0,0,0,.35)}.fyp-media-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:9px;font-size:8px;color:var(--muted)}.fyp-media-meta strong{color:var(--text);font-size:10px}.fyp-media-stats{display:flex;gap:8px;margin-top:6px;color:var(--faint);font-size:8px}.fyp-media-card-tags{display:flex;gap:5px;flex-wrap:wrap;min-height:18px;margin-top:8px}.fyp-media-card-tags span{padding:3px 6px;border-radius:999px;background:rgba(161,124,255,.1);color:#cdbaff;font-size:7px}.fyp-media-card-tags .unavailable{padding:0;background:transparent;color:var(--faint)}
+.fyp-media-modal{position:fixed;inset:0;z-index:100;display:grid;place-items:center;padding:24px;background:rgba(6,6,10,.86);backdrop-filter:blur(12px)}.fyp-media-modal-card{position:relative;width:min(920px,96vw);max-height:92vh;overflow:auto;padding:16px;border:1px solid var(--line-strong);border-radius:18px;background:#11111a;box-shadow:0 30px 100px rgba(0,0,0,.65)}.fyp-media-modal-close{position:absolute;top:12px;right:12px;z-index:2;width:34px;height:34px;border:1px solid var(--line-strong);border-radius:50%;background:rgba(10,10,16,.85);color:#fff;cursor:pointer}.fyp-media-modal-stage{display:grid;place-items:center;min-height:260px;border-radius:13px;overflow:hidden;background:#08080d}.fyp-media-modal-stage video,.fyp-media-modal-stage img{display:block;max-width:100%;max-height:74vh}.fyp-media-modal-copy{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;padding:12px 2px 0;color:var(--muted);font-size:9px}.fyp-media-modal-copy strong{color:var(--text);font-size:11px}
 .fyp-custom{display:none;grid-template-columns:1fr 1fr auto;gap:8px;width:min(620px,100%);margin-bottom:16px}.fyp-custom.show{display:grid}.fyp-recommendations{display:grid;gap:9px}.fyp-recommendation{padding:15px 17px;border:1px solid var(--line);border-radius:13px;background:var(--surface);font-size:10px;line-height:1.55;color:var(--muted)}.fyp-recommendation b{color:var(--violet);margin-right:8px}
 .fyp-best{display:grid;grid-template-columns:1fr 1fr;gap:13px}.fyp-best-list{padding:17px;border:1px solid var(--line);border-radius:15px;background:var(--surface)}.fyp-best-list h3{font-size:12px;margin-bottom:11px}.fyp-best-row{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:9px;color:var(--muted)}.fyp-best-row:last-child{border-bottom:0}.fyp-best-row strong{color:var(--text)}
 .drawer{position:fixed;inset:14px 14px 14px auto;width:500px;max-width:calc(100vw - 28px);z-index:60;display:flex;flex-direction:column;border:1px solid var(--line-strong);border-radius:20px;background:rgba(18,18,27,.98);box-shadow:-30px 0 80px rgba(0,0,0,.45);transform:translateX(calc(100% + 28px));transition:transform .22s ease;backdrop-filter:blur(20px)}
@@ -535,6 +538,8 @@ var bulkPostingNextCardId=1;
 var fypAnalyticsRange='24h';
 var fypAnalyticsView='overview';
 var fypAnalyticsData=null;
+var fypMediaSort='views_desc';
+var fypMediaType='all';
 var modelSetupData=null;
 var modelRailData=null;
 var modelConnectAttempt='';
@@ -1241,6 +1246,15 @@ async function loadBulkPosting(force){
   }
 }
 function bulkMetric(label,value,foot){return'<article class="bulk-kpi"><span class="label">'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(foot||'')+'</small></article>'}
+function browserTimezoneLabel(){
+  var zone='Local browser time',offset='';
+  try{
+    zone=Intl.DateTimeFormat().resolvedOptions().timeZone||zone;
+    var part=new Intl.DateTimeFormat('en',{timeZoneName:'shortOffset'}).formatToParts(new Date()).find(function(item){return item.type==='timeZoneName'});
+    offset=part&&part.value?part.value:'';
+  }catch(error){}
+  return zone+(offset?' ('+offset.replace('GMT','UTC')+')':'');
+}
 function renderBulkPosting(){
   var d=bulkPostingData||{},m=d.metrics||{},c=document.getElementById('content');
   var next=m.next_post?new Date(m.next_post).toLocaleString():'—',rate=m.delivery_rate==null?'—':Number(m.delivery_rate).toFixed(1)+'%';
@@ -1250,7 +1264,7 @@ function renderBulkPosting(){
   if(!d.available)h+='<section class="block"><p class="block-copy" style="color:var(--amber)">'+esc(d.reason||'Bulk Posting is not configured')+'</p></section>';
   if(bulkPostingView==='scheduled'){
     var rows=d.posts||[];
-    h+=rows.length?'<section class="block"><table class="bulk-table"><thead><tr><th>Schedule</th><th>Caption</th><th>Media</th><th>Recurrence</th><th>Status</th></tr></thead><tbody>'+rows.map(function(p){return'<tr><td>'+esc(new Date(p.scheduled_for).toLocaleString())+'</td><td>'+esc(String(p.caption||'').slice(0,90)||'Media post')+'</td><td>'+Number(p.media_count||0)+'</td><td>'+esc(String(p.recurrence||'one_time').replace('_',' '))+'</td><td>'+esc(p.status||'')+'</td></tr>'}).join('')+'</tbody></table></section>':emptyState('□','No scheduled posts','Your scheduled posts will appear here.');
+    h+=rows.length?'<section class="block"><table class="bulk-table"><thead><tr><th>Schedule · '+esc(browserTimezoneLabel())+'</th><th>Caption</th><th>Media</th><th>Recurrence</th><th>Status</th></tr></thead><tbody>'+rows.map(function(p){return'<tr><td>'+esc(new Date(p.scheduled_for).toLocaleString())+'</td><td>'+esc(String(p.caption||'').slice(0,90)||'Media post')+'</td><td>'+Number(p.media_count||0)+'</td><td>'+esc(String(p.recurrence||'one_time').replace('_',' '))+'</td><td>'+esc(p.status||'')+'</td></tr>'}).join('')+'</tbody></table></section>':emptyState('□','No scheduled posts','Your scheduled posts will appear here.');
   }else{
     h+='<div class="bulk-grid">'+bulkPostingCards.map(function(card,index){return bulkCardMarkup(card,index,d)}).join('')+'</div>';
   }
@@ -1260,7 +1274,7 @@ function bulkCardMarkup(card,index,data){
   var walls=data.walls||[],disabled=!data.available?' disabled':'',remove=index?'<button class="bulk-card-remove" data-action="remove-bulk-card" data-card-id="'+card.id+'" aria-label="Remove post">×</button>':'';
   var wallOptions=walls.map(function(w){return'<option value="'+attr(w.id)+'"'+((card.wall_ids||[]).indexOf(String(w.id))>=0?' selected':'')+'>'+esc(w.name||'Wall')+'</option>'}).join('');
   var paidDisabled=data.paid_preview_supported?'':' disabled title="'+attr(data.paid_preview_reason||'Not supported by the provider')+'"';
-  return'<section class="bulk-card" data-bulk-card="'+card.id+'">'+remove+'<h3>Schedule a new post</h3><p class="bulk-card-copy">Drop content on autopilot. Recurring or one-time.</p><div class="bulk-fields"><div class="bulk-field-full"><label>Caption</label><textarea data-bulk-field="caption" maxlength="10000" placeholder="What’s your fans gonna read?">'+esc(card.caption||'')+'</textarea></div><div class="bulk-field-full"><label>Tags (comma or space separated, # optional)</label><div class="bulk-tags-row"><input data-bulk-field="tags" value="'+attr(card.tags||'')+'" placeholder="petite, kawaii, #fyp"><button class="bulk-spark" data-action="bulk-suggest-tags" data-card-id="'+card.id+'" title="Suggest tags from caption">✦</button></div></div><div><label>Schedule for</label><input data-bulk-field="scheduled_for" type="datetime-local" value="'+attr(card.scheduled_for||'')+'"></div><div><label>Recurrence</label><select data-bulk-field="recurrence">'+['one_time','daily','weekly','monthly'].map(function(value){return'<option value="'+value+'"'+(card.recurrence===value?' selected':'')+'>'+esc(value==='one_time'?'One-time':value.charAt(0).toUpperCase()+value.slice(1))+'</option>'}).join('')+'</select></div><div><label>Expires at (optional)</label><input data-bulk-field="expires_at" type="datetime-local" value="'+attr(card.expires_at||'')+'"></div><div><label>Walls</label><select data-bulk-field="walls" multiple size="'+Math.max(2,Math.min(4,walls.length||2))+'"'+disabled+'>'+wallOptions+'</select></div></div><div class="bulk-checks"><label><input data-bulk-field="carousel" type="checkbox"'+(card.carousel?' checked':'')+'> Group multiple media as one carousel</label><label'+(paidDisabled?' title="'+attr(data.paid_preview_reason||'Not supported')+'"':'')+'><input data-bulk-field="paid_preview" type="checkbox"'+paidDisabled+'> Use first image as paid-post preview</label></div><label>Media</label><div class="bulk-drop" data-action="choose-bulk-media" data-card-id="'+card.id+'"><input type="file" data-bulk-upload="'+card.id+'" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm" multiple hidden><span>⇧ &nbsp;<strong>Drop media here</strong> or click to upload — videos, photos, GIFs</span></div><div class="bulk-media-list" data-bulk-media-list="'+card.id+'">'+bulkMediaMarkup(card)+'</div><div class="bulk-status" data-bulk-status="'+card.id+'"></div><button class="btn" style="margin-top:10px" data-action="schedule-bulk-post" data-card-id="'+card.id+'"'+disabled+'>+ Schedule Post</button></section>'
+  return'<section class="bulk-card" data-bulk-card="'+card.id+'">'+remove+'<h3>Schedule a new post</h3><p class="bulk-card-copy">Drop content on autopilot. Recurring or one-time.</p><div class="bulk-fields"><div class="bulk-field-full"><label>Caption</label><textarea data-bulk-field="caption" maxlength="10000" placeholder="What’s your fans gonna read?">'+esc(card.caption||'')+'</textarea></div><div class="bulk-field-full"><label>Tags (comma or space separated, # optional)</label><div class="bulk-tags-row"><input data-bulk-field="tags" value="'+attr(card.tags||'')+'" placeholder="petite, kawaii, #fyp"><button class="bulk-spark" data-action="bulk-suggest-tags" data-card-id="'+card.id+'" title="Suggest tags from caption">✦</button></div></div><div><label>Schedule for</label><input data-bulk-field="scheduled_for" type="datetime-local" value="'+attr(card.scheduled_for||'')+'"><small class="bulk-timezone-note">'+esc(browserTimezoneLabel())+' · converted to UTC automatically</small></div><div><label>Recurrence</label><select data-bulk-field="recurrence">'+['one_time','daily','weekly','monthly'].map(function(value){return'<option value="'+value+'"'+(card.recurrence===value?' selected':'')+'>'+esc(value==='one_time'?'One-time':value.charAt(0).toUpperCase()+value.slice(1))+'</option>'}).join('')+'</select></div><div><label>Expires at (optional)</label><input data-bulk-field="expires_at" type="datetime-local" value="'+attr(card.expires_at||'')+'"><small class="bulk-timezone-note">'+esc(browserTimezoneLabel())+'</small></div><div><label>Walls</label><select data-bulk-field="walls" multiple size="'+Math.max(2,Math.min(4,walls.length||2))+'"'+disabled+'>'+wallOptions+'</select></div></div><div class="bulk-checks"><label><input data-bulk-field="carousel" type="checkbox"'+(card.carousel?' checked':'')+'> Group multiple media as one carousel</label><label'+(paidDisabled?' title="'+attr(data.paid_preview_reason||'Not supported')+'"':'')+'><input data-bulk-field="paid_preview" type="checkbox"'+paidDisabled+'> Use first image as paid-post preview</label></div><label>Media</label><div class="bulk-drop" data-action="choose-bulk-media" data-card-id="'+card.id+'"><input type="file" data-bulk-upload="'+card.id+'" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm" multiple hidden><span>⇧ &nbsp;<strong>Drop media here</strong> or click to upload — videos, photos, GIFs</span></div><div class="bulk-media-list" data-bulk-media-list="'+card.id+'">'+bulkMediaMarkup(card)+'</div><div class="bulk-status" data-bulk-status="'+card.id+'"></div><button class="btn" style="margin-top:10px" data-action="schedule-bulk-post" data-card-id="'+card.id+'"'+disabled+'>+ Schedule Post</button></section>'
 }
 function bulkMediaMarkup(card){return(card.media||[]).map(function(media,index){return'<div class="bulk-media-chip"><span>'+esc(media.name||media.media_type||'Media')+'</span><button data-action="remove-bulk-media" data-card-id="'+card.id+'" data-media-index="'+index+'" aria-label="Remove media">×</button></div>'}).join('')}
 function bulkCardById(cardId){return bulkPostingCards.find(function(card){return card.id===Number(cardId)})}
@@ -1301,6 +1315,46 @@ function fypMetric(label,value,foot){return'<article class="fyp-kpi"><span>'+esc
 function fypRangeMarkup(){return'<div class="fyp-ranges">'+['24h','7d','30d','custom'].map(function(key){return'<button class="fyp-range'+(fypAnalyticsRange===key?' active':'')+'" data-action="fyp-range" data-range="'+key+'">'+(key==='custom'?'Custom':key)+'</button>'}).join('')+'</div>'}
 function fypCustomMarkup(){var now=new Date(),before=now.toISOString().slice(0,16),after=new Date(now.getTime()-7*86400000).toISOString().slice(0,16);return'<div class="fyp-custom'+(fypAnalyticsRange==='custom'?' show':'')+'"><input id="fyp-after" type="datetime-local" value="'+attr((fypAnalyticsData&&fypAnalyticsData.range==='custom'&&fypAnalyticsData.after?new Date(fypAnalyticsData.after).toISOString().slice(0,16):after))+'"><input id="fyp-before" type="datetime-local" value="'+attr((fypAnalyticsData&&fypAnalyticsData.range==='custom'&&fypAnalyticsData.before?new Date(fypAnalyticsData.before).toISOString().slice(0,16):before))+'"><button class="btn" data-action="fyp-custom-apply">Apply</button></div>'}
 function fypTabMarkup(){var tabs=[['overview','Overview'],['recommendations','Recommendations'],['content','Content'],['media','Media'],['tags','Tags'],['trends','Trends'],['best-times','Best Times']];return'<div class="fyp-tabs">'+tabs.map(function(tab){return'<button class="fyp-tab'+(fypAnalyticsView===tab[0]?' active':'')+'" data-action="fyp-tab" data-view="'+tab[0]+'">'+tab[1]+'</button>'}).join('')+'</div>'}
+function sortedFypMedia(rows){
+  var filtered=(rows||[]).filter(function(row){return fypMediaType==='all'||String(row.media_type||'media')===fypMediaType});
+  return filtered.slice().sort(function(a,b){
+    if(fypMediaSort==='views_asc')return Number(a.views||0)-Number(b.views||0);
+    if(fypMediaSort==='unique_desc')return Number(b.unique_viewers||0)-Number(a.unique_viewers||0);
+    if(fypMediaSort==='engagement_desc')return Number(b.avg_engagement_seconds||0)-Number(a.avg_engagement_seconds||0);
+    return Number(b.views||0)-Number(a.views||0);
+  });
+}
+function fypMediaToolbar(data,visible,total){
+  var sortOptions=[['views_desc','Highest views'],['views_asc','Lowest views'],['unique_desc','Most unique viewers'],['engagement_desc','Highest engagement']];
+  var typeOptions=[['all','All media'],['video','Videos'],['image','Images']];
+  var tags=(data.tags||[]).slice(0,10);
+  return'<div class="fyp-media-controls"><div class="fyp-media-filters"><label>Sort<select id="fyp-media-sort">'+sortOptions.map(function(option){return'<option value="'+option[0]+'"'+(fypMediaSort===option[0]?' selected':'')+'>'+option[1]+'</option>'}).join('')+'</select></label><label>Type<select id="fyp-media-type">'+typeOptions.map(function(option){return'<option value="'+option[0]+'"'+(fypMediaType===option[0]?' selected':'')+'>'+option[1]+'</option>'}).join('')+'</select></label></div><div class="fyp-media-range-tags"><span>'+Number(visible)+' of '+Number(total)+' · top hashtags in this range</span>'+(tags.length?tags.map(function(tag){return'<span class="fyp-tag">#'+esc(tag.name)+' <small>'+fypCompact(tag.views)+'</small></span>'}).join(''):'<span>No range tags returned</span>')+'</div></div>';
+}
+function fypMediaCardTags(row){
+  var tags=row.hashtags||[];
+  return'<div class="fyp-media-card-tags">'+(tags.length?tags.map(function(tag){return'<span>#'+esc(tag)+'</span>'}).join(''):'<span class="unavailable">Per-video hashtags not exposed by APIFansly</span>')+'</div>';
+}
+function closeFypMedia(){
+  var modal=document.getElementById('fyp-media-modal');
+  if(modal)modal.remove();
+}
+function openFypMedia(rank){
+  var row=((fypAnalyticsData||{}).media||[]).find(function(item){return Number(item.rank)===Number(rank)});
+  if(!row)return;
+  var source=row.playback_url||row.thumbnail_url;
+  if(!source){
+    alert('This signed preview is not cached. Use Refresh (provider read) to request a fresh preview URL.');
+    return
+  }
+  closeFypMedia();
+  var stage=String(row.media_type)==='video'&&row.playback_url?'<video src="'+attr(row.playback_url)+'"'+(row.thumbnail_url?' poster="'+attr(row.thumbnail_url)+'"':'')+' controls playsinline preload="metadata"></video>':'<img src="'+attr(source)+'" alt="FYP media rank '+Number(row.rank||0)+'">';
+  var tags=(row.hashtags||[]).map(function(tag){return'#'+tag}).join(' ');
+  var modal=document.createElement('div');
+  modal.id='fyp-media-modal';
+  modal.className='fyp-media-modal';
+  modal.innerHTML='<article class="fyp-media-modal-card" role="dialog" aria-modal="true" aria-label="FYP media preview"><button class="fyp-media-modal-close" data-action="fyp-media-close" aria-label="Close preview">×</button><div class="fyp-media-modal-stage">'+stage+'</div><div class="fyp-media-modal-copy"><strong>#'+Number(row.rank||0)+' · '+fypCompact(row.views)+' views</strong><span>'+fypCompact(row.unique_viewers)+' unique · '+Number(row.avg_engagement_seconds||0).toFixed(1)+'s avg engagement'+(tags?' · '+esc(tags):'')+'</span></div></article>';
+  document.body.appendChild(modal);
+}
 function loadFypAnalytics(force){
   var c=document.getElementById('content'),after='',before='';
   if(fypAnalyticsRange==='custom'){
@@ -1364,8 +1418,9 @@ function renderFypAnalytics(){
     var content=d.media||[];
     h+=content.length?'<div class="panel"><table><thead><tr><th>Rank</th><th>FYP views</th><th>Unique viewers</th><th>Avg. engagement</th><th>Type</th></tr></thead><tbody>'+content.map(function(row){return'<tr><td>#'+Number(row.rank||0)+'</td><td>'+fypCompact(row.views)+'</td><td>'+fypCompact(row.unique_viewers)+'</td><td>'+Number(row.avg_engagement_seconds||0).toFixed(1)+'s</td><td>'+esc(row.media_type||'media')+'</td></tr>'}).join('')+'</tbody></table></div>':emptyState('▣','No top FYP content','APIFansly did not return topFypMediaOffers for this range.');
   }else if(fypAnalyticsView==='media'){
-    var media=d.media||[];
-    h+=media.length?'<div class="fyp-media-grid">'+media.map(function(row){var preview=row.thumbnail_url?'<img src="'+attr(row.thumbnail_url)+'" alt="FYP media rank '+Number(row.rank||0)+'" loading="lazy">':'▣';return'<article class="fyp-media-card"><div class="fyp-media-thumb">'+preview+'</div><div class="fyp-media-meta"><strong>#'+Number(row.rank||0)+' · '+fypCompact(row.views)+' views</strong><span>'+esc(row.media_type||'media')+'</span></div></article>'}).join('')+'</div>':emptyState('▣','No FYP media yet','Top FYP media will appear when APIFansly returns media attribution.');
+    var allMedia=d.media||[],media=sortedFypMedia(allMedia);
+    h+=fypMediaToolbar(d,media.length,allMedia.length);
+    h+=media.length?'<div class="fyp-media-grid">'+media.map(function(row){var preview=row.thumbnail_url?'<img src="'+attr(row.thumbnail_url)+'" alt="FYP media rank '+Number(row.rank||0)+'" loading="lazy">':'▣';var playable=row.playback_url||row.thumbnail_url;return'<button type="button" class="fyp-media-card" data-action="fyp-media-open" data-rank="'+Number(row.rank||0)+'" title="'+attr(playable?'Open media preview':'Refresh analytics for a fresh signed preview URL')+'"><div class="fyp-media-thumb">'+preview+(playable?'<span class="fyp-media-play">▶</span>':'')+'</div><div class="fyp-media-meta"><strong>#'+Number(row.rank||0)+' · '+fypCompact(row.views)+' views</strong><span>'+esc(row.media_type||'media')+'</span></div><div class="fyp-media-stats"><span>'+fypCompact(row.unique_viewers)+' unique</span><span>'+Number(row.avg_engagement_seconds||0).toFixed(1)+'s avg</span></div>'+fypMediaCardTags(row)+'</button>'}).join('')+'</div>':emptyState('▣','No matching FYP media','Change the media-type filter or refresh when APIFansly has more analytics.');
   }else if(fypAnalyticsView==='tags'){
     var tags=d.tags||[];
     h+=tags.length?'<div class="panel"><table><thead><tr><th>Rank</th><th>Tag</th><th>FYP views</th><th>Share of FYP views</th></tr></thead><tbody>'+tags.map(function(tag,index){return'<tr><td>#'+(index+1)+'</td><td>#'+esc(tag.name)+'</td><td>'+fypCompact(tag.views)+'</td><td>'+Number(Number(tag.views||0)*100/Math.max(1,Number(m.fyp_views||0))).toFixed(1)+'%</td></tr>'}).join('')+'</tbody></table></div>':emptyState('#','No tag analytics','APIFansly did not return topFypTags for this range.');
@@ -1412,6 +1467,7 @@ async function toggleBot(button){
 
 document.addEventListener('click',function(event){
   var nav=event.target.closest('.nav-item[data-tab]');if(nav){navTo(nav.dataset.tab);return}
+  if(event.target.id==='fyp-media-modal'){closeFypMedia();return}
   var control=event.target.closest('[data-action]');if(!control)return;
   var action=control.dataset.action,stepIndex=Number(control.dataset.stepIndex),sequenceId=Number(control.dataset.sequenceId),scriptIndex=Number(control.dataset.scriptIndex),scriptId=Number(control.dataset.scriptId),mediaAssetId=Number(control.dataset.mediaAssetId);
   if(action==='refresh-view')refreshCurrent();
@@ -1434,6 +1490,8 @@ document.addEventListener('click',function(event){
   else if(action==='fyp-custom-apply')loadFypAnalytics(false);
   else if(action==='fyp-refresh')loadFypAnalytics(true);
   else if(action==='fyp-tab'){fypAnalyticsView=control.dataset.view||'overview';renderFypAnalytics()}
+  else if(action==='fyp-media-open')openFypMedia(Number(control.dataset.rank));
+  else if(action==='fyp-media-close')closeFypMedia();
   else if(action==='connect-model')connectModel();
   else if(action==='verify-model')verifyModel();
   else if(action==='sync-models')syncManagedModels(true);
@@ -1488,11 +1546,11 @@ document.addEventListener('click',function(event){
   else if(action==='select-media'&&Number.isInteger(stepIndex))selectMedia(stepIndex,control.dataset.mediaId||'',control.dataset.previewId||'');
 });
 document.addEventListener('input',function(event){if(event.target.id==='conversation-search')filterConversations(event.target.value)});
-document.addEventListener('change',function(event){if(event.target.id==='album-picker'){var stepIndex=Number(event.target.dataset.stepIndex);if(Number.isInteger(stepIndex))loadAlbumMedia(stepIndex)}else if(event.target.id==='voice-document-select')selectVoiceDocument(event.target.value);else if(event.target.matches('[data-bulk-upload]')){uploadBulkFiles(event.target.dataset.bulkUpload,Array.from(event.target.files||[]));event.target.value=''}});
+document.addEventListener('change',function(event){if(event.target.id==='album-picker'){var stepIndex=Number(event.target.dataset.stepIndex);if(Number.isInteger(stepIndex))loadAlbumMedia(stepIndex)}else if(event.target.id==='voice-document-select')selectVoiceDocument(event.target.value);else if(event.target.id==='fyp-media-sort'){fypMediaSort=event.target.value||'views_desc';renderFypAnalytics()}else if(event.target.id==='fyp-media-type'){fypMediaType=event.target.value||'all';renderFypAnalytics()}else if(event.target.matches('[data-bulk-upload]')){uploadBulkFiles(event.target.dataset.bulkUpload,Array.from(event.target.files||[]));event.target.value=''}});
 document.addEventListener('dragover',function(event){var drop=event.target.closest('.bulk-drop');if(drop){event.preventDefault();drop.classList.add('drag')}});
 document.addEventListener('dragleave',function(event){var drop=event.target.closest('.bulk-drop');if(drop)drop.classList.remove('drag')});
 document.addEventListener('drop',function(event){var drop=event.target.closest('.bulk-drop');if(drop){event.preventDefault();drop.classList.remove('drag');uploadBulkFiles(drop.dataset.cardId,Array.from(event.dataTransfer.files||[]))}});
-document.addEventListener('keydown',function(event){if(event.key==='Escape')closeDrawer()});
+document.addEventListener('keydown',function(event){if(event.key==='Escape'){closeFypMedia();closeDrawer()}});
 window.addEventListener('hashchange',function(){navTo(location.hash.slice(1)||'dashboard',true)});
 
 if(IS_POSTING_VA){

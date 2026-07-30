@@ -1260,6 +1260,11 @@ class TestDashboardSecurity:
         assert "getWorkspaceSnapshot('fyp-analytics'" in body
         assert "getWorkspaceSnapshot('bulk-posting'" in body
         assert "bulkPostingCards=[]" in body
+        assert "function sortedFypMedia(rows)" in body
+        assert "data-action=\"fyp-media-open\"" in body
+        assert "Per-video hashtags not exposed by APIFansly" in body
+        assert "function browserTimezoneLabel()" in body
+        assert "converted to UTC automatically" in body
         assert "data.models||[]" not in (
             body.split("async function selectModel(creatorId){", 1)[1]
             .split("function renderModelRail", 1)[0]

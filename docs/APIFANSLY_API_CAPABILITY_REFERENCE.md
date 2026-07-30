@@ -187,7 +187,7 @@ The supplied pages do **not** expose a fan-online-presence feed or an “online 
 
 | Capability | Method and route | Important inputs and result | Project |
 |---|---|---|---|
-| [List Posts](https://docs.apifansly.com/api-reference/posts/list-posts) | `GET /{account_id}/posts` | Returns account posts and associated media/account aggregation. No query parameters are documented on the supplied page. | **Missing** |
+| [List Posts](https://docs.apifansly.com/api-reference/posts/list-posts) | The live page currently says this endpoint is not available yet. | **Provider-blocked** |
 | [Create Post](https://docs.apifansly.com/api-reference/posts/create-post) | `POST /{account_id}/posts` | At least one of `content` or `mediaIds`; optional `postToFYP`, millisecond schedule/expiry, walls, pinning, reply/quote, and reply-permission fields. | **Implemented for content, media IDs, walls, schedule, and expiry** |
 | [Delete Post](https://docs.apifansly.com/api-reference/posts/delete-post) | `DELETE /{account_id}/posts/{post_id}` | No body documented. | **Missing** |
 | [Update Post](https://docs.apifansly.com/api-reference/posts/update-post) | `POST /{account_id}/posts/{post_id}` | Same body as create. Omitted fields are cleared by Fansly, so use read-modify-write. | **Missing** |
@@ -204,6 +204,8 @@ Current live Create Post rules, re-verified from the rendered page HTML on 2026-
 - `mediaIds` contains media IDs returned by Vault Media or Upload Media; the simple documented form is a string array.
 - `postToFYP` is optional and requires a public video of at least three seconds.
 - `scheduledFor` and `expiresAt` are Unix timestamps in milliseconds.
+- The dashboard `datetime-local` picker is interpreted in the operator's
+  browser timezone, converted to UTC, and then sent as Unix milliseconds.
 - `wallIds` is optional; omitting it posts to the default wall.
 - The success response contains generated `attachments`, but `attachments` is not the current create request field.
 - Update behavior must be separately verified before assuming omitted current content/media are preserved.
@@ -217,6 +219,11 @@ Documentation-drift warning: the page has changed between `mediaIds`/millisecond
 | [Profile Statistics](https://docs.apifansly.com/api-reference/profile-stats) | `GET /{accountId}/analytics/profilestats` | Optional millisecond `afterDate`, `beforeDate`, `period`; or `year`, `month`. Returns datapoints, traffic sources, top FYP tags/media, and media aggregation. | **Implemented** and consumed by FYP Analytics with a 30-minute creator/range cache, durable aggregate fallback, and a one-minute forced-refresh cooldown. |
 
 Useful period values are `3,600,000` for one hour and `86,400,000` for one day. The response exposes media/profile time series, traffic sources, `topMediaOffers`, `topFypMediaOffers`, `topFypTags`, and aggregated account media. Keep signed media URLs short-lived and out of logs.
+
+The dashboard may use signed `aggregationData.accountMedia.media.locations`
+for an authenticated click-to-preview experience, but must never persist those
+URLs. `topFypTags` is range-level attribution; do not claim a tag belongs to a
+specific media item unless APIFansly explicitly returns that association.
 
 ## Subscribers
 
@@ -379,6 +386,8 @@ This is cheaper and more reliable for the documented native triggers than simula
 5. Compare periods locally rather than repeatedly calling overlapping provider ranges.
 6. Persist aggregate snapshots without temporary signed media URLs, and use
    stale data only as a visible fallback when the provider read fails.
+7. Sort and filter normalized media locally. These UI operations must not call
+   APIFansly or consume credits.
 
 ### Audience and CRM
 

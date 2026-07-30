@@ -98,6 +98,40 @@ def _location_from_media(media: dict[str, Any]) -> str | None:
     return None
 
 
+def _playback_location_from_media(media: dict[str, Any]) -> str | None:
+    for value in media.get("locations", []):
+        if not isinstance(value, dict):
+            continue
+        url = _https_url(value.get("location") or value.get("url"))
+        if url:
+            return url
+    return None
+
+
+def _media_hashtags(
+    row: dict[str, Any],
+    tag_lookup: dict[str, str],
+) -> list[str]:
+    raw = _first_value(
+        row,
+        ("hashtags", "tags", "tagIds", "tag_ids"),
+    )
+    if raw in (None, ""):
+        return []
+    values = raw if isinstance(raw, list) else [raw]
+    names: list[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            key = _tag_key(value)
+            name = _tag_name(value) or tag_lookup.get(key, "")
+        else:
+            key = str(value).strip()
+            name = tag_lookup.get(key, key).strip().lstrip("#")
+        if name and name not in names:
+            names.append(name[:80])
+    return names[:12]
+
+
 class FypAnalyticsService:
     """Fetch and normalize the documented APIFansly analytics contract."""
 
@@ -358,6 +392,7 @@ class FypAnalyticsService:
         for item in durable.get("media", []):
             if isinstance(item, dict):
                 item["thumbnail_url"] = None
+                item["playback_url"] = None
         durable["media_thumbnails_available"] = False
         durable["provider_request_made"] = False
         durable["cache_layer"] = "durable"
@@ -507,10 +542,12 @@ class FypAnalyticsService:
                 continue
             metadata = {
                 "thumbnail_url": _location_from_media(media),
+                "playback_url": _playback_location_from_media(media),
                 "media_type": str(
                     media.get("mimetype") or "media"
                 ).split("/", 1)[0],
                 "created_at": item.get("createdAt"),
+                "hashtags": _media_hashtags(item, tag_lookup),
             }
             identifiers = {
                 str(item.get("id") or "").strip(),
@@ -563,6 +600,7 @@ class FypAnalyticsService:
                 _first_value(item, ("interactionTime", "watchTime"))
             )
             divisor = unique or views
+            hashtags = _media_hashtags(item, tag_lookup)
             media_rows.append(
                 {
                     "rank": index + 1,
@@ -573,7 +611,9 @@ class FypAnalyticsService:
                         2,
                     ),
                     "thumbnail_url": metadata.get("thumbnail_url"),
+                    "playback_url": metadata.get("playback_url"),
                     "media_type": metadata.get("media_type", "media"),
+                    "hashtags": hashtags or metadata.get("hashtags", []),
                 }
             )
         media_rows.sort(key=lambda row: row["views"], reverse=True)
