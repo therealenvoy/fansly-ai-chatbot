@@ -1,0 +1,25 @@
+{
+  "event": "messages.sent",
+  "accountId": "fansly_ACCOUNT_TEST",
+  "timestamp": "2026-07-08T18:05:05.157Z",
+  "data": {
+    "type": 1,
+    "attachments": [],
+    "content": "hey",
+    "groupId": "GROUP_TEST",
+    "senderId": "CREATOR_TEST",
+    "inReplyTo": "",
+    "interactions": [
+      {
+        "groupId": "GROUP_TEST",
+        "userId": "FAN_TEST",
+        "readAt": 0,
+        "deliveredAt": 0,
+        "messageId": "MESSAGE_SENT_TEST"
+      }
+    ],
+    "id": "MESSAGE_SENT_TEST",
+    "createdAt": 1783533902.804,
+    "embeds": []
+  }
+}

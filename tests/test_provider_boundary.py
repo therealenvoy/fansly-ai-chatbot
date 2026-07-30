@@ -23,17 +23,15 @@ def test_apifansly_is_the_paid_ppv_provider():
     assert "ApifanslyClient" in factory_source
 
 
-def test_onlyfansapi_remains_an_explicit_non_ppv_fallback():
-    provider_source = (
-        ROOT / "src" / "fansly_api_client.py"
-    ).read_text(encoding="utf-8")
+def test_apifansly_is_the_only_reachable_provider():
     factory_source = (
         ROOT / "src" / "client_factory.py"
     ).read_text(encoding="utf-8")
 
-    assert 'BASE_URL = "https://app.onlyfansapi.com"' in provider_source
-    assert "supports_paid_messages=False" in provider_source
-    assert "FanslyApiClientImpl" in factory_source
+    assert not (ROOT / "src" / "fansly_api_client.py").exists()
+    assert "FanslyApiClientImpl" not in factory_source
+    assert 'env.get("FANSLY_API_KEY"' not in factory_source
+    assert "Only 'apifansly' is supported" in factory_source
 
 
 def test_bot_has_no_non_durable_send_path():

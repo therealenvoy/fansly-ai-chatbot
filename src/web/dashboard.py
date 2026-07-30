@@ -73,9 +73,16 @@ from ..webhooks.gateway import (
     WebhookAccountMismatch,
     validate_gateway_event,
 )
-from ..webhooks.control import (
-    WebhookControlError,
-    WebhookControlService,
+from ..webhooks.apifansly import (
+    APIFANSLY_SAFE_EVENT_PROFILE,
+    ApifanslyReceivedMessage,
+    ApifanslySentMessage,
+    InvalidApifanslyWebhookEvent,
+    quarantine_event_key,
+)
+from ..webhooks.apifansly_control import (
+    ApifanslyWebhookControlError as WebhookControlError,
+    ApifanslyWebhookControlService as WebhookControlService,
 )
 from ..webhooks.onlyfansapi import (
     InvalidWebhookEvent,
@@ -1248,7 +1255,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         p = self.path.split("?")[0]
         if p == "/webhooks/onlyfansapi/fansly":
-            return self._onlyfansapi_fansly_webhook()
+            return self.j({"error": "legacy webhook disabled"}, 410)
         if p.startswith("/webhooks/apifansly/"):
             return self._apifansly_webhook(p)
         if not self._authorize(require_csrf=True):
@@ -2215,9 +2222,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
 
     def _apifansly_webhook(self, path: str):
-        """Ingest an exact APIFansly PPV purchase without dashboard auth."""
+        """Authenticate and project a handler-ready APIFansly delivery."""
         if not self._host_is_allowed():
             return self.j({"error": "invalid host"}, 400)
+        if not self.server.apifansly_webhook_enabled:
+            return self.j({"error": "webhook receiver is disabled"}, 503)
         expected_token = self.server.apifansly_webhook_token
         supplied_token = path.rsplit("/", 1)[-1]
         if (
@@ -2230,7 +2239,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         ):
             return self.j({"error": "not found"}, 404)
         try:
-            raw = _body(self)
+            raw = _body_bytes(self)
             payload = json.loads(raw)
         except PayloadTooLargeError:
             return self.j({"error": "request body too large"}, 413)
@@ -2238,14 +2247,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self.j({"error": "invalid JSON payload"}, 400)
         if not isinstance(payload, dict):
             return self.j({"error": "invalid webhook payload"}, 400)
-        if payload.get("event") != "ppv.purchased":
-            return self.j({"accepted": False, "ignored": True}, 202)
-        if self.bot is None:
-            return self.j({"error": "bot is unavailable"}, 503)
-
-        data = payload.get("data")
-        if not isinstance(data, dict):
-            return self.j({"error": "missing webhook data"}, 400)
         provider_account_id = str(payload.get("accountId", "")).strip()
         expected_account_id = self.server.provider_account_id
         if (
@@ -2254,68 +2255,150 @@ class DashboardHandler(BaseHTTPRequestHandler):
         ):
             return self.j({"error": "webhook account mismatch"}, 403)
 
-        order_id = str(data.get("orderId", "")).strip()
-        purchase_ref = str(data.get("accountMediaId", "")).strip()
-        fan_id = str(data.get("accountId", "")).strip()
-        creator_fansly_id = str(
-            data.get("correlationAccountId", "")
-        ).strip()
-        known_creator_fansly_id = (
-            self.server.provider_creator_fansly_id
-        )
-        if (
-            known_creator_fansly_id
-            and creator_fansly_id != known_creator_fansly_id
-        ):
-            return self.j({"error": "webhook creator mismatch"}, 403)
-        if not all(
-            (order_id, purchase_ref, fan_id, creator_fansly_id)
-        ):
-            return self.j({"error": "incomplete PPV purchase event"}, 400)
-
-        metadata = data.get("orderMetadata")
-        price_cents = (
-            metadata.get("accountMediaPrice")
-            if isinstance(metadata, dict)
-            else None
-        )
-        if isinstance(price_cents, bool):
-            return self.j({"error": "invalid PPV price"}, 400)
-        try:
-            numeric_price_cents = float(price_cents)
-        except (TypeError, ValueError):
-            return self.j({"error": "invalid PPV price"}, 400)
-        if not math.isfinite(numeric_price_cents) or not (
-            numeric_price_cents.is_integer()
-        ):
-            return self.j({"error": "invalid PPV price"}, 400)
-        amount_millis = int(numeric_price_cents) * 10
-        if amount_millis <= 0:
-            return self.j({"error": "invalid PPV price"}, 400)
+        event_name = str(payload.get("event", "")).strip()
+        if event_name not in APIFANSLY_SAFE_EVENT_PROFILE:
+            self._record_webhook_dead_letter(
+                quarantine_event_key(payload),
+                event_name or "unknown",
+                "handler_not_ready",
+            )
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
+            )
+        if self.bot is None:
+            return self.j({"error": "bot is unavailable"}, 503)
 
         try:
-            provider_created_at = datetime.fromisoformat(
-                str(payload.get("timestamp", "")).replace(
-                    "Z",
-                    "+00:00",
+            if event_name == "messages.received":
+                event = ApifanslyReceivedMessage.from_payload(
+                    payload,
+                    expected_account_id=expected_account_id,
+                    creator_fansly_id=(
+                        self.server.provider_creator_fansly_id
+                    ),
                 )
+                created = self.bot.ingest_webhook_message(event)
+                quarantined = False
+            elif event_name == "messages.sent":
+                event = ApifanslySentMessage.from_payload(
+                    payload,
+                    expected_account_id=expected_account_id,
+                    creator_fansly_id=(
+                        self.server.provider_creator_fansly_id
+                    ),
+                )
+                result = self.bot.ingest_webhook_sent(event)
+                created = result.created
+                quarantined = result.quarantined
+            else:
+                data = payload.get("data")
+                if not isinstance(data, dict):
+                    raise InvalidApifanslyWebhookEvent(
+                        "missing webhook data"
+                    )
+                order_id = str(data.get("orderId", "")).strip()
+                purchase_ref = str(
+                    data.get("accountMediaId", "")
+                ).strip()
+                fan_id = str(data.get("accountId", "")).strip()
+                creator_fansly_id = str(
+                    data.get("correlationAccountId", "")
+                ).strip()
+                known_creator_fansly_id = (
+                    self.server.provider_creator_fansly_id
+                )
+                if (
+                    known_creator_fansly_id
+                    and creator_fansly_id
+                    != known_creator_fansly_id
+                ):
+                    return self.j(
+                        {"error": "webhook creator mismatch"},
+                        403,
+                    )
+                if not all(
+                    (
+                        order_id,
+                        purchase_ref,
+                        fan_id,
+                        creator_fansly_id,
+                    )
+                ):
+                    raise InvalidApifanslyWebhookEvent(
+                        "incomplete PPV purchase event"
+                    )
+                metadata = data.get("orderMetadata")
+                price_cents = (
+                    metadata.get("accountMediaPrice")
+                    if isinstance(metadata, dict)
+                    else None
+                )
+                if isinstance(price_cents, bool):
+                    raise InvalidApifanslyWebhookEvent(
+                        "invalid PPV price"
+                    )
+                try:
+                    numeric_price_cents = float(price_cents)
+                except (TypeError, ValueError) as error:
+                    raise InvalidApifanslyWebhookEvent(
+                        "invalid PPV price"
+                    ) from error
+                if not math.isfinite(numeric_price_cents) or not (
+                    numeric_price_cents.is_integer()
+                ):
+                    raise InvalidApifanslyWebhookEvent(
+                        "invalid PPV price"
+                    )
+                amount_millis = int(numeric_price_cents) * 10
+                if amount_millis <= 0:
+                    raise InvalidApifanslyWebhookEvent(
+                        "invalid PPV price"
+                    )
+                try:
+                    provider_created_at = datetime.fromisoformat(
+                        str(payload.get("timestamp", "")).replace(
+                            "Z",
+                            "+00:00",
+                        )
+                    )
+                except ValueError as error:
+                    raise InvalidApifanslyWebhookEvent(
+                        "invalid webhook timestamp"
+                    ) from error
+                if provider_created_at.tzinfo is None:
+                    provider_created_at = (
+                        provider_created_at.replace(
+                            tzinfo=timezone.utc
+                        )
+                    )
+                _, created = self.bot.record_provider_ppv_purchase(
+                    provider_purchase_id=order_id,
+                    provider_purchase_ref=purchase_ref,
+                    fan_id=fan_id,
+                    amount_millis=amount_millis,
+                    provider_created_at=provider_created_at,
+                )
+                quarantined = False
+        except InvalidApifanslyWebhookEvent as error:
+            self._record_webhook_dead_letter(
+                quarantine_event_key(payload),
+                event_name,
+                str(error).replace(" ", "_")[:64],
             )
-        except ValueError:
-            return self.j({"error": "invalid webhook timestamp"}, 400)
-        if provider_created_at.tzinfo is None:
-            provider_created_at = provider_created_at.replace(
-                tzinfo=timezone.utc
-            )
-
-        try:
-            _, created = self.bot.record_provider_ppv_purchase(
-                provider_purchase_id=order_id,
-                provider_purchase_ref=purchase_ref,
-                fan_id=fan_id,
-                amount_millis=amount_millis,
-                provider_created_at=provider_created_at,
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
             )
         except ValueError as exc:
+            if event_name != "ppv.purchased":
+                logger.exception(
+                    "APIFansly message projection failed"
+                )
+                return self.j(
+                    {"error": "webhook processing failed"},
+                    500,
+                )
             logger.warning(
                 "Rejected APIFansly PPV purchase event: %s",
                 type(exc).__name__,
@@ -2325,8 +2408,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 409,
             )
         except Exception:
-            logger.exception("APIFansly PPV webhook processing failed")
+            logger.exception("APIFansly webhook processing failed")
             return self.j({"error": "webhook processing failed"}, 500)
+        if quarantined:
+            return self.j(
+                {"accepted": False, "quarantined": True},
+                202,
+            )
+        if created and event_name == "messages.received":
+            wakeup = getattr(self.server, "inbound_wakeup", None)
+            if wakeup is not None:
+                wakeup.set()
+            monitor = getattr(self.server, "runtime_monitor", None)
+            if monitor is not None:
+                monitor.webhook_received()
         return self.j(
             {
                 "accepted": True,
@@ -4835,7 +4930,8 @@ class DashboardServer:
         allowed_hosts: Optional[set[str]] = None,
         csrf_token: Optional[str] = None,
         apifansly_webhook_token: Optional[str] = None,
-        onlyfansapi_webhook_secret: Optional[str] = None,
+        apifansly_webhook_enabled: bool = False,
+        recovery_reconciliation_enabled: bool = False,
         inbound_wakeup=None,
         runtime_monitor=None,
         crm_sync=None,
@@ -4848,9 +4944,6 @@ class DashboardServer:
         fyp_analytics=None,
         credit_governor=None,
         webhook_control=None,
-        webhook_endpoint_url: str = "",
-        webhook_registration_enabled: bool = False,
-        webhook_event_profile: str = "core_v1",
         provider_account_id: Optional[str] = None,
         provider_creator_fansly_id: Optional[str] = None,
     ):
@@ -4952,7 +5045,7 @@ class DashboardServer:
                 connection_repository,
                 api_key=os.getenv(
                     "APIFANSLY_API_KEY",
-                    os.getenv("FANSLY_API_KEY", ""),
+                    "",
                 ),
                 webhook_token=os.getenv(
                     "APIFANSLY_WEBHOOK_TOKEN",
@@ -5007,35 +5100,27 @@ class DashboardServer:
             if apifansly_webhook_token is None
             else apifansly_webhook_token
         ).strip()
-        self.server.onlyfansapi_webhook_secret = (
-            os.getenv("ONLYFANSAPI_WEBHOOK_SECRET", "")
-            if onlyfansapi_webhook_secret is None
-            else onlyfansapi_webhook_secret
-        ).strip()
-        if webhook_control is None and self.server.client is not None:
+        self.server.apifansly_webhook_enabled = bool(
+            apifansly_webhook_enabled
+        )
+        if webhook_control is None:
             repository = getattr(
                 self.server.bot,
                 "webhook_event_repo",
                 None,
             )
-            credit_snapshot = (
-                credit_governor.snapshot
-                if credit_governor is not None
-                else None
-            )
             webhook_control = WebhookControlService(
-                client=self.server.client,
                 repository=repository,
                 creator_id=self.server.creator_id,
-                endpoint_url=webhook_endpoint_url,
-                signing_secret=(
-                    self.server.onlyfansapi_webhook_secret
+                receiver_enabled=(
+                    self.server.apifansly_webhook_enabled
                 ),
-                registration_enabled=(
-                    webhook_registration_enabled
+                receiver_token_configured=(
+                    len(self.server.apifansly_webhook_token) >= 32
                 ),
-                event_profile=webhook_event_profile,
-                credit_snapshot=credit_snapshot,
+                recovery_polling_enabled=bool(
+                    recovery_reconciliation_enabled
+                ),
             )
         self.server.webhook_control = webhook_control
         self.server.inbound_wakeup = inbound_wakeup

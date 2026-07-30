@@ -6,11 +6,11 @@ Usage:
 Requires:
     - FANSLY_PROVIDER=apifansly
     - APIFANSLY_API_KEY and FANSLY_ACCOUNT_ID
-    - APIFANSLY_WEBHOOK_TOKEN for automatic PPV purchase handling
+    - APIFANSLY_WEBHOOK_TOKEN for authenticated real-time webhook handling
     - config/creators/{creator_id}.yaml persona file
 
-Runs a polling bot loop + lightweight health check HTTP server on port 8080.
-Performs startup auth validation and exponential backoff on failures.
+Runs webhook-driven reply workers plus a lightweight HTTP server on port 8080.
+Provider polling is disabled unless bounded recovery is explicitly enabled.
 """
 
 import os
@@ -37,11 +37,6 @@ from .memory.store import MessageStore
 from .memory.llm import LLMFactExtractor
 from .bot import FanslyBot
 from .web.dashboard import DashboardServer
-from .webhooks.registration import (
-    production_webhook_url,
-    resolve_signing_secret,
-)
-from .webhooks.registry import eligible_event_names
 from .settings.store import SettingsStore
 from .settings.ai import (
     AISettingsError,
@@ -96,11 +91,7 @@ def _env_bool(name: str, default: bool) -> bool:
 
 FANSLY_PROVIDER = os.getenv("FANSLY_PROVIDER", "apifansly").strip().lower()
 SERVICE_ROLE = ServiceRole.parse(os.getenv("SERVICE_ROLE", "all"))
-API_KEY = (
-    os.getenv("APIFANSLY_API_KEY", "")
-    if FANSLY_PROVIDER == "apifansly"
-    else os.getenv("FANSLY_API_KEY", "")
-)
+API_KEY = os.getenv("APIFANSLY_API_KEY", "")
 CREATOR_ID = os.getenv("CREATOR_ID", "sunny_charm")
 BOT_MODE = BotMode.parse(os.getenv("BOT_MODE", "full_ppv"))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))  # seconds, fast/active interval
@@ -122,8 +113,8 @@ RECOVERY_RECONCILIATION_ENABLED = _env_bool(
     "RECOVERY_RECONCILIATION_ENABLED",
     False,
 )
-WEBHOOK_REGISTRATION_ENABLED = _env_bool(
-    "WEBHOOK_REGISTRATION_ENABLED",
+APIFANSLY_WEBHOOK_ENABLED = _env_bool(
+    "APIFANSLY_WEBHOOK_ENABLED",
     False,
 )
 RECOVERY_CHAT_PAGES_PER_RUN = min(
@@ -142,10 +133,6 @@ RECOVERY_MESSAGE_PAGES_PER_CHAT = min(
     ),
     10,
 )
-WEBHOOK_EVENT_PROFILE = os.getenv(
-    "WEBHOOK_EVENT_PROFILE",
-    "core_v1",
-).strip()
 REPLY_DELAY_MIN_SECONDS = max(
     0,
     int(os.getenv("REPLY_DELAY_MIN_SECONDS", "5")),
@@ -283,17 +270,6 @@ BRAND_BIBLE_CONFIG_PATH = os.getenv(
         else "config/brand_bible.md"
     ),
 )
-
-try:
-    ONLYFANSAPI_WEBHOOK_SECRET = resolve_signing_secret(os.environ)
-    ONLYFANSAPI_WEBHOOK_URL = production_webhook_url(os.environ)
-except ValueError as error:
-    ONLYFANSAPI_WEBHOOK_SECRET = ""
-    ONLYFANSAPI_WEBHOOK_URL = ""
-    logger.error(
-        "Webhook configuration error: %s",
-        type(error).__name__,
-    )
 
 if not API_KEY:
     logger.warning(
@@ -698,10 +674,10 @@ dashboard = DashboardServer(
     bulk_posting=bulk_posting,
     fyp_analytics=fyp_analytics,
     credit_governor=provider_credit_governor,
-    onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
-    webhook_endpoint_url=ONLYFANSAPI_WEBHOOK_URL,
-    webhook_registration_enabled=WEBHOOK_REGISTRATION_ENABLED,
-    webhook_event_profile=WEBHOOK_EVENT_PROFILE,
+    apifansly_webhook_enabled=APIFANSLY_WEBHOOK_ENABLED,
+    recovery_reconciliation_enabled=(
+        RECOVERY_RECONCILIATION_ENABLED
+    ),
     inbound_wakeup=reply_wakeup,
 )
 
@@ -886,57 +862,6 @@ def run_bulk_posting_worker() -> None:
         sleep_with_interrupt(60)
 
 
-def run_webhook_registration() -> None:
-    """Register the signed Fansly message webhook without console access."""
-    if (
-        not WEBHOOK_REGISTRATION_ENABLED
-        or FANSLY_PROVIDER != "fanslyapi"
-        or not api_ok
-    ):
-        return
-    if (
-        provider_credit_governor is not None
-        and provider_credit_governor.is_circuit_open()
-    ):
-        logger.warning(
-            "Automatic webhook registration skipped: provider circuit is open"
-        )
-        return
-    if not ONLYFANSAPI_WEBHOOK_URL:
-        logger.warning(
-            "Automatic webhook registration skipped: RAILWAY_PUBLIC_DOMAIN is missing"
-        )
-        return
-    if not ONLYFANSAPI_WEBHOOK_SECRET:
-        logger.warning(
-            "Automatic webhook registration skipped: no strong signing-secret source"
-        )
-        return
-    ensure_webhook = getattr(client, "ensure_fansly_webhook", None)
-    if not callable(ensure_webhook):
-        logger.warning(
-            "Automatic webhook registration is unavailable for this provider client"
-        )
-        return
-    try:
-        with provider_worker("webhook-registration"):
-            webhook = ensure_webhook(
-                ONLYFANSAPI_WEBHOOK_URL,
-                ONLYFANSAPI_WEBHOOK_SECRET,
-                eligible_event_names(WEBHOOK_EVENT_PROFILE),
-            )
-        logger.info(
-            "OnlyFansAPI Fansly webhook active: id=%s profile=%s",
-            webhook.get("id", "unknown"),
-            WEBHOOK_EVENT_PROFILE,
-        )
-    except Exception:
-        logger.exception(
-            "Automatic OnlyFansAPI Fansly webhook registration failed; "
-            "registration remains unreconciled and recovery policy is unchanged"
-        )
-
-
 def _start_background_worker(name: str, target) -> None:
     thread = threading.Thread(
         target=target,
@@ -958,11 +883,6 @@ else:
         REPLY_WORKER_COUNT,
         RECONCILIATION_INTERVAL,
     )
-    if SERVICE_ROLE.runs_scheduler and WEBHOOK_REGISTRATION_ENABLED:
-        _start_background_worker(
-            "webhook-registration",
-            run_webhook_registration,
-        )
     if SERVICE_ROLE.runs_scheduler and RECOVERY_RECONCILIATION_ENABLED:
         _start_background_worker(
             "provider-reconciliation",

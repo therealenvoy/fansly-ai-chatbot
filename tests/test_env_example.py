@@ -10,10 +10,9 @@ ENV_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env.exampl
 REQUIRED_VARS = [
     "APIFANSLY_API_KEY",
     "APIFANSLY_WEBHOOK_TOKEN",
-    "FANSLY_API_KEY",
+    "APIFANSLY_WEBHOOK_ENABLED",
     "FANSLY_ACCOUNT_ID",
     "FANSLY_PROVIDER",
-    "ONLYFANSAPI_WEBHOOK_SECRET",
     "CREATOR_ID",
     "BOT_MODE",
     "ENABLE_UNREAD_REPLIES",
@@ -37,8 +36,6 @@ REQUIRED_VARS = [
     "RECOVERY_RECONCILIATION_ENABLED",
     "RECOVERY_CHAT_PAGES_PER_RUN",
     "RECOVERY_MESSAGE_PAGES_PER_CHAT",
-    "WEBHOOK_REGISTRATION_ENABLED",
-    "WEBHOOK_EVENT_PROFILE",
     "PROVIDER_MONTHLY_CREDIT_LIMIT",
     "PROVIDER_DAILY_READ_CREDIT_LIMIT",
     "PROVIDER_MONTHLY_SEND_RESERVE",
@@ -122,7 +119,7 @@ class TestEnvExampleContent:
         with open(ENV_PATH) as f:
             content = f.read()
 
-        assert "FANSLY_PROVIDER=fanslyapi" in content
+        assert "FANSLY_PROVIDER=apifansly" in content
         assert "BOT_MODE=conversation" in content
         assert "ENABLE_ONLINE_OUTREACH=false" in content
         assert "CRM_SYNC_ENABLED=false" in content
@@ -130,6 +127,7 @@ class TestEnvExampleContent:
         assert "RECONCILIATION_INTERVAL=21600" in content
         assert "RECOVERY_CHAT_PAGES_PER_RUN=2" in content
         assert "RECOVERY_MESSAGE_PAGES_PER_CHAT=5" in content
+        assert "APIFANSLY_WEBHOOK_ENABLED=false" in content
         assert "DEEPSEEK_MODEL=deepseek-v4-flash" in content
 
     def test_env_file_structure(self):

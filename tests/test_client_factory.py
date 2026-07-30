@@ -4,7 +4,6 @@ import pytest
 
 from src.client_factory import get_fansly_client
 from src.apifansly_client import ApifanslyClient
-from src.fansly_api_client import FanslyApiClientImpl
 
 
 def test_defaults_to_apifansly_for_paid_ppv():
@@ -20,13 +19,14 @@ def test_defaults_to_apifansly_for_paid_ppv():
     assert client.config.webhook_token == "w" * 32
 
 
-def test_returns_onlyfansapi_fansly_when_explicitly_set():
-    client = get_fansly_client(
-        {"FANSLY_PROVIDER": "fanslyapi", "FANSLY_API_KEY": "sk_test"}
-    )
-
-    assert isinstance(client, FanslyApiClientImpl)
-    assert client.api_key == "sk_test"
+def test_rejects_the_removed_legacy_provider():
+    with pytest.raises(ValueError, match="Only 'apifansly' is supported"):
+        get_fansly_client(
+            {
+                "FANSLY_PROVIDER": "fanslyapi",
+                "FANSLY_API_KEY": "legacy-key",
+            }
+        )
 
 
 def test_returns_apifansly_when_explicitly_set():
@@ -46,7 +46,22 @@ def test_returns_apifansly_when_explicitly_set():
 
 
 def test_raises_on_unknown_provider():
-    env = {"FANSLY_PROVIDER": "not_a_real_provider", "FANSLY_API_KEY": "k"}
+    env = {
+        "FANSLY_PROVIDER": "not_a_real_provider",
+        "APIFANSLY_API_KEY": "k",
+    }
 
     with pytest.raises(ValueError, match="Unsupported FANSLY_PROVIDER"):
         get_fansly_client(env)
+
+
+def test_does_not_fall_back_to_the_legacy_api_key_name():
+    client = get_fansly_client(
+        {
+            "FANSLY_PROVIDER": "apifansly",
+            "FANSLY_API_KEY": "must-not-be-used",
+            "FANSLY_ACCOUNT_ID": "connected-account",
+        }
+    )
+
+    assert client.config.api_key == ""

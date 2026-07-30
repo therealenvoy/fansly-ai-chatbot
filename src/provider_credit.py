@@ -99,7 +99,7 @@ class ProviderCreditGovernor:
         engine: Engine,
         *,
         creator_id: str,
-        provider: str = "onlyfansapi",
+        provider: str = "apifansly",
         settings: ProviderCreditSettings | None = None,
     ) -> None:
         self.engine = engine

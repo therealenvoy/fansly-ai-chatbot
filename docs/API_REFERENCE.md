@@ -1,8 +1,7 @@
 # Fansly provider contracts
 
-Fully automated paid PPV uses APIFansly. OnlyFansAPI's Fansly beta remains an
-explicit fallback for free text/media, but the launch guard refuses to enable
-it because it does not expose paid messages or vault albums.
+APIFansly is the application's only Fansly provider. No legacy provider
+fallback or alternate API-key variable is accepted.
 
 Canonical APIFansly documentation:
 
@@ -10,6 +9,7 @@ Canonical APIFansly documentation:
 - https://docs.apifansly.com/api-reference/chats/list-chats
 - https://docs.apifansly.com/api-reference/chat-messages/list-chat-messages
 - https://docs.apifansly.com/api-reference/chat-messages/send-message
+- https://docs.apifansly.com/api-reference/chats/get-unread-chats
 - https://docs.apifansly.com/api-reference/vault/list-vault-albums
 - https://docs.apifansly.com/api-reference/vault/get-vault-album-media
 - https://docs.apifansly.com/webhooks/webhook-events
@@ -60,12 +60,24 @@ The dashboard follows bounded vault-media cursors, displays provider thumbnails
 or video previews, and stores the selected `mediaId` plus optional `previewId`
 on the sequence step.
 
-## OnlyFansAPI fallback
+## Real-time webhooks
 
-OnlyFansAPI uses `https://app.onlyfansapi.com`, Bearer authentication, and
-`FANSLY_API_KEY`. Its documented Fansly send body supports `text`,
-`mediaFiles`, and `replyToMessageId`, but not paywall fields. Its capability
-flags therefore keep paid PPV and vault-backed launch disabled.
+APIFansly currently documents five active event names:
+
+- `messages.received`
+- `messages.sent`
+- `ppv.purchased`
+- `subscriptions.new`
+- `tips.received`
+
+The production-safe profile subscribes only to `messages.received`,
+`messages.sent`, and `ppv.purchased`. The subscription payload is not yet
+published, and the documented tip payload does not contain enough fan identity
+for safe CRM attribution. Those two handlers therefore remain ineligible.
+
+`messages.received` is the real-time unread authority. Normal reply workers
+only drain durable webhook-created work and do not list unread chats.
+`RECOVERY_RECONCILIATION_ENABLED=false` disables provider chat polling.
 
 ## Purchase attribution
 
@@ -89,9 +101,10 @@ Webhook endpoint:
 POST /webhooks/apifansly/{APIFANSLY_WEBHOOK_TOKEN}
 ```
 
-The token must contain at least 32 high-entropy characters. This application
-route token is separate from APIFansly's signing secret. APIFansly currently
-documents that a signing secret is issued, but does not publish the signature
-header or verification algorithm; do not invent one. Rotate the route token if
-the endpoint URL is exposed, and add signature verification when the provider
+The token must contain at least 32 high-entropy characters, and
+`APIFANSLY_WEBHOOK_ENABLED=true` must be set. This application route token is
+separate from APIFansly's signing secret. APIFansly currently documents that a
+signing secret is issued, but does not publish the signature header or
+verification algorithm; do not invent one. Rotate the route token if the
+endpoint URL is exposed, and add signature verification when the provider
 publishes its contract.

@@ -53,27 +53,27 @@ See [`.env.example`](.env.example) for the complete configuration.
 
 ## Webhook-first production safety
 
-OnlyFansAPI Fansly webhooks are the real-time authority. The initial
-`core_v1` profile contains 14 signed events:
+APIFansly webhooks are the real-time authority. The initial
+`apifansly_core_v1` profile contains three handler-ready events:
 
-- chat: received, sent, deleted, and read;
-- account safety: connected and authentication failed;
-- revenue: transactions, tips, media purchases, and story purchases;
-- lifecycle: subscriptions new/expired and followers new/removed.
+- `messages.received`
+- `messages.sent`
+- `ppv.purchased`
 
-The universal receiver verifies the HMAC over the exact raw request body,
-checks the connected account, normalizes only required domain facts, records
+The receiver is protected by a high-entropy route token, checks the exact
+connected APIFansly account, normalizes only required domain facts, records
 duplicates durably, and never calls the model, another provider endpoint, or a
-send path from the HTTP handler. Unknown or permanently incompatible signed
-events are quarantined without storing raw payloads.
+send path from the HTTP handler. Unknown or permanently incompatible events
+are quarantined without storing raw payloads. APIFansly has not yet published
+the signature header and verification algorithm for its separate signing
+secret, so the application does not invent an HMAC contract.
 
 Keep these production gates fail-closed until the receiver deployment is
 healthy:
 
 ```dotenv
 BOT_ENABLED_DEFAULT=false
-WEBHOOK_REGISTRATION_ENABLED=false
-WEBHOOK_EVENT_PROFILE=core_v1
+APIFANSLY_WEBHOOK_ENABLED=false
 RECOVERY_RECONCILIATION_ENABLED=false
 RECONCILIATION_INTERVAL=21600
 RECOVERY_CHAT_PAGES_PER_RUN=2
@@ -86,11 +86,11 @@ BRAIN_MAX_LIVE_PERCENT=0
 BRAIN_ALLOW_ADVANCED_SEND=false
 ```
 
-The authenticated Settings page includes a webhook control center with
-handler readiness, exact registration drift, sanitized delivery metrics,
-credit classes, live catalog verification, exact-endpoint reconciliation, and
-a pause control. It never returns the signing secret. Enabling registration
-does not enable the bot, outreach, Brain authority, media, or PPV.
+The authenticated Settings page includes a secret-free APIFansly webhook
+status panel with handler readiness and sanitized delivery metrics. Provider
+registration and pausing are managed in
+`https://app.apifansly.com/webhooks`; the dashboard never returns the route
+token or provider signing secret.
 
 ## 📚 Quick Navigation
 

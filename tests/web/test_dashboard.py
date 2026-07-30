@@ -5,8 +5,6 @@ SettingsStore rather than mocked end-to-end, to catch real persistence bugs.
 """
 import json
 import base64
-import hashlib
-import hmac
 import re
 import threading
 from datetime import datetime, timedelta, timezone
@@ -36,7 +34,6 @@ from src.sequences.models import (
 from src.sequences.repository import SequenceRepository
 from src.web.dashboard import DASHBOARD_HTML, MAX_BODY_BYTES, DashboardServer
 from src.webhooks.repository import WebhookIngestResult
-from src.webhooks.registry import EVENT_REGISTRY
 
 
 TEST_USER = "test-operator"
@@ -45,9 +42,6 @@ TEST_VA_USER = "posting-va"
 TEST_VA_PASSWORD = "posting-va-separate-strong-password"
 TEST_CSRF_TOKEN = "test-csrf-token-with-enough-entropy"
 TEST_WEBHOOK_TOKEN = "test-webhook-token-with-enough-entropy"
-TEST_ONLYFANSAPI_WEBHOOK_SECRET = (
-    "test-onlyfansapi-webhook-secret-with-enough-entropy"
-)
 
 
 def _authorization(user=TEST_USER, password=TEST_PASSWORD):
@@ -239,31 +233,6 @@ def _post_webhook(host, token, payload):
     return status, data
 
 
-def _post_onlyfansapi_webhook(
-    host,
-    payload,
-    *,
-    secret=TEST_ONLYFANSAPI_WEBHOOK_SECRET,
-):
-    raw = json.dumps(payload, separators=(",", ":"))
-    signature = hmac.new(
-        secret.encode(),
-        raw.encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    status, data, _ = _request(
-        host,
-        "POST",
-        "/webhooks/onlyfansapi/fansly",
-        body=raw,
-        headers={
-            "Content-Type": "application/json",
-            "Signature": signature,
-        },
-    )
-    return status, data
-
-
 def _delete(host, path, *, authenticated=True, csrf=True, origin=None):
     headers = {}
     if authenticated:
@@ -411,19 +380,14 @@ def running_server(db_url, tmp_path):
         va_dashboard_password=TEST_VA_PASSWORD,
         csrf_token=TEST_CSRF_TOKEN,
         apifansly_webhook_token=TEST_WEBHOOK_TOKEN,
-        onlyfansapi_webhook_secret=(
-            TEST_ONLYFANSAPI_WEBHOOK_SECRET
-        ),
+        apifansly_webhook_enabled=True,
+        recovery_reconciliation_enabled=False,
         inbound_wakeup=inbound_wakeup,
         persona_dir=str(tmp_path / "personas"),
         brand_bible_path=str(tmp_path / "brand_bible.md"),
         ai_settings=bot.ai_settings,
         chat_guidance=guidance,
         auto_messages_control=auto_messages_control,
-        webhook_endpoint_url=(
-            "https://bot.example/webhooks/onlyfansapi/fansly"
-        ),
-        webhook_registration_enabled=False,
     )
     port = server.server.server_address[1]
 
@@ -593,28 +557,43 @@ class TestApifanslyPurchaseWebhook:
         bot.record_provider_ppv_purchase.assert_not_called()
 
 
-class TestOnlyFansApiFanslyWebhook:
+class TestApifanslyChatWebhook:
     def _payload(self):
         return {
-            "event": "fansly.messages.received",
-            "account_id": "fansly_acc_test",
-            "payload": {
-                "id": "message-1",
+            "event": "messages.received",
+            "accountId": "fansly_acc_test",
+            "timestamp": "2026-07-08T18:05:05.157Z",
+            "data": {
+                "type": 1,
+                "attachments": [],
+                "content": "hey",
                 "groupId": "chat-1",
                 "senderId": "fan-1",
-                "content": "hey",
-                "createdAt": 1_722_000_000,
+                "inReplyTo": "",
+                "interactions": [
+                    {
+                        "groupId": "chat-1",
+                        "userId": "fan-1",
+                        "readAt": 0,
+                        "deliveredAt": 0,
+                        "messageId": "message-1",
+                    }
+                ],
+                "id": "message-1",
+                "createdAt": 1_783_533_902.804,
+                "embeds": [],
             },
         }
 
-    def test_signed_message_is_enqueued_without_dashboard_auth(
+    def test_authenticated_message_is_enqueued_without_dashboard_auth(
         self,
         running_server,
     ):
         host, bot, _ = running_server
 
-        status, body = _post_onlyfansapi_webhook(
+        status, body = _post_webhook(
             host,
+            TEST_WEBHOOK_TOKEN,
             self._payload(),
         )
 
@@ -626,7 +605,7 @@ class TestOnlyFansApiFanslyWebhook:
         assert event.chat_id == "chat-1"
         assert event.fan_id == "fan-1"
 
-    def test_signed_gateway_uses_startup_cached_provider_identity(
+    def test_receiver_uses_startup_cached_provider_identity(
         self,
         running_server,
     ):
@@ -634,30 +613,15 @@ class TestOnlyFansApiFanslyWebhook:
         bot.client.account_id = "must-not-be-read-in-request"
         bot.client.creator_fansly_id = "must-not-be-read-in-request"
 
-        status, body = _post_onlyfansapi_webhook(
+        status, body = _post_webhook(
             host,
+            TEST_WEBHOOK_TOKEN,
             self._payload(),
         )
 
         assert status == 200
         assert body == {"accepted": True, "duplicate": False}
         bot.ingest_webhook_message.assert_called_once()
-
-    def test_invalid_signature_is_rejected_before_ingestion(
-        self,
-        running_server,
-    ):
-        host, bot, _ = running_server
-
-        status, body = _post_onlyfansapi_webhook(
-            host,
-            self._payload(),
-            secret="wrong-signing-secret-with-enough-entropy",
-        )
-
-        assert status == 401
-        assert body == {"error": "invalid signature"}
-        bot.ingest_webhook_message.assert_not_called()
 
     def test_duplicate_event_is_acknowledged_idempotently(
         self,
@@ -666,8 +630,9 @@ class TestOnlyFansApiFanslyWebhook:
         host, bot, _ = running_server
         bot.ingest_webhook_message.return_value = False
 
-        status, body = _post_onlyfansapi_webhook(
+        status, body = _post_webhook(
             host,
+            TEST_WEBHOOK_TOKEN,
             self._payload(),
         )
 
@@ -680,23 +645,31 @@ class TestOnlyFansApiFanslyWebhook:
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["account_id"] = "fansly_acct_other"
+        payload["accountId"] = "fansly_acct_other"
 
-        status, body = _post_onlyfansapi_webhook(host, payload)
+        status, body = _post_webhook(
+            host,
+            TEST_WEBHOOK_TOKEN,
+            payload,
+        )
 
         assert status == 403
         assert body == {"error": "webhook account mismatch"}
         bot.ingest_webhook_message.assert_not_called()
 
-    def test_unknown_signed_event_is_quarantined_after_account_check(
+    def test_unready_active_event_is_quarantined_after_account_check(
         self,
         running_server,
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["event"] = "fansly.future.event"
+        payload["event"] = "subscriptions.new"
 
-        status, body = _post_onlyfansapi_webhook(host, payload)
+        status, body = _post_webhook(
+            host,
+            TEST_WEBHOOK_TOKEN,
+            payload,
+        )
 
         assert status == 202
         assert body == {
@@ -706,15 +679,19 @@ class TestOnlyFansApiFanslyWebhook:
         bot.webhook_event_repo.record_dead_letter.assert_called_once()
         bot.ingest_webhook_message.assert_not_called()
 
-    def test_non_ready_handler_is_not_processed_early(
+    def test_future_event_is_not_processed_early(
         self,
         running_server,
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["event"] = "fansly.posts.created"
+        payload["event"] = "future.event"
 
-        status, body = _post_onlyfansapi_webhook(host, payload)
+        status, body = _post_webhook(
+            host,
+            TEST_WEBHOOK_TOKEN,
+            payload,
+        )
 
         assert status == 202
         assert body["quarantined"] is True
@@ -724,62 +701,66 @@ class TestOnlyFansApiFanslyWebhook:
         assert kwargs["error_category"] == "handler_not_ready"
         bot.ingest_webhook_message.assert_not_called()
 
-    def test_signed_creator_message_uses_sent_projection(
+    def test_creator_message_uses_sent_projection_and_interaction_fan(
         self,
         running_server,
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["event"] = "fansly.messages.sent"
-        payload["payload"]["senderId"] = "creator-native-1"
-        payload["payload"]["recipientId"] = "fan-1"
+        payload["event"] = "messages.sent"
+        payload["data"]["senderId"] = "creator-native-1"
+        payload["data"].pop("recipientId", None)
 
-        status, body = _post_onlyfansapi_webhook(host, payload)
+        status, body = _post_webhook(
+            host,
+            TEST_WEBHOOK_TOKEN,
+            payload,
+        )
 
         assert status == 200
         assert body == {"accepted": True, "duplicate": False}
         bot.ingest_webhook_sent.assert_called_once()
+        event = bot.ingest_webhook_sent.call_args.args[0]
+        assert event.fan_id == "fan-1"
         bot.ingest_webhook_message.assert_not_called()
 
-    def test_signed_revenue_event_projects_without_contact_work(
+    def test_permanent_message_schema_error_is_quarantined(
         self,
         running_server,
     ):
         host, bot, _ = running_server
         payload = self._payload()
-        payload["event"] = "fansly.tips.received"
-        payload["payload"] = {
-            "id": "tip-1",
-            "fanId": "fan-1",
-            "amount": "12.34",
-            "currency": "USD",
-            "createdAt": 1_722_000_000,
-        }
+        del payload["data"]["groupId"]
 
-        status, body = _post_onlyfansapi_webhook(host, payload)
-
-        assert status == 200
-        assert body == {"accepted": True, "duplicate": False}
-        bot.ingest_webhook_domain.assert_called_once()
-        bot.ingest_webhook_message.assert_not_called()
-
-    def test_quarantine_database_failure_remains_retryable(
-        self,
-        running_server,
-    ):
-        host, bot, _ = running_server
-        payload = self._payload()
-        payload["event"] = "fansly.future.event"
-        bot.webhook_event_repo.record_dead_letter.side_effect = (
-            RuntimeError("database unavailable")
+        status, body = _post_webhook(
+            host,
+            TEST_WEBHOOK_TOKEN,
+            payload,
         )
 
-        status, body = _post_onlyfansapi_webhook(host, payload)
-
-        assert status == 503
+        assert status == 202
         assert body == {
-            "error": "webhook persistence unavailable"
+            "accepted": False,
+            "quarantined": True,
         }
+        bot.ingest_webhook_message.assert_not_called()
+
+    def test_legacy_provider_route_is_permanently_disabled(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        status, body, _ = _request(
+            host,
+            "POST",
+            "/webhooks/onlyfansapi/fansly",
+            body="{}",
+            headers={"Content-Type": "application/json"},
+        )
+
+        assert status == 410
+        assert body == {"error": "legacy webhook disabled"}
+        bot.ingest_webhook_message.assert_not_called()
 
 
 class TestWebhookControlCenter:
@@ -792,14 +773,20 @@ class TestWebhookControlCenter:
         status, body = _get(host, "/api/webhooks/control")
 
         assert status == 200
-        assert body["registration_enabled"] is False
-        assert len(body["desired_events"]) == 14
-        assert len(body["handler_readiness"]) == 25
+        assert body["provider"] == "apifansly"
+        assert body["registration_enabled"] is True
+        assert body["desired_events"] == [
+            "messages.received",
+            "messages.sent",
+            "ppv.purchased",
+        ]
+        assert len(body["handler_readiness"]) == 5
+        assert body["recovery_polling_enabled"] is False
         serialized = json.dumps(body)
-        assert TEST_ONLYFANSAPI_WEBHOOK_SECRET not in serialized
+        assert TEST_WEBHOOK_TOKEN not in serialized
         assert "signing_secret" not in serialized
 
-    def test_reconcile_is_blocked_while_deployment_gate_is_false(
+    def test_reconcile_redirects_operator_to_provider_console(
         self,
         running_server,
     ):
@@ -808,24 +795,14 @@ class TestWebhookControlCenter:
         status, body = _post(host, "/api/webhooks/reconcile", {})
 
         assert status == 409
-        assert "disabled by deployment policy" in body["error"]
+        assert "managed in the provider console" in body["error"]
         bot.client.ensure_fansly_webhook.assert_not_called()
 
-    def test_explicit_health_check_compares_zero_credit_live_catalog(
+    def test_health_check_confirms_receiver_and_polling_policy(
         self,
         running_server,
     ):
         host, bot, _ = running_server
-        bot.client.list_available_webhook_events.return_value = {
-            "events": [
-                {
-                    "value": spec.name,
-                    "description": spec.description,
-                }
-                for spec in EVENT_REGISTRY.values()
-            ],
-            "credits_used": 0,
-        }
 
         status, body = _post(
             host,
@@ -835,9 +812,9 @@ class TestWebhookControlCenter:
 
         assert status == 200
         assert body["healthy"] is True
-        assert body["catalog_event_count"] == 25
-        assert body["catalog_credits_used"] == 0
-        bot.client.list_available_webhook_events.assert_called_once()
+        assert body["polling_disabled"] is True
+        assert body["provider"] == "apifansly"
+        bot.client.list_available_webhook_events.assert_not_called()
 
 
 class TestBotStatusEndpoints:

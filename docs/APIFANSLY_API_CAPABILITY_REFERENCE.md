@@ -62,6 +62,29 @@ Not every endpoint uses the same nesting. Media upload, account connection, and 
 
 The public documentation review used zero APIFansly API credits.
 
+### Webhook contract
+
+APIFansly documents webhook creation through
+`https://app.apifansly.com/webhooks`; no webhook-management API route is
+currently published. The active event catalog reviewed on 2026-07-30 contains:
+
+- `messages.received`
+- `messages.sent`
+- `ppv.purchased`
+- `subscriptions.new`
+- `tips.received`
+
+Only `messages.received`, `messages.sent`, and `ppv.purchased` currently have
+complete, verified application handlers. The subscription payload is marked
+coming soon, and the tip payload does not document enough fan identity for safe
+CRM attribution.
+
+The console issues a signing secret, but the public docs do not yet publish the
+signature header or verification algorithm. Do not invent HMAC behavior.
+Production currently authenticates a high-entropy secret route token, validates
+the exact connected account, and keeps the provider signing secret available
+for a later contract-backed verifier.
+
 ### Identifier dictionary
 
 | Name | Meaning |
@@ -331,13 +354,15 @@ Credentials may be held only for the short pending login challenge and must neve
 
 ### Inbox and AI replies
 
-1. Use signed webhooks as the real-time authority.
+1. Use authenticated APIFansly webhooks as the real-time authority.
 2. Use List Chats and List Chat Messages only for bounded backfill/reconciliation.
 3. Persist cursors per creator/chat; never rescan every chat from zero.
 4. Treat `groupId` as the chat ID and native fan account ID as the fan ID.
 5. Reconcile sent messages from webhook/provider IDs before a new AI reply.
 6. Use typing indicator only after a reply is accepted for delivery, with a strict call cap.
-7. Use read/delete events and APIs to keep local context convergent.
+7. APIFansly does not currently expose active message read/delete webhooks;
+   treat that as an explicit convergence limitation instead of polling every
+   chat.
 
 ### One-to-one free media or PPV
 

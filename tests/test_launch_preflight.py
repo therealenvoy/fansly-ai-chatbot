@@ -8,6 +8,8 @@ def _valid_environment():
         "APIFANSLY_API_KEY": "secret-token",
         "FANSLY_ACCOUNT_ID": "fansly_acc_test",
         "APIFANSLY_WEBHOOK_TOKEN": "w" * 32,
+        "APIFANSLY_WEBHOOK_ENABLED": "true",
+        "RECOVERY_RECONCILIATION_ENABLED": "false",
         "DASHBOARD_USER": "operator",
         "DASHBOARD_PASSWORD": "correct-horse-battery-staple",
         "CONTROLLED_LAUNCH": "true",
@@ -28,28 +30,31 @@ def test_valid_launch_environment_passes(tmp_path):
     ) == []
 
 
-def test_controlled_launch_rejects_polling_faster_than_five_minutes(tmp_path):
+def test_recovery_polling_must_remain_disabled(tmp_path):
     persona = tmp_path / "config" / "creators" / "sunny_charm.yaml"
     persona.parent.mkdir(parents=True)
     persona.write_text("creator_id: sunny_charm", encoding="utf-8")
     environment = _valid_environment()
-    environment["POLL_INTERVAL"] = "60"
+    environment["RECOVERY_RECONCILIATION_ENABLED"] = "true"
 
     errors = check_environment(environment, project_root=tmp_path)
 
-    assert "POLL_INTERVAL must be at least 300 seconds for controlled launch" in errors
+    assert (
+        "RECOVERY_RECONCILIATION_ENABLED must remain false"
+        in errors
+    )
 
 
-def test_invalid_poll_interval_is_reported_without_crashing(tmp_path):
+def test_disabled_webhook_receiver_is_rejected(tmp_path):
     persona = tmp_path / "config" / "creators" / "sunny_charm.yaml"
     persona.parent.mkdir(parents=True)
     persona.write_text("creator_id: sunny_charm", encoding="utf-8")
     environment = _valid_environment()
-    environment["POLL_INTERVAL"] = "fast"
+    environment["APIFANSLY_WEBHOOK_ENABLED"] = "false"
 
     errors = check_environment(environment, project_root=tmp_path)
 
-    assert "POLL_INTERVAL must be a positive integer" in errors
+    assert "APIFANSLY_WEBHOOK_ENABLED must be true" in errors
 
 
 def test_unsafe_launch_environment_reports_all_blockers(tmp_path):
@@ -60,6 +65,8 @@ def test_unsafe_launch_environment_reports_all_blockers(tmp_path):
         "APIFANSLY_API_KEY": "",
         "FANSLY_ACCOUNT_ID": "",
         "APIFANSLY_WEBHOOK_TOKEN": "short",
+        "APIFANSLY_WEBHOOK_ENABLED": "false",
+        "RECOVERY_RECONCILIATION_ENABLED": "true",
         "DASHBOARD_USER": "",
         "DASHBOARD_PASSWORD": "short",
         "FAN_ALLOWLIST": "",
@@ -77,6 +84,11 @@ def test_unsafe_launch_environment_reports_all_blockers(tmp_path):
     assert "FANSLY_ACCOUNT_ID is not configured" in errors
     assert (
         "APIFANSLY_WEBHOOK_TOKEN must be at least 32 characters"
+        in errors
+    )
+    assert "APIFANSLY_WEBHOOK_ENABLED must be true" in errors
+    assert (
+        "RECOVERY_RECONCILIATION_ENABLED must remain false"
         in errors
     )
     assert "FAN_ALLOWLIST must contain at least one pilot fan" in errors

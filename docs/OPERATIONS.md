@@ -11,14 +11,14 @@
   webhook time and total accepted webhook events. Its `crm_sync` section reports discovered,
   complete, pending, and failed histories plus stored message count. It never
   returns credentials or message contents.
-- Fansly inbound messages enter through
-  `/webhooks/onlyfansapi/fansly`. The route verifies the raw request body with
-  HMAC-SHA256 using `ONLYFANSAPI_WEBHOOK_SECRET`, rejects another account or a
-  creator-authored message, and inserts one idempotent durable inbox row.
+- Fansly inbound messages enter through the secret APIFansly route
+  `/webhooks/apifansly/<token>`. The route rejects another connected account
+  or a creator-authored received event and inserts one idempotent durable inbox
+  row.
 - Reply workers drain that queue independently from provider reconciliation,
   CRM history imports, and proactive scans. Work for one fan remains ordered;
-  different fans can run concurrently. A missed webhook is recovered by the
-  bounded reconciliation worker.
+  different fans can run concurrently. Routine and unread-chat polling remain
+  disabled.
 - Railway deployment health checks run during deployment, not continuously.
   `.github/workflows/production-monitor.yml` checks `/ready` every 15 minutes
   and fails only after two consecutive failed probes. Scheduled workflows run
@@ -65,34 +65,36 @@ Never test a restore by overwriting production.
 
 ## Webhook-first conversation runtime
 
-Required OnlyFansAPI configuration:
+Required APIFansly configuration:
 
 ```text
-# Optional. When empty, the app derives an isolated HMAC secret from
-# CREDENTIAL_ENCRYPTION_KEY (or APIFANSLY_WEBHOOK_TOKEN).
-ONLYFANSAPI_WEBHOOK_SECRET=<at least 32 random characters>
+FANSLY_PROVIDER=apifansly
+APIFANSLY_API_KEY=<APIFansly API key>
+FANSLY_ACCOUNT_ID=<connected APIFansly account ID>
+APIFANSLY_WEBHOOK_TOKEN=<at least 32 random characters>
+APIFANSLY_WEBHOOK_ENABLED=true
+RECOVERY_RECONCILIATION_ENABLED=false
 REPLY_WORKER_COUNT=2
 REPLY_WORKER_IDLE_SECONDS=1
-RECONCILIATION_INTERVAL=300
 REPLY_DELAY_MIN_SECONDS=5
 REPLY_DELAY_MAX_SECONDS=25
 PROCESSING_RETRY_BASE_SECONDS=5
 PROCESSING_RETRY_MAX_SECONDS=60
-CRM_SYNC_INTERVAL=300
+CRM_SYNC_ENABLED=false
 ```
 
-At startup, the production app uses its existing `FANSLY_API_KEY` to create or
-update `fansly.messages.received` at:
+In the APIFansly developer console, register exactly this credential-bearing
+endpoint:
 
 ```text
-https://<RAILWAY_PUBLIC_DOMAIN>/webhooks/onlyfansapi/fansly
+https://<RAILWAY_PUBLIC_DOMAIN>/webhooks/apifansly/<APIFANSLY_WEBHOOK_TOKEN>
 ```
 
-It enables the webhook and scopes it to the connected `fansly_acct_...`
-account. It refuses to take over an existing endpoint that has no signing
-secret. Confirm `webhook_events_received` advances in `/api/operations`; if
-registration fails, reconciliation remains active and latency returns to the
-configured reconciliation interval.
+Select only `messages.received`, `messages.sent`, and `ppv.purchased`. APIFansly
+does not currently document a webhook-management API, so registration is
+managed in its developer console. Confirm `webhook_events_received` advances
+in `/api/operations`. Do not enable routine recovery polling as a substitute
+for a broken webhook.
 
 ## Controlled launch
 
@@ -103,30 +105,25 @@ FANSLY_PROVIDER=apifansly
 APIFANSLY_API_KEY=<APIFansly API key>
 FANSLY_ACCOUNT_ID=<connected fansly_acc_... account>
 APIFANSLY_WEBHOOK_TOKEN=<at least 32 random characters>
+APIFANSLY_WEBHOOK_ENABLED=true
 CONTROLLED_LAUNCH=true
 BOT_ENABLED_DEFAULT=false
 FAN_ALLOWLIST=<one or more exact Fansly account IDs>
 MAX_MESSAGES_PER_POLL=5
-POLL_INTERVAL=300
-CRM_SYNC_ENABLED=true
-CRM_SYNC_MESSAGE_PAGES_PER_CYCLE=25
-CRM_SYNC_DISCOVERY_PAGES_PER_CYCLE=2
-CRM_SYNC_BACKFILL_INTERVAL=30
+RECOVERY_RECONCILIATION_ENABLED=false
+CRM_SYNC_ENABLED=false
 ```
 
-`POLL_INTERVAL=300` is the minimum controlled-launch interval. CRM history
-synchronization keeps listing chats while automated replies are disabled.
-During the finite initial backfill it also reads bounded message pages. The
-next bounded cycle starts after `CRM_SYNC_BACKFILL_INTERVAL`, then steady-state
-polling returns to `POLL_INTERVAL` when discovery and history are complete.
-The dashboard exposes remaining and failed histories; watch those values and
-provider credits until `pending_chats` reaches zero.
+Normal inbound replies are webhook-driven and consume no unread-chat listing
+credits. Historical CRM backfill is a separate explicit operation and remains
+disabled in normal production.
 
 The APIFansly account must be connected in its console before launch. Startup
 must resolve the native Fansly creator ID from the configured
 `fansly_acc_...` account.
 
-Create an APIFansly webhook for the active `ppv.purchased` event:
+Create one APIFansly webhook for `messages.received`, `messages.sent`, and
+`ppv.purchased`:
 
 ```text
 https://<RAILWAY_PUBLIC_DOMAIN>/webhooks/apifansly/<APIFANSLY_WEBHOOK_TOKEN>

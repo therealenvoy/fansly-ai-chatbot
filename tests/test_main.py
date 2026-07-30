@@ -92,7 +92,7 @@ def _capture_info_logs(caplog):
 def cleanup_env():
     """Restore env after each test — prevents cross-test contamination."""
     saved = {k: os.environ.get(k) for k in (
-        "APIFANSLY_API_KEY", "FANSLY_API_KEY",
+        "APIFANSLY_API_KEY",
         "FANSLY_ACCOUNT_ID", "APIFANSLY_WEBHOOK_TOKEN", "POLL_INTERVAL",
         "MAX_BACKOFF", "IDLE_BACKOFF_MAX", "FANSLY_PROVIDER",
         "DATABASE_URL", "PORT", "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL",
@@ -116,7 +116,7 @@ def cleanup_env():
         "REPLY_DELAY_MIN_SECONDS", "REPLY_DELAY_MAX_SECONDS",
         "PROCESSING_RETRY_BASE_SECONDS",
         "PROCESSING_RETRY_MAX_SECONDS",
-        "ONLYFANSAPI_WEBHOOK_SECRET",
+        "APIFANSLY_WEBHOOK_ENABLED",
     )}
     yield
     for k, v in saved.items():
@@ -565,8 +565,6 @@ class TestCreditAwarenessLogging:
         module,
         caplog,
     ):
-        os.environ["FANSLY_PROVIDER"] = "fanslyapi"
-        os.environ["FANSLY_API_KEY"] = "legacy_test_key"
         os.environ["POLL_INTERVAL"] = "60"
         importlib.reload(module)
 

@@ -815,7 +815,7 @@ class WebhookEventRepository:
 
             state = self._insert(PROVIDER_CONNECTION_STATES).values(
                 creator_id=creator_id,
-                provider="onlyfansapi",
+                provider="apifansly",
                 connection_status=(
                     "authentication_failed"
                     if authentication_failed
@@ -861,7 +861,7 @@ class WebhookEventRepository:
                     PROVIDER_CIRCUIT_BREAKERS
                 ).values(
                     creator_id=creator_id,
-                    provider="onlyfansapi",
+                    provider="apifansly",
                     is_open=True,
                     reason_code="authentication_failed",
                     opened_at=event.provider_created_at,
@@ -892,7 +892,7 @@ class WebhookEventRepository:
                 connection.execute(setting)
                 alert = self._insert(PROVIDER_ALERTS).values(
                     creator_id=creator_id,
-                    provider="onlyfansapi",
+                    provider="apifansly",
                     event_key=event.event_key,
                     severity="critical",
                     code="authentication_failed",
@@ -1339,30 +1339,32 @@ class WebhookEventRepository:
                         PROVIDER_CIRCUIT_BREAKERS.c.creator_id
                         == creator_id,
                         PROVIDER_CIRCUIT_BREAKERS.c.provider
-                        == "onlyfansapi",
+                        == "apifansly",
                     )
                 )
             ).mappings().first()
 
-        from .registry import EVENT_REGISTRY
+        from .apifansly import APIFANSLY_EVENT_FAMILIES
 
         last_by_family: dict[str, datetime] = {}
         for row in event_times:
-            spec = EVENT_REGISTRY.get(row["event_name"])
+            family = APIFANSLY_EVENT_FAMILIES.get(
+                row["event_name"]
+            )
             occurred_at = row["last_received_at"]
-            if spec is None or occurred_at is None:
+            if family is None or occurred_at is None:
                 continue
-            current = last_by_family.get(spec.family)
+            current = last_by_family.get(family)
             if current is None or occurred_at > current:
-                last_by_family[spec.family] = occurred_at
+                last_by_family[family] = occurred_at
         lags = [
             max(0.0, (processed - created).total_seconds())
             for created, processed in lag_rows
             if created is not None and processed is not None
         ]
         estimated_daily_credits = (
-            int(recent_deliveries) + 99
-        ) // 100
+            int(recent_deliveries) + 79
+        ) // 80
         return {
             "processed_count": int(summary["processed"]),
             "unique_event_count": int(summary["unique_events"]),
