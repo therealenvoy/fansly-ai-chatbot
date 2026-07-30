@@ -41,6 +41,13 @@ body{
   color:var(--text);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   -webkit-font-smoothing:antialiased;
 }
+.role-posting_va .nav-item:not([data-tab="bulk-posting"]),
+.role-posting_va .nav-label,
+.role-posting_va .launch-note,
+.role-posting_va .top-actions .icon-button,
+.role-posting_va #bot-toggle{display:none!important}
+.role-posting_va .sidebar nav{flex:none;overflow:visible}
+.role-posting_va .workspace-switcher svg{display:none}
 button,input,textarea,select{font:inherit}
 button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{
   outline:2px solid var(--violet);outline-offset:2px
@@ -273,6 +280,22 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 .auto-inline-check input{width:auto}
 .auto-preview{margin-top:12px;padding:12px;border:1px dashed var(--line-strong);border-radius:12px;background:rgba(255,255,255,.015);font-size:10px;line-height:1.55;color:var(--muted)}
 .auto-credit{display:inline-flex;align-items:center;gap:7px;padding:7px 10px;border-radius:999px;background:rgba(68,215,146,.08);border:1px solid rgba(68,215,146,.18);color:var(--green);font-size:9px;font-weight:700}
+.bulk-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin-bottom:16px}
+.bulk-kpi{min-height:98px;padding:16px;border:1px solid var(--line);border-radius:15px;background:var(--surface)}
+.bulk-kpi .label{font-size:9px;color:var(--muted)}.bulk-kpi strong{display:block;margin-top:8px;font-size:22px}.bulk-kpi small{display:block;margin-top:4px;color:var(--faint);font-size:8px}
+.bulk-tabs{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);margin-bottom:16px}
+.bulk-tab-list{display:flex;gap:20px}.bulk-tab{border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);padding:11px 2px;font-size:10px;font-weight:700;cursor:pointer}.bulk-tab.active{color:var(--text);border-bottom-color:var(--violet)}
+.bulk-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}
+.bulk-card{position:relative;padding:17px;border:1px solid var(--line);border-radius:16px;background:var(--surface)}
+.bulk-card:first-child{border-color:rgba(161,124,255,.6)}.bulk-card h3{font-size:13px}.bulk-card-copy{margin:4px 0 14px;color:var(--muted);font-size:9px}
+.bulk-card-remove{position:absolute;top:12px;right:12px;width:25px;height:25px;border:1px solid rgba(255,107,125,.22);border-radius:50%;background:rgba(255,107,125,.08);color:var(--red);cursor:pointer}
+.bulk-fields{display:grid;grid-template-columns:1fr 1fr;gap:11px}.bulk-field-full{grid-column:1/-1}.bulk-tags-row{display:grid;grid-template-columns:1fr 34px;gap:6px}
+.bulk-spark{border:1px solid rgba(161,124,255,.25);border-radius:9px;background:rgba(161,124,255,.12);color:var(--violet);cursor:pointer}
+.bulk-checks{display:flex;flex-wrap:wrap;gap:17px;margin:10px 0}.bulk-checks label{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:9px}.bulk-checks input{width:auto}
+.bulk-drop{min-height:76px;display:flex;align-items:center;justify-content:center;padding:15px;border:1px dashed rgba(161,124,255,.35);border-radius:11px;background:rgba(161,124,255,.035);color:var(--muted);font-size:9px;text-align:center;cursor:pointer}.bulk-drop.drag{border-color:var(--violet);background:rgba(161,124,255,.1)}.bulk-drop strong{color:var(--text)}
+.bulk-media-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}.bulk-media-chip{display:flex;align-items:center;gap:6px;max-width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--input);font-size:8px;color:var(--muted)}.bulk-media-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bulk-media-chip button{border:0;background:none;color:var(--red);cursor:pointer}
+.bulk-status{min-height:15px;margin-top:8px;color:var(--muted);font-size:8px}.bulk-status.error{color:var(--red)}.bulk-status.ok{color:var(--green)}
+.bulk-table{width:100%;border-collapse:collapse}.bulk-table th,.bulk-table td{padding:11px 10px;border-bottom:1px solid var(--line);font-size:9px;text-align:left}.bulk-table th{color:var(--faint);text-transform:uppercase;letter-spacing:.07em}.bulk-table td{color:var(--muted)}
 .drawer{position:fixed;inset:14px 14px 14px auto;width:500px;max-width:calc(100vw - 28px);z-index:60;display:flex;flex-direction:column;border:1px solid var(--line-strong);border-radius:20px;background:rgba(18,18,27,.98);box-shadow:-30px 0 80px rgba(0,0,0,.45);transform:translateX(calc(100% + 28px));transition:transform .22s ease;backdrop-filter:blur(20px)}
 .drawer.open{transform:translateX(0)}.drawer-head{height:62px;padding:0 17px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
 .drawer-head h3{font-size:14px}.drawer-close{width:32px;height:32px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer}
@@ -284,6 +307,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
   .status-card,.ops-card{grid-column:span 6}.hero-card{grid-column:span 12;order:-1}
   .metric-card{grid-column:span 6}.activity-card,.next-card{grid-column:span 12}
   .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .bulk-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media(max-width:720px){
   body{padding:0}.app-shell{height:100vh;height:100dvh;border:0;border-radius:0;box-shadow:none;display:block}
@@ -298,7 +322,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
   .icon-button{display:none}.operator-avatar{width:34px;height:34px}.toggle-pill{min-height:34px;padding:0 10px}
   .content{padding:17px 13px 30px}.page-head{align-items:flex-start;flex-direction:column}.page-head h1{font-size:23px}.page-actions{justify-content:flex-start}
   .dashboard-grid{gap:9px}.status-card,.ops-card,.hero-card,.metric-card,.activity-card,.next-card{grid-column:span 12}.hero-card{min-height:218px}
-  .cards,.g2,.g3,.auto-trigger{grid-template-columns:1fr}.messages-layout{height:calc(100dvh - 168px);grid-template-columns:1fr}.conversation-pane{display:none}.conversation-rail{border-right:0}
+  .cards,.g2,.g3,.auto-trigger,.bulk-grid,.bulk-fields{grid-template-columns:1fr}.bulk-kpis{grid-template-columns:1fr 1fr}.messages-layout{height:calc(100dvh - 168px);grid-template-columns:1fr}.conversation-pane{display:none}.conversation-rail{border-right:0}
   .messages-layout.chat-open .conversation-rail{display:none}.messages-layout.chat-open .conversation-pane{display:flex}
   .panel{border-radius:14px}.drawer{inset:0;width:100%;max-width:none;border-radius:0}.media-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
@@ -306,7 +330,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition-duration:.01ms!important}}
 </style>
 </head>
-<body>
+<body class="role-__DASHBOARD_ROLE_CLASS__">
 <div class="app-shell">
   <aside class="sidebar">
     <div class="brand">
@@ -340,6 +364,9 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
       <button type="button" class="nav-item" data-tab="vault">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l2-2h9v13h-17z"/></svg><span>Vault</span>
       </button>
+      <button type="button" class="nav-item" data-tab="bulk-posting">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M8 8l4-4 4 4M5 13v6h14v-6"/></svg><span>Bulk Posting</span>
+      </button>
       <span class="nav-label">Workspace</span>
       <button type="button" class="nav-item" data-tab="brain">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4a3 3 0 0 0-3 3v1a3 3 0 0 0-2 3v2a3 3 0 0 0 3 3 3 3 0 0 0 5 2 3 3 0 0 0 5-2 3 3 0 0 0 3-3v-2a3 3 0 0 0-2-3V7a3 3 0 0 0-6-1 3 3 0 0 0-3-2zM12 6v12"/></svg><span>Brain</span>
@@ -359,7 +386,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
   <main class="main">
     <header class="topbar">
       <div class="workspace-switcher" aria-label="Current workspace">
-        <strong>Sunny Charm / Fansly</strong><span>Automated PPV workspace</span>
+        <strong id="workspace-title">Sunny Charm / Fansly</strong><span id="workspace-subtitle">Automated PPV workspace</span>
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
       </div>
       <div class="top-actions">
@@ -384,6 +411,8 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 </aside>
 <script nonce="__CSP_NONCE__">
 const CSRF_TOKEN=__CSRF_TOKEN__;
+const DASHBOARD_ROLE=__DASHBOARD_ROLE__;
+const IS_POSTING_VA=DASHBOARD_ROLE==='posting_va';
 var currentTab='dashboard';
 var conversationData=[];
 var conversationTotal=0;
@@ -412,6 +441,10 @@ var dashboardPersona={};
 var voiceDocuments=[];
 var autoMessagesView='triggers';
 var autoCampaignEditor=false;
+var bulkPostingView='schedule';
+var bulkPostingData=null;
+var bulkPostingCards=[];
+var bulkPostingNextCardId=1;
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function attr(s){return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
@@ -426,8 +459,9 @@ function botControlMarkup(){return'<div class="bot-control-group"><button type="
 async function F(u){try{var r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return null;return await r.json()}catch(e){return null}}
 async function M(u,options){options=options||{};options.credentials='same-origin';options.cache='no-store';options.headers=Object.assign({},options.headers||{}, {'X-CSRF-Token':CSRF_TOKEN});return fetch(u,options)}
 
-var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,'auto-messages':loadAutoMessages,scripts:loadScripts,sequences:loadSequences,vault:loadVault,brain:loadBrain,voice:loadVoiceLab,settings:loadSettings};
+var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,'auto-messages':loadAutoMessages,scripts:loadScripts,sequences:loadSequences,vault:loadVault,'bulk-posting':loadBulkPosting,brain:loadBrain,voice:loadVoiceLab,settings:loadSettings};
 function navTo(tab,skipHash){
+  if(IS_POSTING_VA)tab='bulk-posting';
   if(!loaders[tab])tab='dashboard';
   currentTab=tab;
   document.querySelectorAll('.nav-item').forEach(function(item){item.classList.toggle('active',item.dataset.tab===tab);if(item.dataset.tab===tab)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current')});
@@ -935,6 +969,74 @@ function saveSeq(){
 }
 function deleteSeq(id){if(!confirm('Delete this flow?'))return;M('/api/sequences/'+id,{method:'DELETE'}).then(function(r){if(r.ok)loadSequences()})}
 
+function newBulkCard(){return{id:bulkPostingNextCardId++,media:[],caption:'',tags:'',scheduled_for:'',expires_at:'',recurrence:'one_time',wall_ids:[],carousel:false}}
+function captureBulkForms(){
+  bulkPostingCards.forEach(function(card){var el=bulkCardElement(card.id);if(!el)return;var field=function(name){return el.querySelector('[data-bulk-field="'+name+'"]')};card.caption=field('caption').value;card.tags=field('tags').value;card.scheduled_for=field('scheduled_for').value;card.expires_at=field('expires_at').value;card.recurrence=field('recurrence').value;card.wall_ids=Array.from(field('walls').selectedOptions).map(function(option){return option.value});card.carousel=field('carousel').checked})
+}
+function loadBulkPosting(){
+  document.getElementById('content').innerHTML=pageHead('Bulk Posting','Bulk Posting','Plan your content. Drop on autopilot.','');
+  F('/api/bulk-posting').then(function(data){
+    bulkPostingData=data||{available:false,reason:'Bulk Posting status is unavailable',walls:[],posts:[],metrics:{}};
+    if(!bulkPostingCards.length)bulkPostingCards=[newBulkCard(),newBulkCard()];
+    renderBulkPosting();
+  });
+}
+function bulkMetric(label,value,foot){return'<article class="bulk-kpi"><span class="label">'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(foot||'')+'</small></article>'}
+function renderBulkPosting(){
+  var d=bulkPostingData||{},m=d.metrics||{},c=document.getElementById('content');
+  var next=m.next_post?new Date(m.next_post).toLocaleString():'—',rate=m.delivery_rate==null?'—':Number(m.delivery_rate).toFixed(1)+'%';
+  var h=pageHead('Bulk Posting','Bulk Posting','Plan your content. Drop on autopilot.','');
+  h+='<div class="bulk-kpis">'+bulkMetric('Scheduled Posts',m.scheduled_posts||0,'')+bulkMetric('Next Post',next,'')+bulkMetric('Recurring Rules',m.recurring_rules||0,'')+bulkMetric('Delivery Rate',rate,'last 30 days')+'</div>';
+  h+='<div class="bulk-tabs"><div class="bulk-tab-list"><button class="bulk-tab'+(bulkPostingView==='schedule'?' active':'')+'" data-action="bulk-tab" data-view="schedule">Schedule Posts</button><button class="bulk-tab'+(bulkPostingView==='scheduled'?' active':'')+'" data-action="bulk-tab" data-view="scheduled">Already Scheduled</button></div>'+(bulkPostingView==='schedule'?'<button class="btn-ghost" data-action="add-bulk-card">Add post</button>':'')+'</div>';
+  if(!d.available)h+='<section class="block"><p class="block-copy" style="color:var(--amber)">'+esc(d.reason||'Bulk Posting is not configured')+'</p></section>';
+  if(bulkPostingView==='scheduled'){
+    var rows=d.posts||[];
+    h+=rows.length?'<section class="block"><table class="bulk-table"><thead><tr><th>Schedule</th><th>Caption</th><th>Media</th><th>Recurrence</th><th>Status</th></tr></thead><tbody>'+rows.map(function(p){return'<tr><td>'+esc(new Date(p.scheduled_for).toLocaleString())+'</td><td>'+esc(String(p.caption||'').slice(0,90)||'Media post')+'</td><td>'+Number(p.media_count||0)+'</td><td>'+esc(String(p.recurrence||'one_time').replace('_',' '))+'</td><td>'+esc(p.status||'')+'</td></tr>'}).join('')+'</tbody></table></section>':emptyState('□','No scheduled posts','Your scheduled posts will appear here.');
+  }else{
+    h+='<div class="bulk-grid">'+bulkPostingCards.map(function(card,index){return bulkCardMarkup(card,index,d)}).join('')+'</div>';
+  }
+  c.innerHTML=h;
+}
+function bulkCardMarkup(card,index,data){
+  var walls=data.walls||[],disabled=!data.available?' disabled':'',remove=index?'<button class="bulk-card-remove" data-action="remove-bulk-card" data-card-id="'+card.id+'" aria-label="Remove post">×</button>':'';
+  var wallOptions=walls.map(function(w){return'<option value="'+attr(w.id)+'"'+((card.wall_ids||[]).indexOf(String(w.id))>=0?' selected':'')+'>'+esc(w.name||'Wall')+'</option>'}).join('');
+  var paidDisabled=data.paid_preview_supported?'':' disabled title="'+attr(data.paid_preview_reason||'Not supported by the provider')+'"';
+  return'<section class="bulk-card" data-bulk-card="'+card.id+'">'+remove+'<h3>Schedule a new post</h3><p class="bulk-card-copy">Drop content on autopilot. Recurring or one-time.</p><div class="bulk-fields"><div class="bulk-field-full"><label>Caption</label><textarea data-bulk-field="caption" maxlength="10000" placeholder="What’s your fans gonna read?">'+esc(card.caption||'')+'</textarea></div><div class="bulk-field-full"><label>Tags (comma or space separated, # optional)</label><div class="bulk-tags-row"><input data-bulk-field="tags" value="'+attr(card.tags||'')+'" placeholder="petite, kawaii, #fyp"><button class="bulk-spark" data-action="bulk-suggest-tags" data-card-id="'+card.id+'" title="Suggest tags from caption">✦</button></div></div><div><label>Schedule for</label><input data-bulk-field="scheduled_for" type="datetime-local" value="'+attr(card.scheduled_for||'')+'"></div><div><label>Recurrence</label><select data-bulk-field="recurrence">'+['one_time','daily','weekly','monthly'].map(function(value){return'<option value="'+value+'"'+(card.recurrence===value?' selected':'')+'>'+esc(value==='one_time'?'One-time':value.charAt(0).toUpperCase()+value.slice(1))+'</option>'}).join('')+'</select></div><div><label>Expires at (optional)</label><input data-bulk-field="expires_at" type="datetime-local" value="'+attr(card.expires_at||'')+'"></div><div><label>Walls</label><select data-bulk-field="walls" multiple size="'+Math.max(2,Math.min(4,walls.length||2))+'"'+disabled+'>'+wallOptions+'</select></div></div><div class="bulk-checks"><label><input data-bulk-field="carousel" type="checkbox"'+(card.carousel?' checked':'')+'> Group multiple media as one carousel</label><label'+(paidDisabled?' title="'+attr(data.paid_preview_reason||'Not supported')+'"':'')+'><input data-bulk-field="paid_preview" type="checkbox"'+paidDisabled+'> Use first image as paid-post preview</label></div><label>Media</label><div class="bulk-drop" data-action="choose-bulk-media" data-card-id="'+card.id+'"><input type="file" data-bulk-upload="'+card.id+'" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime,video/webm" multiple hidden><span>⇧ &nbsp;<strong>Drop media here</strong> or click to upload — videos, photos, GIFs</span></div><div class="bulk-media-list" data-bulk-media-list="'+card.id+'">'+bulkMediaMarkup(card)+'</div><div class="bulk-status" data-bulk-status="'+card.id+'"></div><button class="btn" style="margin-top:10px" data-action="schedule-bulk-post" data-card-id="'+card.id+'"'+disabled+'>+ Schedule Post</button></section>'
+}
+function bulkMediaMarkup(card){return(card.media||[]).map(function(media,index){return'<div class="bulk-media-chip"><span>'+esc(media.name||media.media_type||'Media')+'</span><button data-action="remove-bulk-media" data-card-id="'+card.id+'" data-media-index="'+index+'" aria-label="Remove media">×</button></div>'}).join('')}
+function bulkCardById(cardId){return bulkPostingCards.find(function(card){return card.id===Number(cardId)})}
+function bulkCardElement(cardId){return document.querySelector('[data-bulk-card="'+Number(cardId)+'"]')}
+function setBulkStatus(cardId,message,state){var el=document.querySelector('[data-bulk-status="'+Number(cardId)+'"]');if(el){el.textContent=message||'';el.className='bulk-status '+(state||'')}}
+async function uploadBulkFiles(cardId,files){
+  var card=bulkCardById(cardId);if(!card)return;
+  for(var i=0;i<files.length;i++){
+    var file=files[i];setBulkStatus(cardId,'Uploading '+file.name+'…','');
+    try{
+      var response=await M('/api/bulk-posting/media',{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-File-Name':encodeURIComponent(file.name)},body:file});
+      var data=await response.json();if(!response.ok)throw new Error(data.error||'Upload failed');
+      card.media.push(data.media);
+      var list=document.querySelector('[data-bulk-media-list="'+Number(cardId)+'"]');if(list)list.innerHTML=bulkMediaMarkup(card);
+      setBulkStatus(cardId,'Upload ready','ok');
+    }catch(error){setBulkStatus(cardId,error.message||'Upload failed','error');break}
+  }
+}
+function parseBulkTags(value){return String(value||'').split(/[\s,]+/).map(function(tag){return tag.replace(/^#/,'').trim()}).filter(Boolean)}
+function bulkLocalIso(value){if(!value)return'';var date=new Date(value);return isNaN(date.getTime())?'':date.toISOString()}
+async function scheduleBulkPost(cardId){
+  var card=bulkCardById(cardId),el=bulkCardElement(cardId);if(!card||!el)return;
+  var field=function(name){return el.querySelector('[data-bulk-field="'+name+'"]')};
+  var schedule=bulkLocalIso(field('scheduled_for').value),expires=bulkLocalIso(field('expires_at').value);
+  var walls=Array.from(field('walls').selectedOptions).map(function(option){return option.value});
+  var payload={caption:field('caption').value,tags:parseBulkTags(field('tags').value),scheduled_for:schedule,expires_at:expires,recurrence:field('recurrence').value,wall_ids:walls,carousel:field('carousel').checked,paid_preview:field('paid_preview').checked,media:card.media};
+  setBulkStatus(cardId,'Scheduling…','');
+  try{
+    var response=await M('/api/bulk-posting/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var data=await response.json();if(!response.ok)throw new Error(data.error||'Scheduling failed');
+    setBulkStatus(cardId,'Scheduled successfully','ok');bulkPostingCards=bulkPostingCards.filter(function(item){return item.id!==Number(cardId)});bulkPostingCards.push(newBulkCard());setTimeout(loadBulkPosting,500);
+  }catch(error){setBulkStatus(cardId,error.message||'Scheduling failed','error')}
+}
+function suggestBulkTags(cardId){var el=bulkCardElement(cardId);if(!el)return;var caption=el.querySelector('[data-bulk-field="caption"]').value.toLowerCase(),stop={this:1,that:1,with:1,from:1,your:1,have:1,what:1,when:1,where:1,will:1,just:1,about:1};var tags=(caption.match(/[a-z0-9_]{4,}/g)||[]).filter(function(word,index,all){return!stop[word]&&all.indexOf(word)===index}).slice(0,6);el.querySelector('[data-bulk-field="tags"]').value=tags.join(', ')}
+
 async function loadBotStatus(){
   try{
     var r=await fetch('/api/bot/status',{credentials:'same-origin',cache:'no-store'});
@@ -979,6 +1081,13 @@ document.addEventListener('click',function(event){
   else if(action==='new-auto-campaign'){autoCampaignEditor=true;loadAutoMessages()}
   else if(action==='cancel-auto-campaign'){autoCampaignEditor=false;loadAutoMessages()}
   else if(action==='save-auto-campaign')saveAutoCampaign();
+  else if(action==='bulk-tab'){captureBulkForms();bulkPostingView=control.dataset.view||'schedule';renderBulkPosting()}
+  else if(action==='add-bulk-card'){captureBulkForms();bulkPostingCards.push(newBulkCard());renderBulkPosting()}
+  else if(action==='remove-bulk-card'){captureBulkForms();bulkPostingCards=bulkPostingCards.filter(function(card){return card.id!==Number(control.dataset.cardId)});renderBulkPosting()}
+  else if(action==='choose-bulk-media'){var upload=document.querySelector('[data-bulk-upload="'+Number(control.dataset.cardId)+'"]');if(upload)upload.click()}
+  else if(action==='remove-bulk-media'){var bulkCard=bulkCardById(control.dataset.cardId);if(bulkCard){bulkCard.media.splice(Number(control.dataset.mediaIndex),1);var bulkList=document.querySelector('[data-bulk-media-list="'+bulkCard.id+'"]');if(bulkList)bulkList.innerHTML=bulkMediaMarkup(bulkCard)}}
+  else if(action==='schedule-bulk-post')scheduleBulkPost(control.dataset.cardId);
+  else if(action==='bulk-suggest-tags')suggestBulkTags(control.dataset.cardId);
   else if(action==='close-drawer')closeDrawer();
   else if(action==='fan-detail')fanDetail(control.dataset.fanId||'');
   else if(action==='select-conversation')selectConversation(control.dataset.fanId||'');
@@ -1028,13 +1137,24 @@ document.addEventListener('click',function(event){
   else if(action==='select-media'&&Number.isInteger(stepIndex))selectMedia(stepIndex,control.dataset.mediaId||'',control.dataset.previewId||'');
 });
 document.addEventListener('input',function(event){if(event.target.id==='conversation-search')filterConversations(event.target.value)});
-document.addEventListener('change',function(event){if(event.target.id==='album-picker'){var stepIndex=Number(event.target.dataset.stepIndex);if(Number.isInteger(stepIndex))loadAlbumMedia(stepIndex)}else if(event.target.id==='voice-document-select')selectVoiceDocument(event.target.value)});
+document.addEventListener('change',function(event){if(event.target.id==='album-picker'){var stepIndex=Number(event.target.dataset.stepIndex);if(Number.isInteger(stepIndex))loadAlbumMedia(stepIndex)}else if(event.target.id==='voice-document-select')selectVoiceDocument(event.target.value);else if(event.target.matches('[data-bulk-upload]')){uploadBulkFiles(event.target.dataset.bulkUpload,Array.from(event.target.files||[]));event.target.value=''}});
+document.addEventListener('dragover',function(event){var drop=event.target.closest('.bulk-drop');if(drop){event.preventDefault();drop.classList.add('drag')}});
+document.addEventListener('dragleave',function(event){var drop=event.target.closest('.bulk-drop');if(drop)drop.classList.remove('drag')});
+document.addEventListener('drop',function(event){var drop=event.target.closest('.bulk-drop');if(drop){event.preventDefault();drop.classList.remove('drag');uploadBulkFiles(drop.dataset.cardId,Array.from(event.dataTransfer.files||[]))}});
 document.addEventListener('keydown',function(event){if(event.key==='Escape')closeDrawer()});
 window.addEventListener('hashchange',function(){navTo(location.hash.slice(1)||'dashboard',true)});
 
-loadBotStatus();
-setInterval(loadBotStatus,15000);
-navTo(location.hash.slice(1)||'dashboard',true);
+if(IS_POSTING_VA){
+  document.querySelectorAll('.nav-item:not([data-tab="bulk-posting"]),.nav-label,.launch-note').forEach(function(node){node.remove()});
+  var workspaceTitle=document.getElementById('workspace-title'),workspaceSubtitle=document.getElementById('workspace-subtitle');
+  if(workspaceTitle)workspaceTitle.textContent='Sunny Charm / Posting';
+  if(workspaceSubtitle)workspaceSubtitle.textContent='Bulk Posting access';
+  navTo('bulk-posting',true);
+}else{
+  loadBotStatus();
+  setInterval(loadBotStatus,15000);
+  navTo(location.hash.slice(1)||'dashboard',true);
+}
 setInterval(function(){if(currentTab==='funnel'&&!activeConversationId)loadFunnel()},60000);
 setInterval(function(){if(currentTab==='funnel'&&!activeConversationId&&!conversationDiscoveryComplete)loadConversationList(true)},5000);
 </script>

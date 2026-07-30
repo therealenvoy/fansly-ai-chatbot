@@ -237,3 +237,103 @@ def test_lists_vault_albums_and_media():
     media, cursor = client.get_album_media("album-1")
     assert media[0]["mediaId"] == "media-1"
     assert cursor == "next-media"
+
+
+def test_upload_post_media_waits_for_async_job(tmp_path):
+    client = _client()
+    media_file = tmp_path / "clip.mp4"
+    media_file.write_bytes(b"video")
+    client.client.post = MagicMock(
+        return_value=_response(
+            {"statusCode": 202, "data": {"jobId": "job-1"}},
+            status=202,
+        )
+    )
+    client.client.request = MagicMock(
+        side_effect=[
+            _response(
+                {
+                    "statusCode": 200,
+                    "data": {"state": "active"},
+                }
+            ),
+            _response(
+                {
+                    "statusCode": 200,
+                    "data": {
+                        "state": "completed",
+                        "result": {
+                            "mediaId": "media-1",
+                            "accountMedia": [{"id": "account-media-1"}],
+                        },
+                    },
+                }
+            ),
+        ]
+    )
+
+    uploaded = client.upload_post_media(
+        str(media_file),
+        poll_interval=0.01,
+    )
+
+    assert uploaded == {
+        "job_id": "job-1",
+        "media_id": "media-1",
+        "account_media_id": "account-media-1",
+    }
+    assert client.client.request.call_args.args == (
+        "GET",
+        "/media/upload/job-1/status",
+    )
+
+
+def test_lists_post_walls_and_creates_scheduled_post():
+    client = _client()
+    client.client.request = MagicMock(
+        side_effect=[
+            _response(
+                {
+                    "statusCode": 200,
+                    "data": {
+                        "status_code": 200,
+                        "data": {
+                            "walls": [
+                                {
+                                    "id": "wall-1",
+                                    "name": "Subscribers",
+                                },
+                            ]
+                        },
+                    },
+                }
+            ),
+            _response(_payload({"id": "post-1"}), status=201),
+        ]
+    )
+
+    assert client.list_post_walls() == [
+        {"id": "wall-1", "name": "Subscribers"}
+    ]
+    result = client.create_post(
+        content="hello\n\n#fyp",
+        wall_ids=["wall-1"],
+        account_media_ids=["account-media-1"],
+        scheduled_for=1775000000,
+        expires_at=1775086400,
+    )
+
+    assert result["id"] == "post-1"
+    assert client.client.request.call_args.kwargs["json"] == {
+        "content": "hello\n\n#fyp",
+        "wallIds": ["wall-1"],
+        "attachments": [
+            {
+                "contentType": 1,
+                "contentId": "account-media-1",
+                "pos": 0,
+            }
+        ],
+        "scheduledFor": 1775000000,
+        "expiresAt": 1775086400,
+    }

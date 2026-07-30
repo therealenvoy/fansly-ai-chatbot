@@ -12,6 +12,7 @@ import math
 import os
 import re
 import secrets
+import tempfile
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 
@@ -19,13 +20,14 @@ import yaml
 from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Optional, TYPE_CHECKING
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from sqlalchemy import case, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from ..auto_messages.control import AutoMessagesControlError
 from ..auto_messages.metrics import AutoMessagesMetrics
+from ..bulk_posting import BulkPostingError
 from ..engagement.control_plane import NativePlanRepository
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
@@ -88,6 +90,7 @@ if TYPE_CHECKING:
 PERSONA_DIR = "/data/config/creators"
 BRAND_BIBLE_PATH = "/data/config/brand_bible.md"
 MAX_BODY_BYTES = 1024 * 1024
+MAX_MEDIA_UPLOAD_BYTES = 500 * 1024 * 1024
 CREATOR_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 PROVIDER_MEDIA_ID_PATTERN = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
@@ -836,6 +839,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def auto_messages_control(self):
         return getattr(self.server, "auto_messages_control", None)
 
+    @property
+    def bulk_posting(self):
+        return getattr(self.server, "bulk_posting", None)
+
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
@@ -864,9 +871,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def h(self, html, status=200):
         nonce = secrets.token_urlsafe(18)
+        role = getattr(self, "_dashboard_role", "owner")
         rendered = (
             html.replace("__CSP_NONCE__", nonce)
             .replace("__CSRF_TOKEN__", json.dumps(self.server.csrf_token))
+            .replace("__DASHBOARD_ROLE__", json.dumps(role))
+            .replace(
+                "__DASHBOARD_ROLE_CLASS__",
+                "posting_va" if role == "posting_va" else "owner",
+            )
         )
         payload = rendered.encode("utf-8")
         csp = (
@@ -930,13 +943,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError, binascii.Error):
             pass
 
-        user_ok = hmac.compare_digest(
-            supplied_user.encode("utf-8"), expected_user.encode("utf-8")
+        credentials = (
+            ("owner", expected_user, expected_password),
+            (
+                "posting_va",
+                self.server.va_dashboard_user,
+                self.server.va_dashboard_password,
+            ),
         )
-        password_ok = hmac.compare_digest(
-            supplied_password.encode("utf-8"), expected_password.encode("utf-8")
-        )
-        return user_ok and password_ok
+        authenticated_role = None
+        authenticated_identity = None
+        for role, configured_user, configured_password in credentials:
+            configured = bool(
+                configured_user
+                and len(configured_password) >= 16
+            )
+            user_ok = hmac.compare_digest(
+                supplied_user.encode("utf-8"),
+                configured_user.encode("utf-8"),
+            )
+            password_ok = hmac.compare_digest(
+                supplied_password.encode("utf-8"),
+                configured_password.encode("utf-8"),
+            )
+            if configured and user_ok and password_ok:
+                authenticated_role = role
+                authenticated_identity = configured_user
+        if authenticated_role is None:
+            return False
+        self._dashboard_role = authenticated_role
+        self._dashboard_identity = authenticated_identity
+        return True
+
+    def _role_can_access(self) -> bool:
+        if getattr(self, "_dashboard_role", "owner") != "posting_va":
+            return True
+        path = self.path.split("?", 1)[0]
+        allowed = {
+            "GET": {
+                "/",
+                "/dashboard",
+                "/api/bulk-posting",
+            },
+            "POST": {
+                "/api/bulk-posting/media",
+                "/api/bulk-posting/schedule",
+            },
+        }
+        return path in allowed.get(self.command, set())
 
     def _csrf_is_valid(self):
         supplied = self.headers.get("X-CSRF-Token", "")
@@ -976,6 +1030,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 401,
                 {"WWW-Authenticate": 'Basic realm="Fansly Dashboard", charset="UTF-8"'},
             )
+            return False
+        if not self._role_can_access():
+            self.j({"error": "forbidden for this dashboard role"}, 403)
             return False
         if require_csrf and not self._csrf_is_valid():
             self.j({"error": "invalid CSRF token or request origin"}, 403)
@@ -1030,6 +1087,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/human-delivery/memory": return self._human_delivery_memory(q)
         if p=="/api/human-delivery/review": return self._human_delivery_review()
         if p=="/api/auto-messages": return self._auto_messages_status()
+        if p=="/api/bulk-posting": return self._bulk_posting_status()
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1040,6 +1098,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._apifansly_webhook(p)
         if not self._authorize(require_csrf=True):
             return
+        if p=="/api/bulk-posting/media":
+            return self._bulk_posting_upload()
         q = parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
         try:
             b = _body(self)
@@ -1080,7 +1140,139 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/auto-messages/settings": return self._auto_messages_settings_save(b)
         if p=="/api/auto-messages/preview": return self._auto_messages_preview(b)
         if p=="/api/auto-messages/campaigns": return self._auto_messages_campaign_save(b)
+        if p=="/api/bulk-posting/schedule":
+            return self._bulk_posting_schedule(b)
         self.j({"error":"not found"},404)
+
+    def _bulk_posting_status(self):
+        service = self.bulk_posting
+        if service is None or self.engine is None:
+            return self.j(
+                {
+                    "available": False,
+                    "reason": "Bulk Posting is unavailable",
+                    "walls": [],
+                    "posts": [],
+                    "metrics": {},
+                },
+                503,
+            )
+        try:
+            return self.j(service.snapshot())
+        except Exception as error:
+            logger.warning(
+                "Bulk Posting status failed: %s",
+                type(error).__name__,
+            )
+            return self.j(
+                {"error": "Could not load Bulk Posting status"},
+                502,
+            )
+
+    def _bulk_posting_upload(self):
+        service = self.bulk_posting
+        if service is None or not service.available:
+            return self.j({"error": "Bulk Posting is not configured"}, 503)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            return self.j({"error": "invalid content length"}, 400)
+        if length <= 0:
+            return self.j({"error": "Select a media file"}, 400)
+        if length > MAX_MEDIA_UPLOAD_BYTES:
+            return self.j({"error": "Media must be 500 MB or smaller"}, 413)
+        filename = os.path.basename(
+            unquote(self.headers.get("X-File-Name", "")).strip()
+        )
+        extension = Path(filename).suffix.lower()
+        allowed_extensions = {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".webp",
+            ".mp4",
+            ".mov",
+            ".webm",
+        }
+        if not filename or extension not in allowed_extensions:
+            return self.j(
+                {"error": "Upload a JPG, PNG, GIF, WebP, MP4, MOV, or WebM file"},
+                400,
+            )
+        content_type = self.headers.get(
+            "Content-Type",
+            "application/octet-stream",
+        ).split(";", 1)[0].strip().lower()
+        media_type = "video" if extension in {".mp4", ".mov", ".webm"} else "image"
+        if content_type != "application/octet-stream":
+            expected_prefix = "video/" if media_type == "video" else "image/"
+            if not content_type.startswith(expected_prefix):
+                return self.j({"error": "File type does not match its name"}, 400)
+
+        temporary_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                suffix=extension,
+                delete=False,
+            ) as temporary:
+                temporary_path = temporary.name
+                remaining = length
+                while remaining:
+                    chunk = self.rfile.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        raise ValueError("Upload ended before the declared size")
+                    temporary.write(chunk)
+                    remaining -= len(chunk)
+            uploaded = service.upload_media(
+                temporary_path,
+                original_name=filename,
+                media_type=media_type,
+            )
+            return self.j({"media": uploaded}, 201)
+        except (BulkPostingError, ValueError, TimeoutError) as error:
+            return self.j({"error": str(error)}, 400)
+        except Exception as error:
+            logger.warning(
+                "Bulk media upload failed: %s",
+                type(error).__name__,
+            )
+            return self.j({"error": "Media upload failed"}, 502)
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    logger.warning("Could not remove a bulk-upload temporary file")
+
+    def _bulk_posting_schedule(self, body):
+        service = self.bulk_posting
+        if service is None or not service.available:
+            return self.j({"error": "Bulk Posting is not configured"}, 503)
+        try:
+            payload = json.loads(body or "{}")
+            if not isinstance(payload, dict):
+                raise BulkPostingError("Invalid schedule payload")
+            return self.j(
+                service.schedule(
+                    payload,
+                    actor=getattr(
+                        self,
+                        "_dashboard_identity",
+                        "owner",
+                    ),
+                ),
+                201,
+            )
+        except (BulkPostingError, json.JSONDecodeError) as error:
+            return self.j({"error": str(error)}, 400)
+        except Exception as error:
+            logger.warning(
+                "Bulk post scheduling failed: %s",
+                type(error).__name__,
+            )
+            return self.j({"error": "Could not schedule the post"}, 502)
 
     def _auto_messages_status(self):
         control = self.auto_messages_control
@@ -4256,6 +4448,8 @@ class DashboardServer:
         brand_bible_path: Optional[str] = None,
         dashboard_user: Optional[str] = None,
         dashboard_password: Optional[str] = None,
+        va_dashboard_user: Optional[str] = None,
+        va_dashboard_password: Optional[str] = None,
         allowed_hosts: Optional[set[str]] = None,
         csrf_token: Optional[str] = None,
         apifansly_webhook_token: Optional[str] = None,
@@ -4268,6 +4462,7 @@ class DashboardServer:
         human_delivery=None,
         human_delivery_control=None,
         auto_messages_control=None,
+        bulk_posting=None,
         credit_governor=None,
         webhook_control=None,
         webhook_endpoint_url: str = "",
@@ -4343,6 +4538,7 @@ class DashboardServer:
         self.server.human_delivery = human_delivery
         self.server.human_delivery_control = human_delivery_control
         self.server.auto_messages_control = auto_messages_control
+        self.server.bulk_posting = bulk_posting
         self.server.credit_governor = credit_governor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir
@@ -4362,6 +4558,27 @@ class DashboardServer:
             if dashboard_password is None
             else dashboard_password
         )
+        self.server.va_dashboard_user = (
+            os.getenv("VA_DASHBOARD_USER", "")
+            if va_dashboard_user is None
+            else va_dashboard_user
+        ).strip()
+        self.server.va_dashboard_password = (
+            os.getenv("VA_DASHBOARD_PASSWORD", "")
+            if va_dashboard_password is None
+            else va_dashboard_password
+        )
+        if (
+            self.server.va_dashboard_user
+            and self.server.va_dashboard_user
+            == self.server.dashboard_user
+        ):
+            logger.error(
+                "Posting VA username conflicts with the owner username; "
+                "the restricted account is disabled"
+            )
+            self.server.va_dashboard_user = ""
+            self.server.va_dashboard_password = ""
         self.server.allowed_hosts = hosts
         self.server.csrf_token = csrf_token or secrets.token_urlsafe(32)
         self.server.apifansly_webhook_token = (

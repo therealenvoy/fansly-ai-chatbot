@@ -885,3 +885,6 @@ import src.conversation.brain2_schema  # noqa: E402,F401
 
 # Register feature-flagged Human Delivery tables in shared Alembic metadata.
 import src.human_delivery.schema  # noqa: E402,F401
+
+# Register durable Bulk Posting schedules in shared Alembic metadata.
+import src.bulk_posting.schema  # noqa: E402,F401

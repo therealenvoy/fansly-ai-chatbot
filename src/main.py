@@ -27,6 +27,8 @@ from dotenv import load_dotenv
 
 from .fansly_client import AuthError, PaymentRequiredError
 from .client_factory import get_fansly_client
+from .apifansly_client import ApifanslyClient, ApifanslyConfig
+from .bulk_posting import BulkPostingService
 from .persona.loader import PersonaLoader
 from .notes.repository import FanNoteRepository
 from .memory.store import MessageStore
@@ -302,6 +304,22 @@ if not API_KEY:
 database_engine = create_database_engine(DB_URL)
 upgrade_database(DB_URL, engine=database_engine)
 client = get_fansly_client(os.environ)
+bulk_posting_client = None
+if (
+    os.getenv("APIFANSLY_API_KEY", "").strip()
+    and os.getenv("FANSLY_ACCOUNT_ID", "").strip()
+):
+    bulk_posting_client = ApifanslyClient(
+        ApifanslyConfig(
+            api_key=os.getenv("APIFANSLY_API_KEY", "").strip(),
+            account_id=os.getenv("FANSLY_ACCOUNT_ID", "").strip(),
+        )
+    )
+bulk_posting = BulkPostingService(
+    database_engine,
+    creator_id=CREATOR_ID,
+    client=bulk_posting_client,
+)
 persona_target = Path(PERSONA_CONFIG_DIR) / f"{CREATOR_ID}.yaml"
 persona_default = Path("config/creators") / f"{CREATOR_ID}.yaml"
 if not persona_target.exists() and persona_default.exists():
@@ -668,6 +686,7 @@ dashboard = DashboardServer(
     human_delivery=human_delivery,
     human_delivery_control=human_delivery_control,
     auto_messages_control=auto_messages_control,
+    bulk_posting=bulk_posting,
     credit_governor=provider_credit_governor,
     onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
     webhook_endpoint_url=ONLYFANSAPI_WEBHOOK_URL,
@@ -842,6 +861,21 @@ def run_outreach_worker() -> None:
         sleep_with_interrupt(5)
 
 
+def run_bulk_posting_worker() -> None:
+    """Submit the next bounded recurrence window for durable post rules."""
+    while running:
+        try:
+            submitted = bulk_posting.run_due()
+            if submitted:
+                logger.info(
+                    "Submitted %s recurring bulk-post rule(s)",
+                    submitted,
+                )
+        except Exception:
+            logger.exception("Bulk-post recurrence worker failed")
+        sleep_with_interrupt(60)
+
+
 def run_webhook_registration() -> None:
     """Register the signed Fansly message webhook without console access."""
     if (
@@ -939,6 +973,9 @@ else:
 if crm_sync is not None and SERVICE_ROLE.runs_scheduler:
     _start_background_worker("crm-sync", run_crm_worker)
 
+if bulk_posting.available and SERVICE_ROLE.runs_scheduler:
+    _start_background_worker("bulk-posting", run_bulk_posting_worker)
+
 if bot is not None and SERVICE_ROLE.runs_reply_workers:
     run_reply_worker(1)
 else:
@@ -948,6 +985,8 @@ else:
 if bot is not None and bot.memory_extraction_service is not None:
     bot.memory_extraction_service.shutdown()
 episode_service.shutdown()
+if bulk_posting_client is not None:
+    bulk_posting_client.close()
 advanced_brain_service.shutdown()
 shadow_brain_service.shutdown()
 client.close()

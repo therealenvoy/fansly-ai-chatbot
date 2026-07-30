@@ -39,6 +39,8 @@ from src.webhooks.registry import EVENT_REGISTRY
 
 TEST_USER = "test-operator"
 TEST_PASSWORD = "correct-horse-battery-staple"
+TEST_VA_USER = "posting-va"
+TEST_VA_PASSWORD = "posting-va-separate-strong-password"
 TEST_CSRF_TOKEN = "test-csrf-token-with-enough-entropy"
 TEST_WEBHOOK_TOKEN = "test-webhook-token-with-enough-entropy"
 TEST_ONLYFANSAPI_WEBHOOK_SECRET = (
@@ -389,6 +391,8 @@ def running_server(db_url, tmp_path):
         port=0,
         dashboard_user=TEST_USER,
         dashboard_password=TEST_PASSWORD,
+        va_dashboard_user=TEST_VA_USER,
+        va_dashboard_password=TEST_VA_PASSWORD,
         csrf_token=TEST_CSRF_TOKEN,
         apifansly_webhook_token=TEST_WEBHOOK_TOKEN,
         onlyfansapi_webhook_secret=(
@@ -1228,6 +1232,102 @@ class TestDashboardSecurity:
 
         assert status == 401
         assert body == {"error": "authentication required"}
+
+    def test_posting_va_sees_only_bulk_posting_shell(self, running_server):
+        host, _, _ = running_server
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/",
+            headers={
+                "Authorization": _authorization(
+                    TEST_VA_USER,
+                    TEST_VA_PASSWORD,
+                )
+            },
+        )
+
+        assert status == 200
+        assert 'class="role-posting_va"' in body
+        assert "const DASHBOARD_ROLE=\"posting_va\";" in body
+        assert "if(IS_POSTING_VA)tab='bulk-posting'" in body
+
+    def test_posting_va_is_forbidden_from_owner_api(self, running_server):
+        host, _, _ = running_server
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/api/bot/status",
+            headers={
+                "Authorization": _authorization(
+                    TEST_VA_USER,
+                    TEST_VA_PASSWORD,
+                )
+            },
+        )
+
+        assert status == 403
+        assert body == {"error": "forbidden for this dashboard role"}
+
+    def test_posting_va_can_reach_only_bulk_posting_api(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+        authorization = _authorization(
+            TEST_VA_USER,
+            TEST_VA_PASSWORD,
+        )
+
+        status, _, _ = _request(
+            host,
+            "GET",
+            "/api/bulk-posting",
+            headers={"Authorization": authorization},
+        )
+        assert status == 503
+
+        status, body, _ = _request(
+            host,
+            "POST",
+            "/api/bulk-posting/schedule",
+            body="{}",
+            headers={
+                "Authorization": authorization,
+                "X-CSRF-Token": TEST_CSRF_TOKEN,
+                "Origin": f"http://{host}",
+                "Content-Type": "application/json",
+            },
+        )
+        assert status == 503
+        assert body == {"error": "Bulk Posting is not configured"}
+
+    def test_posting_va_cannot_toggle_bot_with_valid_csrf(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        bot.enabled = True
+
+        status, body, _ = _request(
+            host,
+            "POST",
+            "/api/bot/toggle",
+            body=json.dumps({"enabled": False}),
+            headers={
+                "Authorization": _authorization(
+                    TEST_VA_USER,
+                    TEST_VA_PASSWORD,
+                ),
+                "X-CSRF-Token": TEST_CSRF_TOKEN,
+                "Origin": f"http://{host}",
+                "Content-Type": "application/json",
+            },
+        )
+
+        assert status == 403
+        assert body == {"error": "forbidden for this dashboard role"}
+        assert bot.enabled is True
 
     def test_dashboard_sets_security_headers_and_embeds_nonce(self, running_server):
         host, _, _ = running_server

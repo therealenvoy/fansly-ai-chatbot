@@ -422,6 +422,21 @@ class ApifanslyClient(FanslyApiClient):
         return int(payload.get("statusCode", 0)) == 200
 
     def upload_media(self, file_path: str) -> str:
+        """Upload media and return its provider media ID.
+
+        APIFansly uploads are asynchronous. Keep this legacy method's return
+        contract for chat callers while exposing the account-media ID needed
+        by post attachments through ``upload_post_media``.
+        """
+        return self.upload_post_media(file_path)["media_id"]
+
+    def upload_post_media(
+        self,
+        file_path: str,
+        *,
+        wait_timeout: float = 180.0,
+        poll_interval: float = 1.0,
+    ) -> dict[str, str]:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Upload file not found: {file_path}")
         with open(file_path, "rb") as handle:
@@ -433,16 +448,138 @@ class ApifanslyClient(FanslyApiClient):
             )
         response.raise_for_status()
         payload = response.json()
-        media_id = (
-            ResponseParser.parse(payload, default={}).get("mediaId")
-            if isinstance(ResponseParser.parse(payload, default={}), dict)
-            else None
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        job_id = data.get("jobId") if isinstance(data, dict) else None
+        if not job_id:
+            raise ValueError("APIFansly upload response did not include jobId")
+
+        deadline = time.monotonic() + max(1.0, float(wait_timeout))
+        while time.monotonic() < deadline:
+            status_payload = self._request(
+                "GET",
+                f"/media/upload/{job_id}/status",
+            )
+            status_data = (
+                status_payload.get("data", {})
+                if isinstance(status_payload, dict)
+                else {}
+            )
+            status = str(
+                status_data.get("state")
+                or status_data.get("status")
+                or ""
+            ).strip().lower()
+            if status in {"failed", "error", "cancelled", "canceled"}:
+                raise ValueError("APIFansly media upload failed")
+            result = status_data.get("result")
+            if status in {"completed", "complete", "success", "succeeded"}:
+                if not isinstance(result, dict):
+                    raise ValueError(
+                        "APIFansly upload completed without a result"
+                    )
+                media_id = result.get("mediaId")
+                account_media = result.get("accountMedia", [])
+                account_media_id = None
+                if isinstance(account_media, list):
+                    account_media_id = next(
+                        (
+                            row.get("id")
+                            for row in account_media
+                            if isinstance(row, dict) and row.get("id")
+                        ),
+                        None,
+                    )
+                if not media_id or not account_media_id:
+                    raise ValueError(
+                        "APIFansly upload result is missing media identifiers"
+                    )
+                return {
+                    "job_id": str(job_id),
+                    "media_id": str(media_id),
+                    "account_media_id": str(account_media_id),
+                }
+            time.sleep(max(0.1, float(poll_interval)))
+        raise TimeoutError("APIFansly media upload did not finish in time")
+
+    def list_post_walls(self) -> list[dict[str, str]]:
+        payload = self._request(
+            "GET",
+            f"/{self.account_id}/posts/walls",
         )
-        if not media_id:
-            media_id = payload.get("data", {}).get("mediaId")
-        if not media_id:
-            raise ValueError("APIFansly upload response did not include mediaId")
-        return str(media_id)
+        outer = payload.get("data", {}) if isinstance(payload, dict) else {}
+        nested = outer.get("data", {}) if isinstance(outer, dict) else {}
+        response = ResponseParser.parse(payload, default=None)
+        if isinstance(response, dict):
+            rows = response.get("walls", response.get("data", []))
+        elif isinstance(response, list):
+            rows = response
+        elif isinstance(nested, dict):
+            rows = nested.get("walls", [])
+        else:
+            rows = []
+        if not isinstance(rows, list):
+            return []
+        walls: list[dict[str, str]] = []
+        for row in rows:
+            if not isinstance(row, dict) or row.get("id") in (None, ""):
+                continue
+            walls.append(
+                {
+                    "id": str(row["id"]),
+                    "name": str(
+                        row.get("name")
+                        or row.get("label")
+                        or row.get("title")
+                        or "Wall"
+                    ),
+                }
+            )
+        return walls
+
+    def create_post(
+        self,
+        *,
+        content: str,
+        wall_ids: list[str],
+        account_media_ids: list[str],
+        scheduled_for: int = 0,
+        expires_at: int = 0,
+    ) -> dict[str, Any]:
+        if not str(content).strip() and not account_media_ids:
+            raise ValueError("A post requires content or media")
+        clean_walls = [str(value).strip() for value in wall_ids if str(value).strip()]
+        if not clean_walls:
+            raise ValueError("At least one Fansly wall is required")
+        body: dict[str, Any] = {
+            "content": str(content).strip(),
+            "wallIds": clean_walls,
+            "attachments": [
+                {
+                    "contentType": 1,
+                    "contentId": str(media_id),
+                    "pos": position,
+                }
+                for position, media_id in enumerate(account_media_ids)
+                if str(media_id).strip()
+            ],
+            "scheduledFor": max(0, int(scheduled_for)),
+            "expiresAt": max(0, int(expires_at)),
+        }
+        payload = self._request(
+            "POST",
+            f"/{self.account_id}/posts",
+            json=body,
+        )
+        response = ResponseParser.parse(payload, default={})
+        if not isinstance(response, dict):
+            response = {}
+        post_id = response.get("id") or response.get("postId")
+        if not post_id:
+            data = payload.get("data", {}) if isinstance(payload, dict) else {}
+            post_id = data.get("id") or data.get("postId")
+        if not post_id:
+            raise ValueError("APIFansly create-post response did not include an ID")
+        return {"id": str(post_id), "scheduled_for": int(scheduled_for)}
 
     def list_albums(self) -> list[dict]:
         payload = self._request(
