@@ -28,6 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from ..auto_messages.control import AutoMessagesControlError
 from ..auto_messages.metrics import AutoMessagesMetrics
 from ..bulk_posting import BulkPostingError
+from ..fyp_analytics import FypAnalyticsError
 from ..engagement.control_plane import NativePlanRepository
 from ..persistence.dashboard import DashboardReadRepository
 from ..persistence.crm import CrmSyncRepository
@@ -843,6 +844,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def bulk_posting(self):
         return getattr(self.server, "bulk_posting", None)
 
+    @property
+    def fyp_analytics(self):
+        return getattr(self.server, "fyp_analytics", None)
+
     def _security_headers(self):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Pragma", "no-cache")
@@ -984,10 +989,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "/",
                 "/dashboard",
                 "/api/bulk-posting",
+                "/api/fyp-analytics",
             },
             "POST": {
                 "/api/bulk-posting/media",
                 "/api/bulk-posting/schedule",
+                "/api/fyp-analytics/refresh",
             },
         }
         return path in allowed.get(self.command, set())
@@ -1088,6 +1095,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/human-delivery/review": return self._human_delivery_review()
         if p=="/api/auto-messages": return self._auto_messages_status()
         if p=="/api/bulk-posting": return self._bulk_posting_status()
+        if p=="/api/fyp-analytics": return self._fyp_analytics_status(q)
         self.j({"error":"not found"},404)
 
     def do_POST(self):
@@ -1142,6 +1150,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/auto-messages/campaigns": return self._auto_messages_campaign_save(b)
         if p=="/api/bulk-posting/schedule":
             return self._bulk_posting_schedule(b)
+        if p=="/api/fyp-analytics/refresh":
+            return self._fyp_analytics_refresh(b)
         self.j({"error":"not found"},404)
 
     def _bulk_posting_status(self):
@@ -1273,6 +1283,72 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 type(error).__name__,
             )
             return self.j({"error": "Could not schedule the post"}, 502)
+
+    def _fyp_analytics_status(self, query):
+        service = self.fyp_analytics
+        if service is None:
+            return self.j(
+                {
+                    "available": False,
+                    "reason": "FYP Analytics is unavailable",
+                },
+                503,
+            )
+        try:
+            range_key = str(
+                (query.get("range") or ["24h"])[0]
+            ).strip()
+            after = (query.get("after") or [None])[0]
+            before = (query.get("before") or [None])[0]
+            return self.j(
+                service.snapshot(
+                    range_key,
+                    after=after,
+                    before=before,
+                )
+            )
+        except FypAnalyticsError as error:
+            return self.j({"error": str(error)}, 400)
+        except Exception as error:
+            logger.warning(
+                "FYP Analytics status failed: %s",
+                type(error).__name__,
+            )
+            return self.j(
+                {"error": "Could not load FYP Analytics"},
+                502,
+            )
+
+    def _fyp_analytics_refresh(self, body):
+        service = self.fyp_analytics
+        if service is None:
+            return self.j(
+                {"error": "FYP Analytics is unavailable"},
+                503,
+            )
+        try:
+            payload = json.loads(body or "{}")
+            if not isinstance(payload, dict):
+                raise FypAnalyticsError("Invalid analytics refresh payload")
+            return self.j(
+                service.snapshot(
+                    str(payload.get("range", "24h")),
+                    after=payload.get("after"),
+                    before=payload.get("before"),
+                    force_refresh=True,
+                )
+            )
+        except (FypAnalyticsError, json.JSONDecodeError) as error:
+            return self.j({"error": str(error)}, 400)
+        except Exception as error:
+            logger.warning(
+                "FYP Analytics refresh failed: %s",
+                type(error).__name__,
+            )
+            return self.j(
+                {"error": "Could not refresh FYP Analytics"},
+                502,
+            )
 
     def _auto_messages_status(self):
         control = self.auto_messages_control
@@ -4463,6 +4539,7 @@ class DashboardServer:
         human_delivery_control=None,
         auto_messages_control=None,
         bulk_posting=None,
+        fyp_analytics=None,
         credit_governor=None,
         webhook_control=None,
         webhook_endpoint_url: str = "",
@@ -4539,6 +4616,7 @@ class DashboardServer:
         self.server.human_delivery_control = human_delivery_control
         self.server.auto_messages_control = auto_messages_control
         self.server.bulk_posting = bulk_posting
+        self.server.fyp_analytics = fyp_analytics
         self.server.credit_governor = credit_governor
         self.server.persona_dir = persona_dir or (
             bot.persona_loader.config_dir

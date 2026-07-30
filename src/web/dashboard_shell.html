@@ -41,7 +41,7 @@ body{
   color:var(--text);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   -webkit-font-smoothing:antialiased;
 }
-.role-posting_va .nav-item:not([data-tab="bulk-posting"]),
+.role-posting_va .nav-item:not([data-tab="bulk-posting"]):not([data-tab="fyp-analytics"]),
 .role-posting_va .nav-label,
 .role-posting_va .launch-note,
 .role-posting_va .top-actions .icon-button,
@@ -296,6 +296,16 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 .bulk-media-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}.bulk-media-chip{display:flex;align-items:center;gap:6px;max-width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--input);font-size:8px;color:var(--muted)}.bulk-media-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bulk-media-chip button{border:0;background:none;color:var(--red);cursor:pointer}
 .bulk-status{min-height:15px;margin-top:8px;color:var(--muted);font-size:8px}.bulk-status.error{color:var(--red)}.bulk-status.ok{color:var(--green)}
 .bulk-table{width:100%;border-collapse:collapse}.bulk-table th,.bulk-table td{padding:11px 10px;border-bottom:1px solid var(--line);font-size:9px;text-align:left}.bulk-table th{color:var(--faint);text-transform:uppercase;letter-spacing:.07em}.bulk-table td{color:var(--muted)}
+.fyp-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.fyp-ranges,.fyp-tabs{display:flex;align-items:center;gap:4px;padding:4px;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.fyp-range,.fyp-tab{border:0;border-radius:8px;background:transparent;color:var(--muted);padding:8px 13px;font-size:9px;font-weight:700;cursor:pointer}.fyp-range.active,.fyp-tab.active{background:rgba(161,124,255,.14);color:#d9cbff}
+.fyp-tabs{width:100%;overflow-x:auto;justify-content:flex-start;margin-bottom:15px;background:transparent;border-width:0 0 1px;border-radius:0;padding:0;gap:8px}.fyp-tab{border-radius:0;border-bottom:2px solid transparent;padding:11px 12px}.fyp-tab.active{background:transparent;border-bottom-color:var(--violet);color:var(--text)}
+.fyp-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:11px;margin-bottom:16px}.fyp-kpi{min-height:112px;padding:16px;border:1px solid var(--line);border-radius:15px;background:var(--surface)}.fyp-kpi span{display:block;color:var(--muted);font-size:9px}.fyp-kpi strong{display:block;margin-top:12px;font-size:26px;letter-spacing:-.6px}.fyp-kpi small{display:block;margin-top:6px;color:var(--faint);font-size:8px;line-height:1.4}
+.fyp-source{display:flex;align-items:center;gap:8px;color:var(--faint);font-size:8px}.fyp-source b{color:var(--green);font-weight:700}.fyp-tags{display:flex;flex-wrap:wrap;gap:8px}.fyp-tag{display:inline-flex;align-items:center;gap:8px;padding:8px 11px;border:1px solid rgba(161,124,255,.28);border-radius:999px;background:rgba(161,124,255,.06);color:var(--text);font-size:9px;font-weight:680}.fyp-tag small{padding:2px 5px;border-radius:999px;background:rgba(255,255,255,.07);color:var(--muted);font-size:7px}
+.fyp-trend{display:flex;align-items:flex-end;gap:4px;height:210px;padding:20px 14px 12px;border:1px solid var(--line);border-radius:15px;background:var(--surface);overflow:hidden}.fyp-bar{flex:1;min-width:3px;border-radius:4px 4px 1px 1px;background:linear-gradient(180deg,#b794ff,#6d4dc1);opacity:.82}.fyp-bar:hover{opacity:1}
+.fyp-media-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:11px}.fyp-media-card{padding:10px;border:1px solid var(--line);border-radius:14px;background:var(--surface)}.fyp-media-thumb{height:120px;border-radius:10px;background:linear-gradient(145deg,#242432,#171721);overflow:hidden;display:grid;place-items:center;color:var(--faint);font-size:20px}.fyp-media-thumb img{width:100%;height:100%;object-fit:cover}.fyp-media-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:9px;font-size:8px;color:var(--muted)}.fyp-media-meta strong{color:var(--text);font-size:10px}
+.fyp-custom{display:none;grid-template-columns:1fr 1fr auto;gap:8px;width:min(620px,100%);margin-bottom:16px}.fyp-custom.show{display:grid}.fyp-recommendations{display:grid;gap:9px}.fyp-recommendation{padding:15px 17px;border:1px solid var(--line);border-radius:13px;background:var(--surface);font-size:10px;line-height:1.55;color:var(--muted)}.fyp-recommendation b{color:var(--violet);margin-right:8px}
+.fyp-best{display:grid;grid-template-columns:1fr 1fr;gap:13px}.fyp-best-list{padding:17px;border:1px solid var(--line);border-radius:15px;background:var(--surface)}.fyp-best-list h3{font-size:12px;margin-bottom:11px}.fyp-best-row{display:flex;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line);font-size:9px;color:var(--muted)}.fyp-best-row:last-child{border-bottom:0}.fyp-best-row strong{color:var(--text)}
 .drawer{position:fixed;inset:14px 14px 14px auto;width:500px;max-width:calc(100vw - 28px);z-index:60;display:flex;flex-direction:column;border:1px solid var(--line-strong);border-radius:20px;background:rgba(18,18,27,.98);box-shadow:-30px 0 80px rgba(0,0,0,.45);transform:translateX(calc(100% + 28px));transition:transform .22s ease;backdrop-filter:blur(20px)}
 .drawer.open{transform:translateX(0)}.drawer-head{height:62px;padding:0 17px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line)}
 .drawer-head h3{font-size:14px}.drawer-close{width:32px;height:32px;border-radius:50%;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer}
@@ -308,6 +318,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
   .metric-card{grid-column:span 6}.activity-card,.next-card{grid-column:span 12}
   .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
   .bulk-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .fyp-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media(max-width:720px){
   body{padding:0}.app-shell{height:100vh;height:100dvh;border:0;border-radius:0;box-shadow:none;display:block}
@@ -322,7 +333,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
   .icon-button{display:none}.operator-avatar{width:34px;height:34px}.toggle-pill{min-height:34px;padding:0 10px}
   .content{padding:17px 13px 30px}.page-head{align-items:flex-start;flex-direction:column}.page-head h1{font-size:23px}.page-actions{justify-content:flex-start}
   .dashboard-grid{gap:9px}.status-card,.ops-card,.hero-card,.metric-card,.activity-card,.next-card{grid-column:span 12}.hero-card{min-height:218px}
-  .cards,.g2,.g3,.auto-trigger,.bulk-grid,.bulk-fields{grid-template-columns:1fr}.bulk-kpis{grid-template-columns:1fr 1fr}.messages-layout{height:calc(100dvh - 168px);grid-template-columns:1fr}.conversation-pane{display:none}.conversation-rail{border-right:0}
+  .cards,.g2,.g3,.auto-trigger,.bulk-grid,.bulk-fields,.fyp-best{grid-template-columns:1fr}.bulk-kpis,.fyp-kpis{grid-template-columns:1fr 1fr}.fyp-custom{grid-template-columns:1fr}.messages-layout{height:calc(100dvh - 168px);grid-template-columns:1fr}.conversation-pane{display:none}.conversation-rail{border-right:0}
   .messages-layout.chat-open .conversation-rail{display:none}.messages-layout.chat-open .conversation-pane{display:flex}
   .panel{border-radius:14px}.drawer{inset:0;width:100%;max-width:none;border-radius:0}.media-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
@@ -341,6 +352,9 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
       <span class="nav-label">Overview</span>
       <button type="button" class="nav-item active" data-tab="dashboard" aria-current="page">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v10h-6zM4 14h6v6H4zM14 18h6v2h-6z"/></svg><span>Dashboard</span>
+      </button>
+      <button type="button" class="nav-item" data-tab="fyp-analytics">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18V9M10 18V5M16 18v-7M22 18H2"/><path d="m4 7 5-3 5 3 6-4"/></svg><span>FYP Analytics</span>
       </button>
       <button type="button" class="nav-item" data-tab="funnel">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.5 9.6 9.6 0 0 1-4-.9L3 21l1.7-4.6A8.5 8.5 0 1 1 21 11.5z"/></svg><span>Messages</span>
@@ -445,6 +459,9 @@ var bulkPostingView='schedule';
 var bulkPostingData=null;
 var bulkPostingCards=[];
 var bulkPostingNextCardId=1;
+var fypAnalyticsRange='24h';
+var fypAnalyticsView='overview';
+var fypAnalyticsData=null;
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function attr(s){return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
@@ -459,9 +476,9 @@ function botControlMarkup(){return'<div class="bot-control-group"><button type="
 async function F(u){try{var r=await fetch(u,{credentials:'same-origin',cache:'no-store'});if(!r.ok)return null;return await r.json()}catch(e){return null}}
 async function M(u,options){options=options||{};options.credentials='same-origin';options.cache='no-store';options.headers=Object.assign({},options.headers||{}, {'X-CSRF-Token':CSRF_TOKEN});return fetch(u,options)}
 
-var loaders={dashboard:loadDashboard,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,'auto-messages':loadAutoMessages,scripts:loadScripts,sequences:loadSequences,vault:loadVault,'bulk-posting':loadBulkPosting,brain:loadBrain,voice:loadVoiceLab,settings:loadSettings};
+var loaders={dashboard:loadDashboard,'fyp-analytics':loadFypAnalytics,funnel:loadFunnel,fans:loadFans,kpis:loadKPIs,'auto-messages':loadAutoMessages,scripts:loadScripts,sequences:loadSequences,vault:loadVault,'bulk-posting':loadBulkPosting,brain:loadBrain,voice:loadVoiceLab,settings:loadSettings};
 function navTo(tab,skipHash){
-  if(IS_POSTING_VA)tab='bulk-posting';
+  if(IS_POSTING_VA&&['bulk-posting','fyp-analytics'].indexOf(tab)<0)tab='bulk-posting';
   if(!loaders[tab])tab='dashboard';
   currentTab=tab;
   document.querySelectorAll('.nav-item').forEach(function(item){item.classList.toggle('active',item.dataset.tab===tab);if(item.dataset.tab===tab)item.setAttribute('aria-current','page');else item.removeAttribute('aria-current')});
@@ -1037,6 +1054,73 @@ async function scheduleBulkPost(cardId){
 }
 function suggestBulkTags(cardId){var el=bulkCardElement(cardId);if(!el)return;var caption=el.querySelector('[data-bulk-field="caption"]').value.toLowerCase(),stop={this:1,that:1,with:1,from:1,your:1,have:1,what:1,when:1,where:1,will:1,just:1,about:1};var tags=(caption.match(/[a-z0-9_]{4,}/g)||[]).filter(function(word,index,all){return!stop[word]&&all.indexOf(word)===index}).slice(0,6);el.querySelector('[data-bulk-field="tags"]').value=tags.join(', ')}
 
+function fypCompact(value){var n=Number(value||0);if(Math.abs(n)>=1000000)return(n/1000000).toFixed(n>=10000000?0:1)+'M';if(Math.abs(n)>=1000)return(n/1000).toFixed(n>=10000?0:1)+'K';return n.toLocaleString()}
+function fypMetric(label,value,foot){return'<article class="fyp-kpi"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(foot||'')+'</small></article>'}
+function fypRangeMarkup(){return'<div class="fyp-ranges">'+['24h','7d','30d','custom'].map(function(key){return'<button class="fyp-range'+(fypAnalyticsRange===key?' active':'')+'" data-action="fyp-range" data-range="'+key+'">'+(key==='custom'?'Custom':key)+'</button>'}).join('')+'</div>'}
+function fypCustomMarkup(){var now=new Date(),before=now.toISOString().slice(0,16),after=new Date(now.getTime()-7*86400000).toISOString().slice(0,16);return'<div class="fyp-custom'+(fypAnalyticsRange==='custom'?' show':'')+'"><input id="fyp-after" type="datetime-local" value="'+attr((fypAnalyticsData&&fypAnalyticsData.range==='custom'&&fypAnalyticsData.after?new Date(fypAnalyticsData.after).toISOString().slice(0,16):after))+'"><input id="fyp-before" type="datetime-local" value="'+attr((fypAnalyticsData&&fypAnalyticsData.range==='custom'&&fypAnalyticsData.before?new Date(fypAnalyticsData.before).toISOString().slice(0,16):before))+'"><button class="btn" data-action="fyp-custom-apply">Apply</button></div>'}
+function fypTabMarkup(){var tabs=[['overview','Overview'],['recommendations','Recommendations'],['content','Content'],['media','Media'],['tags','Tags'],['trends','Trends'],['best-times','Best Times']];return'<div class="fyp-tabs">'+tabs.map(function(tab){return'<button class="fyp-tab'+(fypAnalyticsView===tab[0]?' active':'')+'" data-action="fyp-tab" data-view="'+tab[0]+'">'+tab[1]+'</button>'}).join('')+'</div>'}
+function loadFypAnalytics(force){
+  var c=document.getElementById('content'),after='',before='';
+  if(fypAnalyticsRange==='custom'){
+    var afterInput=document.getElementById('fyp-after'),beforeInput=document.getElementById('fyp-before');
+    if(!afterInput||!beforeInput){c.innerHTML=pageHead('FYP Analytics','FYP Performance','Real post and media analytics from APIFansly.','')+fypRangeMarkup()+fypCustomMarkup();return}
+    after=afterInput.value?new Date(afterInput.value).toISOString():'';
+    before=beforeInput.value?new Date(beforeInput.value).toISOString():'';
+    if(!after||!before){return}
+  }
+  c.innerHTML=pageHead('FYP Analytics','FYP Performance','Loading live APIFansly profile statistics…','')+fypRangeMarkup()+fypCustomMarkup();
+  var request;
+  if(force){
+    request=M('/api/fyp-analytics/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({range:fypAnalyticsRange,after:after||null,before:before||null})});
+  }else{
+    var query='?range='+encodeURIComponent(fypAnalyticsRange)+(after?'&after='+encodeURIComponent(after):'')+(before?'&before='+encodeURIComponent(before):'');
+    request=fetch('/api/fyp-analytics'+query,{credentials:'same-origin',cache:'no-store'});
+  }
+  request.then(function(response){return response.json().then(function(data){return{ok:response.ok,data:data}})}).then(function(result){
+    if(!result.ok)throw new Error(result.data.error||result.data.reason||'Analytics request failed');
+    fypAnalyticsData=result.data;renderFypAnalytics();
+  }).catch(function(error){
+    c.innerHTML=pageHead('FYP Analytics','FYP Performance','Real post and media analytics from APIFansly.','')+fypRangeMarkup()+fypCustomMarkup()+'<section class="block"><p class="block-copy" style="color:var(--red)">'+esc(error.message||'Analytics request failed')+'</p></section>';
+  });
+}
+function renderFypAnalytics(){
+  var d=fypAnalyticsData||{},m=d.metrics||{},c=document.getElementById('content');
+  var refresh='<button class="btn-ghost" data-action="fyp-refresh">↻ Refresh from APIFansly</button>';
+  var h=pageHead('FYP Analytics','FYP Performance','Real FYP, tag, media, and engagement analytics from APIFansly.',refresh);
+  h+='<div class="fyp-toolbar">'+fypRangeMarkup()+'<div class="fyp-source"><b>● '+esc(d.provider||'APIFansly')+'</b><span>'+(d.fetched_at?'Updated '+esc(new Date(d.fetched_at).toLocaleString()):'Not loaded')+(d.cached?' · cached':' · live refresh')+'</span></div></div>'+fypCustomMarkup();
+  if(!d.available){h+='<section class="block"><p class="block-copy" style="color:var(--amber)">'+esc(d.reason||'FYP Analytics is not configured')+'</p></section>';c.innerHTML=h;return}
+  h+=fypTabMarkup();
+  if(fypAnalyticsView==='overview'){
+    h+='<div class="fyp-kpis">'+
+      fypMetric('FYP Views',fypCompact(m.fyp_views),'APIFansly FYP traffic source')+
+      fypMetric('Unique FYP Viewers',fypCompact(m.unique_fyp_viewers),'Bucketed unique viewers')+
+      fypMetric('Avg. FYP Engagement',Number(m.avg_fyp_engagement_seconds||0).toFixed(1)+'s','Interaction time ÷ unique viewers')+
+      fypMetric('FYP Reach Rate',Number(m.fyp_reach_rate||0).toFixed(1)+'%','FYP unique ÷ all media unique')+
+      fypMetric('Tags FYP Views',fypCompact(m.tag_fyp_views),'APIFansly top-tag attribution')+
+      fypMetric('Tags FYP Ratio',Number(m.tag_fyp_ratio||0).toFixed(1)+'%','Tag views may overlap')+
+    '</div>';
+    h+='<section class="block">'+sectionIntro('Top Performing Tags','The actual APIFansly topFypTags result for this range.','')+((d.tags||[]).length?'<div class="fyp-tags">'+d.tags.slice(0,12).map(function(tag){return'<span class="fyp-tag">#'+esc(tag.name)+' <small>'+fypCompact(tag.views)+'</small></span>'}).join('')+'</div>':emptyState('#','No FYP tags yet','APIFansly did not return tag attribution for this range.'))+'</section>';
+  }else if(fypAnalyticsView==='recommendations'){
+    h+='<div class="fyp-recommendations">'+(d.recommendations||[]).map(function(item,index){return'<div class="fyp-recommendation"><b>0'+(index+1)+'</b>'+esc(item)+'</div>'}).join('')+'</div>';
+  }else if(fypAnalyticsView==='content'){
+    var content=d.media||[];
+    h+=content.length?'<div class="panel"><table><thead><tr><th>Rank</th><th>FYP views</th><th>Unique viewers</th><th>Avg. engagement</th><th>Type</th></tr></thead><tbody>'+content.map(function(row){return'<tr><td>#'+Number(row.rank||0)+'</td><td>'+fypCompact(row.views)+'</td><td>'+fypCompact(row.unique_viewers)+'</td><td>'+Number(row.avg_engagement_seconds||0).toFixed(1)+'s</td><td>'+esc(row.media_type||'media')+'</td></tr>'}).join('')+'</tbody></table></div>':emptyState('▣','No top FYP content','APIFansly did not return topFypMediaOffers for this range.');
+  }else if(fypAnalyticsView==='media'){
+    var media=d.media||[];
+    h+=media.length?'<div class="fyp-media-grid">'+media.map(function(row){var preview=row.thumbnail_url?'<img src="'+attr(row.thumbnail_url)+'" alt="FYP media rank '+Number(row.rank||0)+'" loading="lazy">':'▣';return'<article class="fyp-media-card"><div class="fyp-media-thumb">'+preview+'</div><div class="fyp-media-meta"><strong>#'+Number(row.rank||0)+' · '+fypCompact(row.views)+' views</strong><span>'+esc(row.media_type||'media')+'</span></div></article>'}).join('')+'</div>':emptyState('▣','No FYP media yet','Top FYP media will appear when APIFansly returns media attribution.');
+  }else if(fypAnalyticsView==='tags'){
+    var tags=d.tags||[];
+    h+=tags.length?'<div class="panel"><table><thead><tr><th>Rank</th><th>Tag</th><th>FYP views</th><th>Share of FYP views</th></tr></thead><tbody>'+tags.map(function(tag,index){return'<tr><td>#'+(index+1)+'</td><td>#'+esc(tag.name)+'</td><td>'+fypCompact(tag.views)+'</td><td>'+Number(Number(tag.views||0)*100/Math.max(1,Number(m.fyp_views||0))).toFixed(1)+'%</td></tr>'}).join('')+'</tbody></table></div>':emptyState('#','No tag analytics','APIFansly did not return topFypTags for this range.');
+  }else if(fypAnalyticsView==='trends'){
+    var timeline=d.timeline||[],maxViews=Math.max.apply(null,[1].concat(timeline.map(function(point){return Number(point.views||0)})));
+    h+=timeline.length?'<div class="fyp-trend" aria-label="FYP views over time">'+timeline.map(function(point){var height=Math.max(2,Math.round(Number(point.views||0)*100/maxViews));return'<span class="fyp-bar" style="height:'+height+'%" title="'+attr(new Date(point.timestamp).toLocaleString()+': '+fypCompact(point.views)+' views')+'"></span>'}).join('')+'</div>':emptyState('↗','No trend data','APIFansly returned no FYP datapoints for this range.');
+  }else if(fypAnalyticsView==='best-times'){
+    var best=d.best_times||{},hours=best.hours||[],days=best.days||[];
+    h+='<div class="fyp-best"><section class="fyp-best-list"><h3>Best hours · UTC</h3>'+(hours.length?hours.map(function(row){return'<div class="fyp-best-row"><span>'+String(row.hour_utc).padStart(2,'0')+':00 UTC</span><strong>'+fypCompact(row.avg_views)+' avg views</strong></div>'}).join(''):'<p class="block-copy">No hourly buckets returned.</p>')+'</section><section class="fyp-best-list"><h3>Best days · UTC</h3>'+(days.length?days.map(function(row){return'<div class="fyp-best-row"><span>'+esc(row.day)+'</span><strong>'+fypCompact(row.avg_views)+' avg views</strong></div>'}).join(''):'<p class="block-copy">No daily buckets returned.</p>')+'</section></div>';
+  }
+  c.innerHTML=h;
+}
+
 async function loadBotStatus(){
   try{
     var r=await fetch('/api/bot/status',{credentials:'same-origin',cache:'no-store'});
@@ -1088,6 +1172,10 @@ document.addEventListener('click',function(event){
   else if(action==='remove-bulk-media'){var bulkCard=bulkCardById(control.dataset.cardId);if(bulkCard){bulkCard.media.splice(Number(control.dataset.mediaIndex),1);var bulkList=document.querySelector('[data-bulk-media-list="'+bulkCard.id+'"]');if(bulkList)bulkList.innerHTML=bulkMediaMarkup(bulkCard)}}
   else if(action==='schedule-bulk-post')scheduleBulkPost(control.dataset.cardId);
   else if(action==='bulk-suggest-tags')suggestBulkTags(control.dataset.cardId);
+  else if(action==='fyp-range'){fypAnalyticsRange=control.dataset.range||'24h';if(fypAnalyticsRange==='custom')renderFypAnalytics();else loadFypAnalytics(false)}
+  else if(action==='fyp-custom-apply')loadFypAnalytics(false);
+  else if(action==='fyp-refresh')loadFypAnalytics(true);
+  else if(action==='fyp-tab'){fypAnalyticsView=control.dataset.view||'overview';renderFypAnalytics()}
   else if(action==='close-drawer')closeDrawer();
   else if(action==='fan-detail')fanDetail(control.dataset.fanId||'');
   else if(action==='select-conversation')selectConversation(control.dataset.fanId||'');
@@ -1145,11 +1233,12 @@ document.addEventListener('keydown',function(event){if(event.key==='Escape')clos
 window.addEventListener('hashchange',function(){navTo(location.hash.slice(1)||'dashboard',true)});
 
 if(IS_POSTING_VA){
-  document.querySelectorAll('.nav-item:not([data-tab="bulk-posting"]),.nav-label,.launch-note').forEach(function(node){node.remove()});
+  document.querySelectorAll('.nav-item:not([data-tab="bulk-posting"]):not([data-tab="fyp-analytics"]),.nav-label,.launch-note').forEach(function(node){node.remove()});
   var workspaceTitle=document.getElementById('workspace-title'),workspaceSubtitle=document.getElementById('workspace-subtitle');
   if(workspaceTitle)workspaceTitle.textContent='Sunny Charm / Posting';
-  if(workspaceSubtitle)workspaceSubtitle.textContent='Bulk Posting access';
-  navTo('bulk-posting',true);
+  if(workspaceSubtitle)workspaceSubtitle.textContent='Posting + FYP Analytics';
+  var vaStart=location.hash.slice(1);
+  navTo(vaStart==='fyp-analytics'?'fyp-analytics':'bulk-posting',true);
 }else{
   loadBotStatus();
   setInterval(loadBotStatus,15000);

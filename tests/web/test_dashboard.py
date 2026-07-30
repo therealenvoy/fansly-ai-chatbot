@@ -1233,7 +1233,7 @@ class TestDashboardSecurity:
         assert status == 401
         assert body == {"error": "authentication required"}
 
-    def test_posting_va_sees_only_bulk_posting_shell(self, running_server):
+    def test_posting_va_sees_only_posting_and_fyp_shell(self, running_server):
         host, _, _ = running_server
         status, body, _ = _request(
             host,
@@ -1250,7 +1250,9 @@ class TestDashboardSecurity:
         assert status == 200
         assert 'class="role-posting_va"' in body
         assert "const DASHBOARD_ROLE=\"posting_va\";" in body
-        assert "if(IS_POSTING_VA)tab='bulk-posting'" in body
+        assert "Posting + FYP Analytics" in body
+        assert "data-tab=\"bulk-posting\"" in body
+        assert "data-tab=\"fyp-analytics\"" in body
 
     def test_posting_va_is_forbidden_from_owner_api(self, running_server):
         host, _, _ = running_server
@@ -1269,7 +1271,7 @@ class TestDashboardSecurity:
         assert status == 403
         assert body == {"error": "forbidden for this dashboard role"}
 
-    def test_posting_va_can_reach_only_bulk_posting_api(
+    def test_posting_va_can_reach_posting_and_fyp_apis(
         self,
         running_server,
     ):
@@ -1301,6 +1303,30 @@ class TestDashboardSecurity:
         )
         assert status == 503
         assert body == {"error": "Bulk Posting is not configured"}
+
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/api/fyp-analytics?range=24h",
+            headers={"Authorization": authorization},
+        )
+        assert status == 503
+        assert body["available"] is False
+
+        status, body, _ = _request(
+            host,
+            "POST",
+            "/api/fyp-analytics/refresh",
+            body=json.dumps({"range": "24h"}),
+            headers={
+                "Authorization": authorization,
+                "X-CSRF-Token": TEST_CSRF_TOKEN,
+                "Origin": f"http://{host}",
+                "Content-Type": "application/json",
+            },
+        )
+        assert status == 503
+        assert body == {"error": "FYP Analytics is unavailable"}
 
     def test_posting_va_cannot_toggle_bot_with_valid_csrf(
         self,

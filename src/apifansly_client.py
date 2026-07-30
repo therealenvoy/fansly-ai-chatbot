@@ -581,6 +581,34 @@ class ApifanslyClient(FanslyApiClient):
             raise ValueError("APIFansly create-post response did not include an ID")
         return {"id": str(post_id), "scheduled_for": int(scheduled_for)}
 
+    def get_profile_statistics(
+        self,
+        *,
+        after_date: int,
+        before_date: int,
+        period: int,
+    ) -> dict[str, Any]:
+        """Return the documented APIFansly profile-analytics response."""
+        if after_date <= 0 or before_date <= after_date:
+            raise ValueError("Invalid analytics date range")
+        if period <= 0:
+            raise ValueError("Analytics period must be positive")
+        payload = self._request(
+            "GET",
+            f"/{self.account_id}/analytics/profilestats",
+            params={
+                "afterDate": int(after_date),
+                "beforeDate": int(before_date),
+                "period": int(period),
+            },
+        )
+        response = ResponseParser.parse(payload, default={})
+        if not isinstance(response, dict):
+            raise ValueError(
+                "APIFansly profile-statistics response was not an object"
+            )
+        return response
+
     def list_albums(self) -> list[dict]:
         payload = self._request(
             "GET",

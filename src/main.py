@@ -29,6 +29,7 @@ from .fansly_client import AuthError, PaymentRequiredError
 from .client_factory import get_fansly_client
 from .apifansly_client import ApifanslyClient, ApifanslyConfig
 from .bulk_posting import BulkPostingService
+from .fyp_analytics import FypAnalyticsService
 from .persona.loader import PersonaLoader
 from .notes.repository import FanNoteRepository
 from .memory.store import MessageStore
@@ -320,6 +321,7 @@ bulk_posting = BulkPostingService(
     creator_id=CREATOR_ID,
     client=bulk_posting_client,
 )
+fyp_analytics = FypAnalyticsService(client=bulk_posting_client)
 persona_target = Path(PERSONA_CONFIG_DIR) / f"{CREATOR_ID}.yaml"
 persona_default = Path("config/creators") / f"{CREATOR_ID}.yaml"
 if not persona_target.exists() and persona_default.exists():
@@ -687,6 +689,7 @@ dashboard = DashboardServer(
     human_delivery_control=human_delivery_control,
     auto_messages_control=auto_messages_control,
     bulk_posting=bulk_posting,
+    fyp_analytics=fyp_analytics,
     credit_governor=provider_credit_governor,
     onlyfansapi_webhook_secret=ONLYFANSAPI_WEBHOOK_SECRET,
     webhook_endpoint_url=ONLYFANSAPI_WEBHOOK_URL,

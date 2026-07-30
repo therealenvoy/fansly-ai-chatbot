@@ -1,0 +1,177 @@
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
+
+import pytest
+
+from src.fyp_analytics import FypAnalyticsError, FypAnalyticsService
+
+
+def _provider_response():
+    timestamp = int(
+        datetime(2026, 7, 30, 8, tzinfo=timezone.utc).timestamp() * 1000
+    )
+    return {
+        "dataset": {
+            "datapoints": [
+                {
+                    "timestamp": timestamp,
+                    "stats": [
+                        {
+                            "type": 0,
+                            "views": 100,
+                            "interactionTime": 250000,
+                            "uniqueViewers": 50,
+                            "videoViews": 100,
+                            "totalVideoPercentWatched": 7500,
+                        },
+                        {
+                            "type": 1,
+                            "views": 80,
+                            "interactionTime": 60000,
+                            "uniqueViewers": 50,
+                            "videoViews": 20,
+                            "totalVideoPercentWatched": 1000,
+                        },
+                    ],
+                }
+            ],
+            "topFypTags": [
+                {"tagId": "tag-1", "views": 80},
+                {"tagId": "tag-2", "views": 20},
+            ],
+            "topFypMediaOffers": [
+                {
+                    "mediaOfferId": "offer-1",
+                    "views": 90,
+                    "uniqueViewers": 45,
+                    "interactionTime": 180000,
+                }
+            ],
+        },
+        "aggregationData": {
+            "tags": [
+                {"id": "tag-1", "name": "cosplay"},
+                {"id": "tag-2", "name": "fyp"},
+            ],
+            "creatorMediaOfferLocations": [
+                {
+                    "mediaOfferId": "offer-1",
+                    "accountMediaId": "media-1",
+                }
+            ],
+            "accountMedia": [
+                {
+                    "id": "media-1",
+                    "media": {
+                        "mimetype": "video/mp4",
+                        "locations": [
+                            {"location": "https://cdn.example/fyp.mp4"}
+                        ],
+                        "variants": [
+                            {
+                                "mimetype": "image/jpeg",
+                                "locations": [
+                                    {
+                                        "location": (
+                                            "https://cdn.example/fyp.jpg"
+                                        )
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    }
+
+
+def test_normalizes_real_fyp_tag_media_and_time_metrics():
+    client = MagicMock()
+    client.get_profile_statistics.return_value = _provider_response()
+    service = FypAnalyticsService(client=client)
+    now = datetime(2026, 7, 30, 10, tzinfo=timezone.utc)
+
+    result = service.snapshot("24h", now=now)
+
+    assert result["provider"] == "APIFansly"
+    assert result["metrics"] == {
+        "fyp_views": 100,
+        "unique_fyp_viewers": 50,
+        "avg_fyp_engagement_seconds": 5.0,
+        "fyp_reach_rate": 50.0,
+        "tag_fyp_views": 100,
+        "tag_fyp_ratio": 100.0,
+        "avg_video_watched_percent": 75.0,
+    }
+    assert result["tags"] == [
+        {"name": "cosplay", "views": 80},
+        {"name": "fyp", "views": 20},
+    ]
+    assert result["media"][0] == {
+        "rank": 1,
+        "views": 90,
+        "unique_viewers": 45,
+        "avg_engagement_seconds": 4.0,
+        "thumbnail_url": "https://cdn.example/fyp.jpg",
+        "media_type": "video",
+    }
+    assert result["best_times"]["hours"][0] == {
+        "hour_utc": 8,
+        "avg_views": 100.0,
+    }
+    assert "offer-1" not in str(result)
+    assert "media-1" not in str(result)
+
+
+def test_caches_each_range_for_ten_minutes_and_force_refreshes():
+    client = MagicMock()
+    client.get_profile_statistics.return_value = _provider_response()
+    service = FypAnalyticsService(
+        client=client,
+        cache_ttl=timedelta(minutes=10),
+    )
+    now = datetime(2026, 7, 30, 10, tzinfo=timezone.utc)
+
+    first = service.snapshot("7d", now=now)
+    cached = service.snapshot("7d", now=now + timedelta(minutes=5))
+    refreshed = service.snapshot(
+        "7d",
+        force_refresh=True,
+        now=now + timedelta(minutes=6),
+    )
+
+    assert first["cached"] is False
+    assert cached["cached"] is True
+    assert refreshed["cached"] is False
+    assert client.get_profile_statistics.call_count == 2
+    params = client.get_profile_statistics.call_args.kwargs
+    assert params["period"] == 6 * 60 * 60 * 1000
+
+
+def test_custom_range_validation_is_bounded():
+    service = FypAnalyticsService(client=MagicMock())
+
+    with pytest.raises(FypAnalyticsError, match="after the start"):
+        service.snapshot(
+            "custom",
+            after="2026-07-30T10:00:00+00:00",
+            before="2026-07-30T09:00:00+00:00",
+        )
+
+    with pytest.raises(FypAnalyticsError, match="366 days"):
+        service.snapshot(
+            "custom",
+            after="2025-01-01T00:00:00+00:00",
+            before="2026-07-30T00:00:00+00:00",
+        )
+
+
+def test_unconfigured_service_is_explicit_and_does_not_fake_metrics():
+    service = FypAnalyticsService(client=None)
+
+    result = service.snapshot("24h")
+
+    assert result["available"] is False
+    assert "credentials" in result["reason"]
+    assert "metrics" not in result

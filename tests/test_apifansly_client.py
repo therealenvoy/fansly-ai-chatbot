@@ -95,6 +95,41 @@ def test_missing_credentials_fail_without_network_request():
     client.client.request.assert_not_called()
 
 
+def test_get_profile_statistics_uses_documented_apifansly_contract():
+    client = _client()
+    client.client.request = MagicMock(
+        return_value=_response(
+            _payload(
+                {
+                    "dataset": {
+                        "datapoints": [],
+                        "topFypTags": [],
+                        "topFypMediaOffers": [],
+                    },
+                    "aggregationData": {},
+                }
+            )
+        )
+    )
+
+    result = client.get_profile_statistics(
+        after_date=1770000000000,
+        before_date=1770086400000,
+        period=3600000,
+    )
+
+    assert result["dataset"]["topFypTags"] == []
+    assert client.client.request.call_args.args == (
+        "GET",
+        "/fansly_acc_test/analytics/profilestats",
+    )
+    assert client.client.request.call_args.kwargs["params"] == {
+        "afterDate": 1770000000000,
+        "beforeDate": 1770086400000,
+        "period": 3600000,
+    }
+
+
 def test_lists_cursor_paginated_chats_from_documented_shape():
     client = _client()
     client.client.request = MagicMock(
