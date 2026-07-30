@@ -226,7 +226,7 @@ class ApifanslyClient(FanslyApiClient):
     def __init__(self, config: ApifanslyConfig):
         self.config = config
         self._creator_fansly_id: str | None = None
-        headers = {"Content-Type": "application/json"}
+        headers = {}
         if config.api_key.strip():
             headers["x-api-key"] = config.api_key.strip()
         self.client = httpx.Client(

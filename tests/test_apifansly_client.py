@@ -323,6 +323,50 @@ def test_upload_post_media_waits_for_async_job(tmp_path):
     )
 
 
+def test_upload_post_media_uses_multipart_content_type(tmp_path):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                201,
+                json={"statusCode": 201, "data": {"jobId": "job-1"}},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "statusCode": 200,
+                "data": {
+                    "state": "completed",
+                    "result": {
+                        "mediaId": "media-1",
+                        "accountMedia": [{"id": "account-media-1"}],
+                    },
+                },
+            },
+            request=request,
+        )
+
+    client = _client()
+    default_headers = dict(client.client.headers)
+    client.client.close()
+    client.client = httpx.Client(
+        base_url=client.config.base_url,
+        headers=default_headers,
+        transport=httpx.MockTransport(handler),
+    )
+    media_file = tmp_path / "clip.mp4"
+    media_file.write_bytes(b"video")
+
+    client.upload_post_media(str(media_file), poll_interval=0.01)
+
+    assert requests[0].headers["content-type"].startswith(
+        "multipart/form-data; boundary="
+    )
+
+
 def test_lists_post_walls_and_creates_scheduled_post():
     client = _client()
     client.client.request = MagicMock(
