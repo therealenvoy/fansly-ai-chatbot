@@ -361,17 +361,24 @@ class FypAnalyticsService:
         for item in aggregation.get("accountMedia", []):
             if not isinstance(item, dict):
                 continue
-            item_id = str(item.get("id") or "").strip()
             media = item.get("media", {})
-            if not item_id or not isinstance(media, dict):
+            if not isinstance(media, dict):
                 continue
-            media_by_id[item_id] = {
+            metadata = {
                 "thumbnail_url": _location_from_media(media),
                 "media_type": str(
                     media.get("mimetype") or "media"
                 ).split("/", 1)[0],
                 "created_at": item.get("createdAt"),
             }
+            identifiers = {
+                str(item.get("id") or "").strip(),
+                str(item.get("mediaId") or "").strip(),
+                str(media.get("id") or "").strip(),
+            }
+            for identifier in identifiers:
+                if identifier:
+                    media_by_id[identifier] = metadata
         offer_locations: dict[str, str] = {}
         for item in aggregation.get("creatorMediaOfferLocations", []):
             if not isinstance(item, dict):

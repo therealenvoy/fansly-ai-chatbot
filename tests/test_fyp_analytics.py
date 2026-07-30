@@ -124,6 +124,31 @@ def test_normalizes_real_fyp_tag_media_and_time_metrics():
     assert "media-1" not in str(result)
 
 
+def test_matches_fyp_offer_to_account_media_provider_media_id():
+    response = _provider_response()
+    response["dataset"]["topFypMediaOffers"][0]["mediaOfferId"] = (
+        "provider-media-1"
+    )
+    response["aggregationData"]["creatorMediaOfferLocations"] = []
+    account_media = response["aggregationData"]["accountMedia"][0]
+    account_media["id"] = "account-media-1"
+    account_media["mediaId"] = "provider-media-1"
+
+    client = MagicMock()
+    client.get_profile_statistics.return_value = response
+    service = FypAnalyticsService(client=client)
+
+    result = service.snapshot(
+        "24h",
+        now=datetime(2026, 7, 30, 10, tzinfo=timezone.utc),
+    )
+
+    assert result["media"][0]["thumbnail_url"] == (
+        "https://cdn.example/fyp.jpg"
+    )
+    assert result["media"][0]["media_type"] == "video"
+
+
 def test_caches_each_range_for_ten_minutes_and_force_refreshes():
     client = MagicMock()
     client.get_profile_statistics.return_value = _provider_response()
