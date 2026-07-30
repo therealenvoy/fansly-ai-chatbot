@@ -1,5 +1,7 @@
 """Contract tests for the automated PPV APIFansly adapter."""
 
+import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
@@ -7,6 +9,8 @@ import pytest
 
 from src.apifansly_client import ApifanslyClient, ApifanslyConfig
 from src.fansly_client import AuthError, FanslyApiClient
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _response(payload: dict, status: int = 200) -> MagicMock:
@@ -369,6 +373,11 @@ def test_upload_post_media_uses_multipart_content_type(tmp_path):
 
 def test_lists_post_walls_and_creates_scheduled_post():
     client = _client()
+    create_post_response = json.loads(
+        (FIXTURES / "apifansly_create_post_success.json").read_text(
+            encoding="utf-8"
+        )
+    )
     client.client.request = MagicMock(
         side_effect=[
             _response(
@@ -387,7 +396,7 @@ def test_lists_post_walls_and_creates_scheduled_post():
                     },
                 }
             ),
-            _response(_payload({"id": "post-1"}), status=201),
+            _response(create_post_response, status=201),
         ]
     )
 
@@ -397,22 +406,16 @@ def test_lists_post_walls_and_creates_scheduled_post():
     result = client.create_post(
         content="hello\n\n#fyp",
         wall_ids=["wall-1"],
-        account_media_ids=["account-media-1"],
-        scheduled_for=1775000000,
-        expires_at=1775086400,
+        media_ids=["media-test-1"],
+        scheduled_for=1775000000000,
+        expires_at=1775086400000,
     )
 
-    assert result["id"] == "post-1"
+    assert result["id"] == "post-test-1"
     assert client.client.request.call_args.kwargs["json"] == {
         "content": "hello\n\n#fyp",
         "wallIds": ["wall-1"],
-        "attachments": [
-            {
-                "contentType": 1,
-                "contentId": "account-media-1",
-                "pos": 0,
-            }
-        ],
-        "scheduledFor": 1775000000,
-        "expiresAt": 1775086400,
+        "mediaIds": ["media-test-1"],
+        "scheduledFor": 1775000000000,
+        "expiresAt": 1775086400000,
     }

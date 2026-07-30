@@ -10,11 +10,12 @@ import os
 import re
 from typing import Any
 
+import httpx
 from sqlalchemy import and_, case, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ..apifansly_client import ApifanslyClient
-from ..fansly_client import PaymentRequiredError
+from ..fansly_client import AuthError, NotFoundError, PaymentRequiredError
 from .schema import BULK_POST_OCCURRENCES, BULK_POST_RULES
 
 logger = logging.getLogger("fansly-bot.bulk-posting")
@@ -193,12 +194,19 @@ class BulkPostingService:
         ]
         if not wall_ids:
             raise BulkPostingError("Select at least one wall")
+        selected_media = payload.get("media", [])
+        if not isinstance(selected_media, list):
+            raise BulkPostingError("Media selection is invalid")
         media = [
             value
-            for value in payload.get("media", [])
+            for value in selected_media
             if isinstance(value, dict)
-            and str(value.get("account_media_id", "")).strip()
+            and str(value.get("media_id", "")).strip()
         ]
+        if selected_media and len(media) != len(selected_media):
+            raise BulkPostingError(
+                "Uploaded media is missing its provider media ID; upload it again"
+            )
         caption = str(payload.get("caption", "")).strip()
         tags = self.normalize_tags(payload.get("tags", []))
         if not caption and not media:
@@ -330,22 +338,37 @@ class BulkPostingService:
             post = self.client.create_post(
                 content=self.post_content(values["caption"], values["tags"]),
                 wall_ids=values["wall_ids"],
-                account_media_ids=[
-                    str(item["account_media_id"]) for item in media
-                ],
-                scheduled_for=int(scheduled_for.timestamp()),
+                media_ids=[str(item["media_id"]) for item in media],
+                scheduled_for=int(scheduled_for.timestamp() * 1000),
                 expires_at=(
-                    int(expires_at.timestamp()) if expires_at is not None else 0
+                    int(expires_at.timestamp() * 1000)
+                    if expires_at is not None
+                    else 0
                 ),
             )
         except Exception as exc:
-            error_code = type(exc).__name__[:64]
+            confirmed_rejection = isinstance(
+                exc,
+                (AuthError, NotFoundError, PaymentRequiredError),
+            )
+            provider_status = None
+            if isinstance(exc, httpx.HTTPStatusError):
+                provider_status = exc.response.status_code
+                confirmed_rejection = 400 <= provider_status < 500
+            error_code = (
+                f"provider_http_{provider_status}"
+                if provider_status is not None
+                else type(exc).__name__[:64]
+            )
+            occurrence_status = (
+                "failed" if confirmed_rejection else "delivery_unknown"
+            )
             with self.engine.begin() as connection:
                 connection.execute(
                     update(BULK_POST_OCCURRENCES)
                     .where(BULK_POST_OCCURRENCES.c.id == occurrence_id)
                     .values(
-                        status="delivery_unknown",
+                        status=occurrence_status,
                         error_code=error_code,
                         updated_at=datetime.now(timezone.utc),
                     )
@@ -363,6 +386,11 @@ class BulkPostingService:
                 "Bulk post submission needs operator review: %s",
                 error_code,
             )
+            if confirmed_rejection:
+                raise BulkPostingError(
+                    "APIFansly rejected the scheduled post; nothing was "
+                    "scheduled and it was not retried"
+                ) from exc
             raise BulkPostingError(
                 "The provider did not confirm the scheduled post; "
                 "it was not retried automatically"

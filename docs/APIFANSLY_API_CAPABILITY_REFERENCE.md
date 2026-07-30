@@ -90,7 +90,7 @@ Do not create one global “money” or “timestamp” conversion:
 | Message/post/mass-message PPV `price` | Dollars; PPV is documented as $1–$500. |
 | Subscriber `price` / `renewPrice` | Cents. |
 | Earnings summary values | Base units divided by 1,000 to obtain dollars. |
-| Post `scheduledFor` / `expiresAt` | The live Create Post page currently says only “Unix timestamp”; it does not specify seconds versus milliseconds. The response example uses a 10-digit `createdAt`, so retain contract tests and verify a controlled schedule before changing units. |
+| Post `scheduledFor` / `expiresAt` | Unix milliseconds. The live Create Post page explicitly documents milliseconds and provides a 13-digit example. |
 | Analytics `afterDate` / `beforeDate` / `period` | Unix milliseconds. |
 | Mass-message `scheduledFor` | Unix milliseconds. |
 | Other response timestamps | Endpoint-specific; examples are not fully consistent, so normalize only after contract tests. |
@@ -188,7 +188,7 @@ The supplied pages do **not** expose a fan-online-presence feed or an “online 
 | Capability | Method and route | Important inputs and result | Project |
 |---|---|---|---|
 | [List Posts](https://docs.apifansly.com/api-reference/posts/list-posts) | `GET /{account_id}/posts` | Returns account posts and associated media/account aggregation. No query parameters are documented on the supplied page. | **Missing** |
-| [Create Post](https://docs.apifansly.com/api-reference/posts/create-post) | `POST /{account_id}/posts` | The live page currently documents required `content` and `wallIds`, plus optional `fypFlags`, `attachments`, schedule, expiry, pinning, reply/quote, and reply-permission flags. | **Implemented for content, walls, attachments, schedule, and expiry; controlled provider validation still required** |
+| [Create Post](https://docs.apifansly.com/api-reference/posts/create-post) | `POST /{account_id}/posts` | At least one of `content` or `mediaIds`; optional `postToFYP`, millisecond schedule/expiry, walls, pinning, reply/quote, and reply-permission fields. | **Implemented for content, media IDs, walls, schedule, and expiry** |
 | [Delete Post](https://docs.apifansly.com/api-reference/posts/delete-post) | `DELETE /{account_id}/posts/{post_id}` | No body documented. | **Missing** |
 | [Update Post](https://docs.apifansly.com/api-reference/posts/update-post) | `POST /{account_id}/posts/{post_id}` | Same body as create. Omitted fields are cleared by Fansly, so use read-modify-write. | **Missing** |
 | [Get Wall](https://docs.apifansly.com/api-reference/posts/get-wall) | `GET /{accountId}/posts/wall/{wallId}` | Returns one wall and its post context. | **Missing** |
@@ -198,15 +198,17 @@ The supplied pages do **not** expose a fan-online-presence feed or an “online 
 | [Cancel Scheduled Post](https://docs.apifansly.com/api-reference/posts/cancel-scheduled-post) | `POST /{account_id}/posts/scheduled/{post_id}/cancel` | No body documented. | **Missing** |
 | [Pin Post](https://docs.apifansly.com/api-reference/posts/post-settings/pin-post) | `POST /{account_id}/posts/{post_id}/pin` | JSON: `wallId`. | **Missing** |
 
-Current live Create Post rules, verified 2026-07-30:
+Current live Create Post rules, re-verified from the rendered page HTML on 2026-07-30:
 
-- `content` and `wallIds` are shown as required.
-- `attachments`, `scheduledFor`, `expiresAt`, `fypFlags`, `pinWallIds`, `inReplyTo`, `quotedPostId`, and `postReplyPermissionFlags` are optional.
-- The page calls schedule/expiry Unix timestamps but does not state their unit.
-- The current adapter’s `attachments` field agrees with the live page. The page types each attachment only as `any`, so its exact object schema still requires a controlled provider test.
+- At least one of `content` or `mediaIds` is required.
+- `mediaIds` contains media IDs returned by Vault Media or Upload Media; the simple documented form is a string array.
+- `postToFYP` is optional and requires a public video of at least three seconds.
+- `scheduledFor` and `expiresAt` are Unix timestamps in milliseconds.
+- `wallIds` is optional; omitting it posts to the default wall.
+- The success response contains generated `attachments`, but `attachments` is not the current create request field.
 - Update behavior must be separately verified before assuming omitted current content/media are preserved.
 
-Documentation-drift warning: an earlier page revision described `mediaIds`, `postToFYP`, and millisecond scheduling, while the live page now describes `attachments`, `fypFlags`, and an unspecified Unix timestamp. Do not rewrite the production adapter from an older snapshot. Keep request-shape tests and validate one harmless future-scheduled post before expanding posting authority.
+Documentation-drift warning: the page has changed between `mediaIds`/millisecond scheduling and `attachments`/unspecified timestamps. Re-open the live page and inspect its rendered request-body section before every posting-adapter change. Keep a sanitized fixture and focused request-shape test.
 
 ## Profile analytics
 
@@ -360,8 +362,8 @@ This is cheaper and more reliable for the documented native triggers than simula
 1. Upload media and poll one job with bounded backoff.
 2. Validate public video and duration before `postToFYP`.
 3. Resolve wall IDs from Get Post Walls.
-4. Keep schedule/expiry conversion behind a contract-tested adapter; the current live page does not specify timestamp units.
-5. Use the current live `attachments` contract and validate the attachment object shape with one controlled future-scheduled post.
+4. Convert schedule/expiry to Unix milliseconds at the provider boundary.
+5. Send the uploaded `mediaId` values in `mediaIds`; do not send response-only attachment objects as the create request.
 6. Save the provider post ID.
 7. Reconcile with Get Scheduled Posts/Get Post.
 8. Update by fetching current content/media first because omitted fields are cleared.
@@ -401,7 +403,7 @@ This is cheaper and more reliable for the documented native triggers than simula
 5. The Send Message example has had malformed illustrative `mediaIds` JSON.
 6. `permissions` rules are OR, and override root-level media permission fields.
 7. Money uses dollars, cents, or 1/1000 base units depending on the endpoint.
-8. The live Create Post page currently leaves scheduling units ambiguous; an older revision said milliseconds while the response examples use 10-digit timestamps.
+8. The live Create Post contract has drifted between request shapes. As of the 2026-07-30 recheck, the request uses `mediaIds` and millisecond schedule/expiry values; the response contains generated `attachments`.
 9. Media upload is asynchronous and CDN URLs expire after five hours.
 10. Update Post clears omitted fields.
 11. The current Like Message client route disagrees with the official route/body.

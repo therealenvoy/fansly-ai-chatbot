@@ -1,0 +1,27 @@
+{
+  "statusCode": 201,
+  "message": "Success",
+  "data": {
+    "status_code": 200,
+    "data": {
+      "success": true,
+      "response": {
+        "id": "post-test-1",
+        "accountId": "account-test-1",
+        "content": "scheduled post",
+        "attachments": [
+          {
+            "contentType": 1,
+            "contentId": "media-test-1",
+            "pos": 0,
+            "postId": "post-test-1"
+          }
+        ],
+        "wallIds": [
+          "wall-test-1"
+        ]
+      }
+    }
+  },
+  "timestamp": "2026-07-30T00:00:00.000Z"
+}

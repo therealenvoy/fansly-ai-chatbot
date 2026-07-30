@@ -699,11 +699,14 @@ class ApifanslyClient(FanslyApiClient):
         *,
         content: str,
         wall_ids: list[str],
-        account_media_ids: list[str],
+        media_ids: list[str],
         scheduled_for: int = 0,
         expires_at: int = 0,
     ) -> dict[str, Any]:
-        if not str(content).strip() and not account_media_ids:
+        clean_media_ids = [
+            str(value).strip() for value in media_ids if str(value).strip()
+        ]
+        if not str(content).strip() and not clean_media_ids:
             raise ValueError("A post requires content or media")
         clean_walls = [str(value).strip() for value in wall_ids if str(value).strip()]
         if not clean_walls:
@@ -711,15 +714,7 @@ class ApifanslyClient(FanslyApiClient):
         body: dict[str, Any] = {
             "content": str(content).strip(),
             "wallIds": clean_walls,
-            "attachments": [
-                {
-                    "contentType": 1,
-                    "contentId": str(media_id),
-                    "pos": position,
-                }
-                for position, media_id in enumerate(account_media_ids)
-                if str(media_id).strip()
-            ],
+            "mediaIds": clean_media_ids,
             "scheduledFor": max(0, int(scheduled_for)),
             "expiresAt": max(0, int(expires_at)),
         }
