@@ -1233,6 +1233,25 @@ class TestDashboardSecurity:
         assert status == 401
         assert body == {"error": "authentication required"}
 
+    def test_owner_shell_contains_persistent_model_switcher(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+        status, body, _ = _request(
+            host,
+            "GET",
+            "/",
+            headers={"Authorization": _authorization()},
+        )
+
+        assert status == 200
+        assert 'class="model-rail"' in body
+        assert 'id="model-rail-list"' in body
+        assert 'data-action="open-model-setup"' in body
+        assert "async function loadModelRail()" in body
+        assert "await loaders[currentTab]()" in body
+
     def test_posting_va_sees_only_posting_and_fyp_shell(self, running_server):
         host, _, _ = running_server
         status, body, _ = _request(

@@ -46,8 +46,11 @@ body{
 .role-posting_va .launch-note,
 .role-posting_va .top-actions .icon-button,
 .role-posting_va #bot-toggle{display:none!important}
+.role-posting_va .model-rail{display:none!important}
+.role-posting_va .app-shell{grid-template-columns:232px minmax(0,1fr)}
 .role-posting_va .sidebar nav{flex:none;overflow:visible}
 .role-posting_va .workspace-switcher svg{display:none}
+.role-owner .sidebar>.brand{display:none}
 button,input,textarea,select{font:inherit}
 button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{
   outline:2px solid var(--violet);outline-offset:2px
@@ -56,9 +59,50 @@ button:disabled{cursor:not-allowed;opacity:.5}
 svg{display:block}
 .app-shell{
   height:calc(100vh - 28px);height:calc(100dvh - 28px);display:grid;
-  grid-template-columns:232px minmax(0,1fr);overflow:hidden;border:1px solid var(--line-strong);
+  grid-template-columns:216px 232px minmax(0,1fr);overflow:hidden;border:1px solid var(--line-strong);
   border-radius:24px;background:var(--shell);box-shadow:0 0 0 7px #30303a,var(--shadow)
 }
+.model-rail{
+  min-width:0;display:flex;flex-direction:column;padding:18px 12px 14px;
+  background:linear-gradient(180deg,#151520 0%,#11111a 100%);border-right:1px solid var(--line)
+}
+.model-rail .brand{padding-inline:6px;margin-bottom:14px}
+.model-rail-heading{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 7px 8px;
+  color:var(--faint);font-size:9px;font-weight:760;letter-spacing:.12em;text-transform:uppercase
+}
+.model-rail-list{
+  flex:1;min-height:0;display:flex;flex-direction:column;gap:7px;overflow-y:auto;padding:2px 2px 10px;
+  scrollbar-width:thin;scrollbar-color:#292735 transparent
+}
+.model-rail-card{
+  appearance:none;width:100%;display:flex;align-items:center;gap:10px;padding:9px;border:1px solid transparent;
+  border-radius:13px;background:transparent;color:var(--muted);text-align:left;cursor:pointer;
+  transition:background .16s,border-color .16s,color .16s,transform .16s
+}
+.model-rail-card:hover{background:rgba(255,255,255,.045);color:var(--text)}
+.model-rail-card:active{transform:scale(.985)}
+.model-rail-card.selected{
+  color:var(--text);border-color:rgba(161,124,255,.72);
+  background:linear-gradient(135deg,rgba(161,124,255,.17),rgba(242,121,189,.035));
+  box-shadow:0 0 0 1px rgba(161,124,255,.08)
+}
+.model-rail-avatar{
+  width:38px;height:38px;flex:none;border-radius:50%;object-fit:cover;background:var(--surface-3);
+  display:grid;place-items:center;color:#e8ddff;font-size:13px;font-weight:740;border:1px solid var(--line-strong)
+}
+.model-rail-copy{min-width:0;flex:1}
+.model-rail-copy strong,.model-rail-copy span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-rail-copy strong{color:inherit;font-size:11px;font-weight:690}
+.model-rail-copy span{margin-top:3px;color:var(--faint);font-size:9px}
+.model-rail-state{width:7px;height:7px;flex:none;border-radius:50%;background:var(--faint)}
+.model-rail-card.selected .model-rail-state{background:var(--green);box-shadow:0 0 0 4px rgba(68,215,146,.08)}
+.model-rail-empty{padding:12px 9px;color:var(--faint);font-size:10px;line-height:1.5}
+.model-rail-add{
+  appearance:none;min-height:40px;width:100%;border:1px solid rgba(161,124,255,.35);border-radius:11px;
+  background:linear-gradient(135deg,#a77fff,#7e55e9);color:#fff;font-size:10px;font-weight:720;cursor:pointer
+}
+.model-rail-add:hover{background:linear-gradient(135deg,#b28dff,#8c63ee)}
 .sidebar{
   min-width:0;display:flex;flex-direction:column;padding:18px 14px 14px;
   background:linear-gradient(180deg,#12121b 0%,#0f0f17 100%);border-right:1px solid var(--line)
@@ -313,7 +357,8 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 .fact-list{list-style:none}.fact-list li{padding:9px 10px;margin-bottom:6px;border:1px solid var(--line);border-radius:10px;background:var(--input);font-size:9px;color:var(--muted)}
 .mobile-title{display:none}
 @media(max-width:1120px){
-  .app-shell{grid-template-columns:210px minmax(0,1fr)}
+  .app-shell{grid-template-columns:188px 210px minmax(0,1fr)}
+  .role-posting_va .app-shell{grid-template-columns:210px minmax(0,1fr)}
   .status-card,.ops-card{grid-column:span 6}.hero-card{grid-column:span 12;order:-1}
   .metric-card{grid-column:span 6}.activity-card,.next-card{grid-column:span 12}
   .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -322,6 +367,7 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 }
 @media(max-width:720px){
   body{padding:0}.app-shell{height:100vh;height:100dvh;border:0;border-radius:0;box-shadow:none;display:block}
+  .model-rail{display:none}
   .sidebar{position:fixed;left:0;right:0;bottom:0;z-index:50;width:100%;height:72px;padding:4px 6px max(5px,env(safe-area-inset-bottom));border:0;border-top:1px solid var(--line);background:rgba(15,15,23,.96)}
   .brand,.nav-label,.launch-note{display:none}
   .sidebar nav{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(66px,1fr);overflow-x:auto;gap:0}
@@ -351,6 +397,17 @@ textarea{min-height:180px;line-height:1.55;resize:vertical;font-family:"SFMono-R
 </head>
 <body class="role-__DASHBOARD_ROLE_CLASS__">
 <div class="app-shell">
+  <aside class="model-rail" aria-label="Creator models">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <div><div class="brand-name">Sunny Charm</div><div class="brand-kicker">Creator intelligence</div></div>
+    </div>
+    <div class="model-rail-heading"><span>Models</span><span id="model-rail-count">—</span></div>
+    <div class="model-rail-list" id="model-rail-list" aria-live="polite">
+      <p class="model-rail-empty">Loading connected models…</p>
+    </div>
+    <button type="button" class="model-rail-add" data-action="open-model-setup">＋ Add model</button>
+  </aside>
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
@@ -474,6 +531,7 @@ var fypAnalyticsRange='24h';
 var fypAnalyticsView='overview';
 var fypAnalyticsData=null;
 var modelSetupData=null;
+var modelRailData=null;
 var modelConnectAttempt='';
 
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
@@ -947,7 +1005,7 @@ function saveBible(){var c=document.getElementById('bed').value,done=document.ge
 async function loadModelSetup(){
   var c=document.getElementById('content');
   c.innerHTML=pageHead('Workspace','Model Setup','Connect and select Fansly creator accounts through APIFansly.','<button class="btn-ghost" data-action="refresh-view">Refresh</button>')+'<p class="muted-note">Loading connected models…</p>';
-  var data=await F('/api/models');modelSetupData=data;
+  var data=await F('/api/models');modelSetupData=data;renderModelRail(data);
   if(!data||!data.available){c.innerHTML=pageHead('Workspace','Model Setup','APIFansly model management is unavailable.','')+'<section class="block"><p class="block-copy" style="color:var(--amber)">The creator registry or APIFansly API key is not ready.</p></section>';return}
   var models=data.models||[],cards=models.map(function(model){
     var avatar=model.avatar_url?'<img class="model-avatar" src="'+attr(model.avatar_url)+'" alt="">':'<div class="model-avatar">'+initial(model.display_name)+'</div>';
@@ -968,7 +1026,40 @@ async function verifyModel(){
   var result=document.getElementById('model-connect-result'),button=document.querySelector('[data-action="verify-model"]');if(button)button.disabled=true;if(result)result.textContent='Verifying…';
   try{var r=await M('/api/models/verify-2fa',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({attempt:modelConnectAttempt,code:(document.getElementById('model-2fa')||{}).value||''})}),d=await r.json();if(!r.ok)throw new Error(d.error||'Verification failed');modelConnectAttempt='';await selectModel(d.model.creator_id)}catch(error){if(result){result.textContent=error.message||'Verification failed';result.style.color='var(--red)'}if(button)button.disabled=false}}
 async function selectModel(creatorId){
-  var r=await M('/api/models/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({creator_id:creatorId})}),d=await r.json();if(!r.ok){alert(d.error||'Could not select model');return}modelSetupData=null;bulkPostingData=null;fypAnalyticsData=null;await loadModelSetup();var chosen=(modelSetupData&&modelSetupData.models||[]).find(function(model){return model.creator_id===creatorId});document.getElementById('workspace-title').textContent=(chosen&&chosen.display_name||creatorId)+' / Fansly';
+  if(!creatorId)return;
+  document.querySelectorAll('.model-rail-card').forEach(function(card){card.disabled=true});
+  var r=await M('/api/models/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({creator_id:creatorId})}),d=await r.json();
+  if(!r.ok){document.querySelectorAll('.model-rail-card').forEach(function(card){card.disabled=false});alert(d.error||'Could not select model');return}
+  modelSetupData=null;modelRailData=null;bulkPostingData=null;fypAnalyticsData=null;
+  await loadModelRail();
+  if(loaders[currentTab])await loaders[currentTab]();
+}
+
+function renderModelRail(data){
+  if(IS_POSTING_VA)return;
+  var list=document.getElementById('model-rail-list'),count=document.getElementById('model-rail-count');
+  if(!list||!count)return;
+  modelRailData=data;
+  var models=data&&data.models||[];
+  count.textContent=String(models.length);
+  if(!data||!data.available){list.innerHTML='<p class="model-rail-empty">Model switching is unavailable.</p>';return}
+  if(!models.length){list.innerHTML='<p class="model-rail-empty">No connected models yet.</p>';return}
+  list.innerHTML=models.map(function(model){
+    var name=model.display_name||model.creator_id;
+    var avatar=model.avatar_url?'<img class="model-rail-avatar" src="'+attr(model.avatar_url)+'" alt="">':'<span class="model-rail-avatar">'+initial(name)+'</span>';
+    var handle=model.username?'@'+model.username:model.creator_id;
+    return'<button type="button" class="model-rail-card'+(model.selected?' selected':'')+'" data-action="select-model" data-creator-id="'+attr(model.creator_id)+'" aria-pressed="'+(model.selected?'true':'false')+'" title="Switch to '+attr(name)+'">'+avatar+'<span class="model-rail-copy"><strong>'+esc(name)+'</strong><span>'+esc(handle)+'</span></span><i class="model-rail-state" aria-hidden="true"></i></button>';
+  }).join('');
+  var selected=models.find(function(model){return model.selected})||models[0];
+  if(selected){
+    var title=document.getElementById('workspace-title');
+    if(title)title.textContent=(selected.display_name||selected.creator_id)+' / Fansly';
+  }
+}
+
+async function loadModelRail(){
+  if(IS_POSTING_VA)return;
+  renderModelRail(await F('/api/models'));
 }
 
 function loadSequences(){
@@ -1219,6 +1310,7 @@ document.addEventListener('click',function(event){
   else if(action==='connect-model')connectModel();
   else if(action==='verify-model')verifyModel();
   else if(action==='select-model')selectModel(control.dataset.creatorId||'');
+  else if(action==='open-model-setup')navTo('model-setup');
   else if(action==='close-drawer')closeDrawer();
   else if(action==='fan-detail')fanDetail(control.dataset.fanId||'');
   else if(action==='select-conversation')selectConversation(control.dataset.fanId||'');
@@ -1284,6 +1376,7 @@ if(IS_POSTING_VA){
   navTo(vaStart==='fyp-analytics'?'fyp-analytics':'bulk-posting',true);
 }else{
   loadBotStatus();
+  loadModelRail();
   setInterval(loadBotStatus,15000);
   navTo(location.hash.slice(1)||'dashboard',true);
 }
