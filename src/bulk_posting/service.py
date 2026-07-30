@@ -14,6 +14,7 @@ from sqlalchemy import and_, case, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ..apifansly_client import ApifanslyClient
+from ..fansly_client import PaymentRequiredError
 from .schema import BULK_POST_OCCURRENCES, BULK_POST_RULES
 
 logger = logging.getLogger("fansly-bot.bulk-posting")
@@ -524,9 +525,22 @@ class BulkPostingService:
         total = int(delivery[0] or 0)
         successful = int(delivery[1] or 0)
         status = self.safe_status()
+        walls: list[dict[str, str]] = []
+        if self.available:
+            try:
+                walls = self.walls()
+            except PaymentRequiredError:
+                logger.warning(
+                    "APIFansly posting is paused: provider payment required"
+                )
+                status["available"] = False
+                status["reason"] = (
+                    "APIFansly payment required: add account funds before "
+                    "posting can run."
+                )
         status.update(
             {
-                "walls": self.walls() if self.available else [],
+                "walls": walls,
                 "metrics": {
                     "scheduled_posts": int(scheduled_count or 0),
                     "next_post": next_post.isoformat() if next_post else None,

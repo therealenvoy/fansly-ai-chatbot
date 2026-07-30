@@ -4,6 +4,7 @@ from sqlalchemy import create_engine, insert, select
 
 from src.bulk_posting.schema import BULK_POST_RULES
 from src.bulk_posting.service import BulkPostingError, BulkPostingService
+from src.fansly_client import PaymentRequiredError
 from src.persistence.schema import CREATORS, metadata
 from src.web.dashboard import DASHBOARD_HTML
 
@@ -110,6 +111,21 @@ def test_paid_preview_fails_closed():
         assert "not supported" in str(error)
     else:
         raise AssertionError("paid preview must fail closed")
+
+
+def test_snapshot_degrades_cleanly_when_provider_requires_payment():
+    service, client = _service()
+
+    def payment_required():
+        raise PaymentRequiredError("provider billing required")
+
+    client.list_post_walls = payment_required
+
+    status = service.snapshot()
+
+    assert status["available"] is False
+    assert status["walls"] == []
+    assert "payment" in status["reason"].lower()
 
 
 def test_bulk_posting_dashboard_contains_only_required_control_surface():
