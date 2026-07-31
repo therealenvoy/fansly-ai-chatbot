@@ -304,7 +304,7 @@ def test_advanced_failure_falls_back_to_current_generator_once():
     assert stored.fallback_reason == "fast_json_invalid"
 
 
-def test_both_advanced_and_current_failure_preserves_retryable_inbound():
+def test_both_advanced_and_current_failure_uses_policy_checked_safe_fallback():
     responder = MagicMock()
     responder.enabled = True
     responder.model = "deepseek-v4-flash"
@@ -342,7 +342,16 @@ def test_both_advanced_and_current_failure_preserves_retryable_inbound():
         known_facts=[],
     )
 
-    assert reply is None
+    assert reply is not None
+    assert reply.content == "tell me a little more?"
+    stored = bot.conversation_decision_repo.get(
+        inbound.id,
+        creator_id="creator-a",
+    )
+    assert stored.authority == "current"
+    assert stored.fallback_used is True
+    assert stored.fallback_reason == "advanced_timeout"
+    assert stored.gate_results["deterministic_safe_fallback"] == "approved"
 
 
 

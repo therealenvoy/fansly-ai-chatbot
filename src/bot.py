@@ -2881,7 +2881,7 @@ class FanslyBot:
             )
         if decision is None:
             decision = self.chat_responder.decide(**context)
-        if decision is None and requested_authority != "advanced":
+        if decision is None:
             fallback = self._safe_conversation_fallback(
                 trigger_kind=trigger_kind,
                 fan_message=context.get("fan_message"),
@@ -2895,6 +2895,20 @@ class FanslyBot:
                         if trigger_kind in {"online", "stalled"}
                         else None
                     ),
+                )
+                execution.update(
+                    authority="current",
+                    brain_version="current-v1",
+                    variant="control",
+                    fallback_used=True,
+                    fallback_reason=(
+                        execution.get("fallback_reason")
+                        or "current_generator_unavailable"
+                    ),
+                    gate_results={
+                        **execution["gate_results"],
+                        "deterministic_safe_fallback": "selected",
+                    },
                 )
         if decision is None:
             return None
@@ -2923,6 +2937,15 @@ class FanslyBot:
                 else None
             )
             if gate.approved and approved:
+                if (
+                    execution["gate_results"].get(
+                        "deterministic_safe_fallback"
+                    )
+                    == "selected"
+                ):
+                    execution["gate_results"][
+                        "deterministic_safe_fallback"
+                    ] = "approved"
                 if self.human_delivery is not None:
                     try:
                         live_style = self.human_delivery.apply_live_style(
