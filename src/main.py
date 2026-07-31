@@ -440,6 +440,12 @@ else:
 
 state_repo = ConversationStateRepository(database_engine)
 state_repo.ensure_creator(CREATOR_ID)
+brain_reply_ownership = brain_settings_service.reconcile_trigger_ownership()
+logger.info(
+    "Inbound reply trigger ownership reconciled: owner=%s version=%s",
+    brain_reply_ownership.owner.value,
+    brain_reply_ownership.version,
+)
 runtime_monitor = RuntimeMonitor()
 provider_credit_governor = None
 if FANSLY_PROVIDER == "fanslyapi":

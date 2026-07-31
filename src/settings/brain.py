@@ -7,6 +7,13 @@ from typing import Mapping
 
 from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.brain2_repository import BrainConfigurationAuditRepository
+from src.engagement.control_plane import (
+    Ownership,
+    OwnershipConflict,
+    TriggerOwner,
+    TriggerOwnershipRepository,
+    TriggerType,
+)
 from src.settings.store import SettingsStore
 
 
@@ -71,6 +78,9 @@ class BrainSettingsService:
         self.environment = environment
         self.shadow_runtime = shadow_runtime
         self.audit = BrainConfigurationAuditRepository(settings_store.engine)
+        self.trigger_ownership = TriggerOwnershipRepository(
+            settings_store.engine
+        )
 
     def snapshot(self) -> BrainRuntimeSettings:
         values = dict(self.environment)
@@ -183,7 +193,36 @@ class BrainSettingsService:
             _FIELDS[field][0]: str(getattr(validated, field))
             for field in _FIELDS
         }
-        self.settings_store.set_many(database_values)
+        desired_owner = self._desired_inbound_reply_owner(validated)
+        try:
+            with self.settings_store.engine.begin() as connection:
+                self.settings_store.set_many(
+                    database_values,
+                    connection=connection,
+                )
+                self.trigger_ownership.handoff(
+                    self.settings_store.creator_id,
+                    TriggerType.INBOUND_REPLY,
+                    desired_owner,
+                    actor=str(actor)[:64],
+                    reason=(
+                        str(reason)[:128]
+                        if reason
+                        else "Brain live authority settings changed"
+                    ),
+                    allowed_previous_owners=frozenset(
+                        {
+                            TriggerOwner.CURRENT_BRAIN,
+                            TriggerOwner.BRAIN2,
+                        }
+                    ),
+                    preserve_unlisted=(
+                        desired_owner == TriggerOwner.CURRENT_BRAIN
+                    ),
+                    connection=connection,
+                )
+        except OwnershipConflict as exc:
+            raise BrainSettingsError(str(exc)) from exc
         if self.shadow_runtime is not None:
             self.shadow_runtime.update_settings(validated)
         self.audit.record(
@@ -195,6 +234,42 @@ class BrainSettingsService:
             reason=(str(reason)[:256] if reason else None),
         )
         return validated
+
+    def reconcile_trigger_ownership(
+        self,
+        *,
+        actor: str = "system",
+        reason: str = "startup Brain authority reconciliation",
+    ) -> Ownership:
+        """Align reply ownership with durable Brain authority, fail closed.
+
+        A disabled or native/external safety owner is preserved at startup.
+        Explicit live promotion through ``save`` still refuses that conflict.
+        """
+        settings = self.snapshot()
+        desired_owner = self._desired_inbound_reply_owner(settings)
+        return self.trigger_ownership.handoff(
+            self.settings_store.creator_id,
+            TriggerType.INBOUND_REPLY,
+            desired_owner,
+            actor=str(actor)[:64],
+            reason=str(reason)[:128],
+            allowed_previous_owners=frozenset(
+                {
+                    TriggerOwner.CURRENT_BRAIN,
+                    TriggerOwner.BRAIN2,
+                }
+            ),
+            preserve_unlisted=True,
+        )
+
+    @staticmethod
+    def _desired_inbound_reply_owner(
+        settings: BrainRuntimeSettings,
+    ) -> TriggerOwner:
+        if settings.mode == "advanced" and settings.live_percent > 0:
+            return TriggerOwner.BRAIN2
+        return TriggerOwner.CURRENT_BRAIN
 
     def rollback(
         self,

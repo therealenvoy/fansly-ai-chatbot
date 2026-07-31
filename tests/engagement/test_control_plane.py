@@ -73,6 +73,85 @@ def test_trigger_owner_must_be_disabled_before_reassignment():
         ).scalar_one() == 3
 
 
+def test_bounded_trigger_handoff_is_atomic_and_idempotent():
+    engine = _engine()
+    repository = TriggerOwnershipRepository(engine)
+    repository.assign(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.CURRENT_BRAIN,
+        actor="system",
+        reason="safe default",
+    )
+
+    handed_off = repository.handoff(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.BRAIN2,
+        actor="operator",
+        reason="advanced authority promoted",
+        allowed_previous_owners=frozenset(
+            {TriggerOwner.CURRENT_BRAIN, TriggerOwner.BRAIN2}
+        ),
+    )
+    repeated = repository.handoff(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.BRAIN2,
+        actor="operator",
+        reason="duplicate promotion",
+        allowed_previous_owners=frozenset(
+            {TriggerOwner.CURRENT_BRAIN, TriggerOwner.BRAIN2}
+        ),
+    )
+
+    assert handed_off.owner == TriggerOwner.BRAIN2
+    assert handed_off.version == 2
+    assert repeated == handed_off
+    with engine.connect() as connection:
+        assert connection.execute(
+            select(func.count(TRIGGER_OWNERSHIP_EVENTS.c.id))
+        ).scalar_one() == 2
+
+
+def test_bounded_trigger_handoff_preserves_disabled_safety_owner():
+    engine = _engine()
+    repository = TriggerOwnershipRepository(engine)
+    repository.assign(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.DISABLED,
+        actor="operator",
+        reason="kill switch",
+    )
+
+    preserved = repository.handoff(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.CURRENT_BRAIN,
+        actor="system",
+        reason="startup reconciliation",
+        allowed_previous_owners=frozenset(
+            {TriggerOwner.CURRENT_BRAIN, TriggerOwner.BRAIN2}
+        ),
+        preserve_unlisted=True,
+    )
+
+    assert preserved.owner == TriggerOwner.DISABLED
+    assert preserved.version == 1
+    with pytest.raises(OwnershipConflict, match="protected safety owner"):
+        repository.handoff(
+            "creator-a",
+            TriggerType.INBOUND_REPLY,
+            TriggerOwner.BRAIN2,
+            actor="operator",
+            reason="unsafe promotion",
+            allowed_previous_owners=frozenset(
+                {TriggerOwner.CURRENT_BRAIN, TriggerOwner.BRAIN2}
+            ),
+        )
+
+
 def test_same_episode_cannot_be_claimed_by_native_and_brain():
     engine = _engine()
     repository = ContactClaimRepository(engine)

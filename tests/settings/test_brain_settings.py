@@ -2,6 +2,11 @@ import pytest
 
 from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.brain2_repository import BrainConfigurationAuditRepository
+from src.engagement.control_plane import (
+    TriggerOwner,
+    TriggerOwnershipRepository,
+    TriggerType,
+)
 from src.persistence.database import create_database_engine
 from src.persistence.schema import metadata
 from src.settings.brain import BrainSettingsError, BrainSettingsService
@@ -86,7 +91,7 @@ def test_safe_default_keeps_current_live_authority():
 
 
 def test_live_percentage_requires_guard_advanced_mode_and_ceiling():
-    service, _, _ = _service(
+    service, store, _ = _service(
         {
             "BRAIN_ALLOW_ADVANCED_SEND": "true",
             "BRAIN_MAX_LIVE_PERCENT": "5",
@@ -105,6 +110,11 @@ def test_live_percentage_requires_guard_advanced_mode_and_ceiling():
     assert saved.live_percent == 5
     assert saved.max_live_percent == 5
     assert saved.allow_advanced_send is True
+    ownership = TriggerOwnershipRepository(store.engine).get(
+        store.creator_id,
+        TriggerType.INBOUND_REPLY,
+    )
+    assert ownership.owner == TriggerOwner.BRAIN2
 
 
 def test_rollback_is_immediate_persistent_and_audited():
@@ -136,9 +146,69 @@ def test_rollback_is_immediate_persistent_and_audited():
     ).snapshot()
     assert fresh.mode == "current"
     assert fresh.live_percent == 0
+    ownership = TriggerOwnershipRepository(store.engine).get(
+        store.creator_id,
+        TriggerType.INBOUND_REPLY,
+    )
+    assert ownership.owner == TriggerOwner.CURRENT_BRAIN
     events = BrainConfigurationAuditRepository(store.engine).recent(
         creator_id=store.creator_id
     )
     assert events[0]["event_type"] == "rollback"
     assert events[0]["reason"] == "manual kill switch"
     assert "DASHBOARD_PASSWORD" not in str(events)
+
+
+def test_startup_reconciles_existing_advanced_settings_to_brain2():
+    service, store, _ = _service(
+        {
+            "BRAIN_ALLOW_ADVANCED_SEND": "true",
+            "BRAIN_MAX_LIVE_PERCENT": "100",
+        }
+    )
+    store.set_many(
+        {
+            "brain.mode": "advanced",
+            "brain.live_percent": "100",
+            "brain.max_daily_cost": "10",
+        }
+    )
+    TriggerOwnershipRepository(store.engine).assign(
+        store.creator_id,
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.CURRENT_BRAIN,
+        actor="system",
+        reason="legacy default",
+    )
+
+    ownership = service.reconcile_trigger_ownership()
+
+    assert ownership.owner == TriggerOwner.BRAIN2
+
+
+def test_disabled_reply_owner_blocks_live_promotion_but_survives_rollback():
+    service, store, _ = _service(
+        {
+            "BRAIN_ALLOW_ADVANCED_SEND": "true",
+            "BRAIN_MAX_LIVE_PERCENT": "100",
+        }
+    )
+    store.set("brain.max_daily_cost", "10")
+    TriggerOwnershipRepository(store.engine).assign(
+        store.creator_id,
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.DISABLED,
+        actor="operator",
+        reason="kill switch",
+    )
+
+    with pytest.raises(BrainSettingsError, match="protected safety owner"):
+        service.save({"mode": "advanced", "live_percent": 100})
+
+    rolled_back = service.rollback()
+    ownership = TriggerOwnershipRepository(store.engine).get(
+        store.creator_id,
+        TriggerType.INBOUND_REPLY,
+    )
+    assert rolled_back.mode == "current"
+    assert ownership.owner == TriggerOwner.DISABLED

@@ -74,25 +74,31 @@ class SettingsStore:
     def set(self, key: str, value: str):
         self.set_many({key: value})
 
-    def set_many(self, values: dict[str, str]):
+    def set_many(self, values: dict[str, str], *, connection=None):
         """Persist several creator settings in one transaction."""
         if not values:
             return
         now = utcnow()
+        if connection is not None:
+            self._set_many(connection, values, now=now)
+            return
         with self.engine.begin() as conn:
-            self._ensure_creator(self.creator_id, connection=conn)
-            for key, value in values.items():
-                stmt = self._insert(CREATOR_SETTINGS).values(
-                    creator_id=self.creator_id,
-                    key=key,
-                    value=str(value),
-                    updated_at=now,
-                )
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["creator_id", "key"],
-                    set_={"value": str(value), "updated_at": now},
-                )
-                conn.execute(stmt)
+            self._set_many(conn, values, now=now)
+
+    def _set_many(self, connection, values: dict[str, str], *, now):
+        self._ensure_creator(self.creator_id, connection=connection)
+        for key, value in values.items():
+            stmt = self._insert(CREATOR_SETTINGS).values(
+                creator_id=self.creator_id,
+                key=key,
+                value=str(value),
+                updated_at=now,
+            )
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["creator_id", "key"],
+                set_={"value": str(value), "updated_at": now},
+            )
+            connection.execute(stmt)
 
     def delete(self, key: str):
         stmt = delete(CREATOR_SETTINGS).where(

@@ -144,6 +144,120 @@ class TriggerOwnershipRepository:
             )
         return Ownership(trigger_type, owner, version)
 
+    def handoff(
+        self,
+        creator_id: str,
+        trigger_type: TriggerType,
+        owner: TriggerOwner,
+        *,
+        actor: str,
+        reason: str,
+        allowed_previous_owners: frozenset[TriggerOwner],
+        preserve_unlisted: bool = False,
+        connection=None,
+    ) -> Ownership:
+        """Atomically switch between an explicitly bounded set of owners.
+
+        This is reserved for coordinated runtime promotions and rollbacks.
+        Manual ownership changes continue to use ``assign`` and its
+        disable-first rule.
+        """
+        if connection is not None:
+            return self._handoff(
+                connection,
+                creator_id,
+                trigger_type,
+                owner,
+                actor=actor,
+                reason=reason,
+                allowed_previous_owners=allowed_previous_owners,
+                preserve_unlisted=preserve_unlisted,
+            )
+        with self.engine.begin() as transaction:
+            return self._handoff(
+                transaction,
+                creator_id,
+                trigger_type,
+                owner,
+                actor=actor,
+                reason=reason,
+                allowed_previous_owners=allowed_previous_owners,
+                preserve_unlisted=preserve_unlisted,
+            )
+
+    @staticmethod
+    def _handoff(
+        connection,
+        creator_id: str,
+        trigger_type: TriggerType,
+        owner: TriggerOwner,
+        *,
+        actor: str,
+        reason: str,
+        allowed_previous_owners: frozenset[TriggerOwner],
+        preserve_unlisted: bool,
+    ) -> Ownership:
+        now = datetime.now(timezone.utc)
+        row = connection.execute(
+            select(TRIGGER_OWNERSHIP)
+            .where(
+                and_(
+                    TRIGGER_OWNERSHIP.c.creator_id == creator_id,
+                    TRIGGER_OWNERSHIP.c.trigger_type == trigger_type.value,
+                )
+            )
+            .with_for_update()
+        ).mappings().first()
+        previous = TriggerOwner(row["owner"]) if row else None
+        if previous == owner:
+            return Ownership(trigger_type, owner, int(row["version"]))
+        if previous is not None and previous not in allowed_previous_owners:
+            if preserve_unlisted:
+                return Ownership(trigger_type, previous, int(row["version"]))
+            raise OwnershipConflict(
+                f"{trigger_type.value} is owned by a protected safety owner"
+            )
+        version = int(row["version"]) + 1 if row else 1
+        if row is None:
+            connection.execute(
+                insert(TRIGGER_OWNERSHIP).values(
+                    creator_id=creator_id,
+                    trigger_type=trigger_type.value,
+                    owner=owner.value,
+                    version=version,
+                    updated_by=actor[:64],
+                    updated_at=now,
+                )
+            )
+        else:
+            connection.execute(
+                update(TRIGGER_OWNERSHIP)
+                .where(
+                    and_(
+                        TRIGGER_OWNERSHIP.c.creator_id == creator_id,
+                        TRIGGER_OWNERSHIP.c.trigger_type == trigger_type.value,
+                    )
+                )
+                .values(
+                    owner=owner.value,
+                    version=version,
+                    updated_by=actor[:64],
+                    updated_at=now,
+                )
+            )
+        connection.execute(
+            insert(TRIGGER_OWNERSHIP_EVENTS).values(
+                creator_id=creator_id,
+                trigger_type=trigger_type.value,
+                previous_owner=previous.value if previous else None,
+                new_owner=owner.value,
+                actor=actor[:64],
+                reason=reason[:128],
+                created_at=now,
+            )
+        )
+        return Ownership(trigger_type, owner, version)
+
 
 @dataclass(frozen=True)
 class ClaimResult:
