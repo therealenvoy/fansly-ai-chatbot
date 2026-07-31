@@ -27,6 +27,7 @@ from src.persistence.crm import CrmSyncRepository
 from src.persistence.database import create_database_engine
 from src.persistence.pipeline import MessageProcessingRepository
 from src.persistence.schema import (
+    FAN_MESSAGES,
     INBOUND_MESSAGES,
     OUTBOX_MESSAGES,
     metadata,
@@ -259,7 +260,7 @@ def test_signed_webhook_path_bypasses_full_chat_reconciliation():
     assert len(_rows(engine, INBOUND_MESSAGES)) == 1
 
 
-def test_unread_backlog_batch_queues_at_most_five_without_sending():
+def test_unanswered_backlog_queues_at_most_five_without_sending():
     engine, bot = _bot(
         bot_mode=BotMode.CONVERSATION,
         reply_delay_min_seconds=0,
@@ -267,16 +268,16 @@ def test_unread_backlog_batch_queues_at_most_five_without_sending():
     )
     chats = [
         _chat(
-            unread_count=1,
+            unread_count=0,
             last_message_id=f"message-{number}",
             chat_id=f"chat-{number}",
             fan_id=f"fan-{number}",
         )
         for number in range(1, 7)
     ]
-    bot.client.list_unread_chats_page.return_value = (
+    bot.client.list_chats_page.return_value = (
         chats,
-        "message-6",
+        "next-provider-page",
     )
     bot.client.list_messages.side_effect = [
         (
@@ -302,24 +303,33 @@ def test_unread_backlog_batch_queues_at_most_five_without_sending():
     assert result.discovered_chats == 6
     assert result.processed_chats == 5
     assert result.queued_inbound == 5
-    assert result.next_cursor == "message-5"
+    assert result.next_cursor == (
+        '{"page_index":5,"provider_cursor":null}'
+    )
     assert result.exhausted is False
-    assert len(_rows(engine, INBOUND_MESSAGES)) == 5
+    inbound_rows = _rows(engine, INBOUND_MESSAGES)
+    assert len(inbound_rows) == 5
+    assert (
+        inbound_rows[1]["available_at"]
+        - inbound_rows[0]["available_at"]
+    ) >= timedelta(seconds=59)
     bot.client.send_message.assert_not_called()
-    bot.client.list_unread_chats_page.assert_called_once_with(
-        cursor=None
+    bot.client.list_chats_page.assert_called_once_with(
+        limit=100,
+        offset=0,
+        order="newest",
     )
 
 
-def test_unread_backlog_skips_chat_when_creator_already_replied():
+def test_unanswered_backlog_skips_chat_when_creator_already_replied():
     engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
     chat = _chat(
-        unread_count=1,
+        unread_count=0,
         last_message_id="message-2",
     )
-    bot.client.list_unread_chats_page.return_value = (
+    bot.client.list_chats_page.return_value = (
         [chat],
-        "message-2",
+        None,
     )
     bot.client.list_messages.return_value = (
         [_message(2, fan=False), _message(1)],
@@ -333,8 +343,71 @@ def test_unread_backlog_skips_chat_when_creator_already_replied():
 
     assert result.processed_chats == 1
     assert result.queued_inbound == 0
+    assert result.exhausted is True
     assert _rows(engine, INBOUND_MESSAGES) == []
+    assert len(_rows(engine, FAN_MESSAGES)) == 2
     bot.client.send_message.assert_not_called()
+
+
+def test_unanswered_backlog_replay_is_idempotent():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    chat = _chat(
+        unread_count=0,
+        last_message_id="message-2",
+    )
+    bot.client.list_chats_page.return_value = ([chat], None)
+    bot.client.list_messages.return_value = (
+        [_message(1), _message(2)],
+        None,
+    )
+
+    first = bot.import_unread_backlog_batch(
+        cursor=None,
+        max_chats=1,
+    )
+    second = bot.import_unread_backlog_batch(
+        cursor=None,
+        max_chats=1,
+    )
+
+    assert first.queued_inbound == 1
+    assert second.queued_inbound == 0
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 1
+    bot.client.send_message.assert_not_called()
+
+
+def test_unanswered_backlog_resumes_inside_provider_page():
+    engine, bot = _bot(bot_mode=BotMode.CONVERSATION)
+    chats = [
+        _chat(
+            unread_count=0,
+            last_message_id=f"message-{number}",
+            chat_id=f"chat-{number}",
+            fan_id=f"fan-{number}",
+        )
+        for number in range(1, 7)
+    ]
+    bot.client.list_chats_page.return_value = (
+        chats,
+        "next-provider-page",
+    )
+    bot.client.list_messages.return_value = (
+        [_message(6)],
+        None,
+    )
+
+    result = bot.import_unread_backlog_batch(
+        cursor='{"page_index":5,"provider_cursor":null}',
+        max_chats=5,
+    )
+
+    assert result.processed_chats == 1
+    assert result.queued_inbound == 1
+    assert result.next_cursor == (
+        '{"page_index":0,"provider_cursor":"next-provider-page"}'
+    )
+    assert result.exhausted is False
+    assert len(_rows(engine, INBOUND_MESSAGES)) == 1
 
 
 def test_conversation_generation_failure_is_retried_not_dropped():

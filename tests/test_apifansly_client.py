@@ -136,35 +136,13 @@ def test_get_profile_statistics_uses_documented_apifansly_contract():
 
 def test_lists_cursor_paginated_chats_from_documented_shape():
     client = _client()
-    client.client.request = MagicMock(
-        return_value=_response(
-            _payload(
-                {
-                    "data": [{
-                        "groupId": "chat-1",
-                        "partnerAccountId": "fan-1",
-                        "partnerUsername": "buyer",
-                        "unreadCount": 2,
-                        "lastMessageId": "message-2",
-                        "lastUnreadMessageId": "message-2",
-                        "subscriptionTierId": None,
-                    }],
-                    "aggregationData": {
-                        "accounts": [{
-                            "id": "fan-1",
-                            "username": "buyer",
-                            "displayName": "Buyer",
-                            "avatar": {
-                                "locations": [{
-                                    "location": "https://cdn.example/avatar.jpg"
-                                }]
-                            },
-                        }]
-                    },
-                },
-                cursor="cursor-2",
-            )
+    fixture = json.loads(
+        (FIXTURES / "apifansly_recent_chats.json").read_text(
+            encoding="utf-8"
         )
+    )
+    client.client.request = MagicMock(
+        return_value=_response(fixture)
     )
 
     chats, cursor = client.list_chats_page(
@@ -172,9 +150,11 @@ def test_lists_cursor_paginated_chats_from_documented_shape():
         order="unread",
     )
 
-    assert cursor == "cursor-2"
-    assert chats[0].partner_username == "buyer"
-    assert chats[0].last_unread_message_id == "message-2"
+    assert cursor == "chat-cursor-sanitized-2"
+    assert chats[0].partner_username == "fan_sanitized"
+    assert chats[0].last_message_id == "message-sanitized-2"
+    assert chats[0].last_unread_message_id is None
+    assert chats[0].unread_count == 0
     assert client.client.request.call_args.kwargs["params"] == {
         "filter": "all",
         "sort": "unread",

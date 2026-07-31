@@ -1,4 +1,4 @@
-"""Focused tests for the bounded unread-backlog operator control."""
+"""Focused tests for the bounded unanswered-chat operator control."""
 
 from contextlib import nullcontext
 from unittest.mock import MagicMock
@@ -21,7 +21,7 @@ def _controller():
     bot.creator_id = "creator-test"
     bot.enabled = True
     bot.enable_unread_replies = True
-    bot.client.list_unread_chats_page = MagicMock()
+    bot.client.list_chats_page = MagicMock()
     wakeup = MagicMock()
     controller = UnreadBacklogController(
         bot=bot,
@@ -88,7 +88,7 @@ def test_explicit_creator_id_avoids_mock_runtime_identifier():
     bot.creator_id = MagicMock()
     bot.enabled = True
     bot.enable_unread_replies = True
-    bot.client.list_unread_chats_page = MagicMock()
+    bot.client.list_chats_page = MagicMock()
 
     controller = UnreadBacklogController(
         bot=bot,

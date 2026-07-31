@@ -579,11 +579,17 @@ class FanslyBot:
         cursor: str | None,
         max_chats: int = 5,
     ) -> UnreadBacklogBatchResult:
-        """Queue one bounded, resumable APIFansly unread-chat batch.
+        """Queue one bounded, resumable APIFansly unanswered-chat batch.
 
         This method performs provider reads and durable inbound inserts only.
         It never runs generation or delivery. The normal reply workers remain
         the sole path that can turn queued inbound work into an outbox send.
+
+        APIFansly's dedicated unread feed excludes conversations that a human
+        has opened without answering. Recovery therefore walks the recent-chat
+        cursor and inspects only the newest message page for at most five chats
+        per operator-approved batch. A chat is eligible only when its newest
+        real message is fan-authored.
         """
         if self.bot_mode != BotMode.CONVERSATION:
             raise LaunchGuardError(
@@ -594,8 +600,11 @@ class FanslyBot:
         if not self.enabled:
             raise LaunchGuardError("The bot is disabled")
         batch_limit = min(max(1, int(max_chats)), 5)
-        chats, provider_cursor = self.client.list_unread_chats_page(
-            cursor=cursor
+        provider_cursor, page_index = self._decode_unanswered_cursor(cursor)
+        chats, next_provider_cursor = self.client.list_chats_page(
+            limit=100,
+            offset=(provider_cursor or 0),
+            order="newest",
         )
         if not chats:
             return UnreadBacklogBatchResult(
@@ -603,21 +612,20 @@ class FanslyBot:
                 processed_chats=0,
                 queued_inbound=0,
                 skipped_chats=0,
-                next_cursor=cursor,
+                next_cursor=None,
                 exhausted=True,
             )
 
         processed = 0
         queued = 0
         skipped = 0
-        next_cursor = cursor
         seen_chat_ids: set[str] = set()
-        for chat in chats:
-            row_cursor = (
-                chat.last_unread_message_id or chat.last_message_id
-            )
-            if row_cursor:
-                next_cursor = row_cursor
+        next_index = min(max(page_index, 0), len(chats))
+        for row_index, chat in enumerate(
+            chats[next_index:],
+            start=next_index,
+        ):
+            next_index = row_index + 1
             if chat.chat_id in seen_chat_ids:
                 continue
             seen_chat_ids.add(chat.chat_id)
@@ -626,22 +634,170 @@ class FanslyBot:
                 continue
             if processed >= batch_limit:
                 break
+            inserted = self._ingest_unanswered_chat(
+                chat,
+                batch_position=processed,
+            )
             processed += 1
-            inserted, _ = self._ingest_chat_messages(chat)
             queued += inserted
             if processed >= batch_limit:
                 break
 
-        if processed < batch_limit and provider_cursor:
-            next_cursor = provider_cursor
+        if next_index < len(chats):
+            next_cursor = self._encode_unanswered_cursor(
+                provider_cursor=provider_cursor,
+                page_index=next_index,
+            )
+            exhausted = False
+        elif next_provider_cursor:
+            next_cursor = self._encode_unanswered_cursor(
+                provider_cursor=str(next_provider_cursor),
+                page_index=0,
+            )
+            exhausted = False
+        else:
+            next_cursor = None
+            exhausted = True
         return UnreadBacklogBatchResult(
             discovered_chats=len(chats),
             processed_chats=processed,
             queued_inbound=queued,
             skipped_chats=skipped,
             next_cursor=next_cursor,
-            exhausted=False,
+            exhausted=exhausted,
         )
+
+    @staticmethod
+    def _decode_unanswered_cursor(
+        cursor: str | None,
+    ) -> tuple[str | None, int]:
+        if not cursor:
+            return None, 0
+        try:
+            decoded = json.loads(cursor)
+        except (TypeError, ValueError):
+            return str(cursor), 0
+        if not isinstance(decoded, dict):
+            return str(cursor), 0
+        provider_cursor = decoded.get("provider_cursor")
+        page_index = decoded.get("page_index", 0)
+        return (
+            str(provider_cursor) if provider_cursor else None,
+            max(0, int(page_index or 0)),
+        )
+
+    @staticmethod
+    def _encode_unanswered_cursor(
+        *,
+        provider_cursor: str | None,
+        page_index: int,
+    ) -> str:
+        return json.dumps(
+            {
+                "provider_cursor": provider_cursor,
+                "page_index": max(0, int(page_index)),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    def _ingest_unanswered_chat(
+        self,
+        chat: ChatInfo,
+        *,
+        batch_position: int,
+    ) -> int:
+        """Queue the newest trailing fan-authored block exactly once."""
+        fan_id = chat.partner_account_id
+        self.state_repo.ensure_conversation(
+            self.creator_id,
+            fan_id,
+            chat.chat_id,
+            display_name=chat.partner_display_name,
+        )
+        messages, _ = self.client.list_messages(
+            chat.chat_id,
+            limit=10,
+            cursor=None,
+        )
+        messages.sort(
+            key=lambda message: (
+                message.created_at,
+                message.message_id,
+            )
+        )
+        newest = messages[-1] if messages else None
+        if newest is None:
+            return 0
+
+        if self.message_store is not None:
+            self.message_store.save_messages(
+                [
+                    {
+                        "fan_id": fan_id,
+                        "creator_id": self.creator_id,
+                        "sender": (
+                            "fan"
+                            if message.is_from_fan
+                            else "creator"
+                        ),
+                        "content": message.content,
+                        "message_id": message.message_id,
+                        "chat_id": chat.chat_id,
+                        "attachments": message.attachments,
+                        "created_at": self._provider_datetime(
+                            message.created_at
+                        ),
+                    }
+                    for message in messages
+                ]
+            )
+        self.state_repo.update_conversation_checkpoint(
+            self.creator_id,
+            chat.chat_id,
+            last_platform_message_id=newest.message_id,
+            provider_cursor=None,
+            last_activity_at=self._provider_datetime(newest.created_at),
+        )
+        if not newest.is_from_fan:
+            return 0
+
+        trailing_fan_messages: list[MessageInfo] = []
+        for message in reversed(messages):
+            if not message.is_from_fan:
+                break
+            trailing_fan_messages.append(message)
+        trailing_fan_messages.reverse()
+        combined = "\n".join(
+            (
+                message.content.strip()
+                if message.content.strip()
+                else "[sent an attachment]"
+            )
+            for message in trailing_fan_messages
+        )
+        available_at = self._reply_available_at(newest.message_id)
+        available_at += timedelta(
+            seconds=max(0, int(batch_position)) * 60
+        )
+        inbound_record, created = self.processing_repo.insert_inbound(
+            creator_id=self.creator_id,
+            platform_message_id=newest.message_id,
+            fan_id=fan_id,
+            chat_id=chat.chat_id,
+            content=combined,
+            provider_created_at=self._provider_datetime(
+                newest.created_at
+            ),
+            trigger_kind="unread",
+            available_at=available_at,
+        )
+        if created:
+            self._attribute_inbound_outcome(
+                inbound_record,
+                self._provider_datetime(newest.created_at),
+            )
+        return int(created)
 
     def poll_presence_outreach(self) -> bool:
         if not self.enable_online_outreach:

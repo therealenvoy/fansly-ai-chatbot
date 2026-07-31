@@ -666,8 +666,8 @@ function renderUnreadBacklog(data){
   var unavailable=!data.available,complete=data.phase==='complete',running=Boolean(data.running);
   var action=running?'Importing next batch…':complete?'Backlog scan complete':'Import next '+Number(data.batch_limit||5);
   var disabled=unavailable||running||complete?' disabled':'';
-  var note=unavailable?esc(data.reason||'Unavailable'):'Uses one bounded APIFansly unread read, checks the newest chat history, and queues at most five safe text replies. It never becomes a polling loop.';
-  return'<section class="block">'+sectionIntro('Unread reply backlog','One-time, resumable recovery for conversations that were already unread before the webhook cutover. Future messages stay webhook-first.','<button class="btn" data-action="start-unread-backlog"'+disabled+'>'+esc(action)+'</button>')+
+  var note=unavailable?esc(data.reason||'Unavailable'):'Uses one bounded APIFansly recent-chat read, checks at most five newest histories, and queues only fan-authored unanswered text work. It never becomes a polling loop.';
+  return'<section class="block">'+sectionIntro('Unanswered chat backlog','One-time, resumable recovery for recent chats whose newest message is from the fan, including chats that were opened but not answered. Each approved batch checks at most five chats; future messages stay webhook-first.','<button class="btn" data-action="start-unread-backlog"'+disabled+'>'+esc(action)+'</button>')+
     '<div class="g3"><div class="backlog-stat"><strong>'+esc(phase)+'</strong><span>Current state</span></div><div class="backlog-stat"><strong>'+Number(data.processed_chats||0)+'</strong><span>Chats checked</span></div><div class="backlog-stat"><strong>'+Number(data.queued_inbound||0)+'</strong><span>Replies queued</span></div></div>'+
     '<p class="muted-note" id="unread-backlog-result">'+note+'</p>'+
     '<p class="muted-note">Review delivery evidence between every five-chat batch. This control performs provider reads and durable queue inserts only; the existing Brain 2.0 reply worker remains the only sender. PPV, media, online outreach, and stalled outreach are unchanged.</p></section>';
@@ -731,8 +731,8 @@ function loadDashboard(){
   });
 }
 async function startUnreadBacklog(){
-  if(!confirm('Import the next maximum five unread chats? Safe eligible chats will enter the live text-reply queue. Nothing proactive, paid, or media-based will be sent.'))return;
-  var target=document.getElementById('unread-backlog-result');if(target)target.textContent='Starting bounded unread import…';
+  if(!confirm('Check the next maximum five recent chats for unanswered fan messages? Safe eligible chats will enter the live text-reply queue with staggered timing. Nothing proactive, paid, or media-based will be sent.'))return;
+  var target=document.getElementById('unread-backlog-result');if(target)target.textContent='Starting bounded unanswered-chat scan…';
   var r=await M('/api/unread-backlog/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({max_chats:5})}),d=await r.json();
   if(!r.ok){if(target){target.textContent='Blocked: '+(d.error||'unknown');target.style.color='var(--red)'}return}
   if(target){target.textContent='Batch started. Waiting for aggregate result…';target.style.color='var(--amber)'}

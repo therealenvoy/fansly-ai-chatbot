@@ -1,4 +1,4 @@
-"""Bounded operator control for one-time unread-chat recovery."""
+"""Bounded operator control for one-time unanswered-chat recovery."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class UnreadBacklogError(RuntimeError):
 class UnreadBacklogController:
     """Persist progress and run one operator-approved batch at a time."""
 
-    SCOPE = "apifansly-unread-backlog:v1"
+    SCOPE = "apifansly-unanswered-backlog:v2"
     MAX_BATCH_CHATS = 5
 
     def __init__(
@@ -99,7 +99,9 @@ class UnreadBacklogController:
         with self._lock:
             state = self._load()
             if state.get("phase") == "running":
-                raise UnreadBacklogError("An unread backlog batch is running")
+                raise UnreadBacklogError(
+                    "An unanswered backlog batch is running"
+                )
             state.update(
                 {
                     "phase": "running",
@@ -137,7 +139,7 @@ class UnreadBacklogController:
                     and result.processed_chats == 0
                 ):
                     raise UnreadBacklogError(
-                        "Provider unread cursor did not advance"
+                        "Provider chat cursor did not advance"
                     )
                 state.update(
                     {
@@ -173,7 +175,7 @@ class UnreadBacklogController:
             if result.queued_inbound and self.inbound_wakeup is not None:
                 self.inbound_wakeup.set()
             logger.info(
-                "Unread backlog batch finished: processed=%s queued=%s "
+                "Unanswered backlog batch finished: processed=%s queued=%s "
                 "skipped=%s",
                 result.processed_chats,
                 result.queued_inbound,
@@ -191,7 +193,7 @@ class UnreadBacklogController:
                 )
                 self._save(state)
             logger.error(
-                "Unread backlog batch failed safely: %s",
+                "Unanswered backlog batch failed safely: %s",
                 type(error).__name__,
             )
 
@@ -202,9 +204,9 @@ class UnreadBacklogController:
             return False, "Bot is disabled"
         if not self.bot.enable_unread_replies:
             return False, "Unread replies are disabled"
-        method = getattr(self.bot.client, "list_unread_chats_page", None)
+        method = getattr(self.bot.client, "list_chats_page", None)
         if not callable(method):
-            return False, "Provider has no dedicated unread feed"
+            return False, "Provider cannot list recent chats"
         return True, None
 
     def _load(self) -> dict:
