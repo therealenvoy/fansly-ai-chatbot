@@ -9,6 +9,7 @@ aftercare, and tier systems before a response is generated.
 import json
 import hashlib
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING
@@ -1795,7 +1796,7 @@ class FanslyBot:
                         and inbound.trigger_kind == "unread"
                     ):
                         raise RuntimeError(
-                            "conversation generation produced no approved reply"
+                            "conversation_generation_no_approved_reply"
                         )
                     self.processing_repo.complete_without_response(
                         inbound.id
@@ -1808,7 +1809,14 @@ class FanslyBot:
                         inbound.id,
                         creator_id=self.creator_id,
                     )
-                    if decision is not None and decision.authority == "advanced":
+                    if decision is not None and (
+                        decision.authority == "advanced"
+                        or (
+                            decision.fallback_used
+                            and decision.fallback_reason
+                            != "stale_authority_after_generation"
+                        )
+                    ):
                         service_role = "brain2"
                 try:
                     outbox, _ = self.processing_repo.enqueue_outbox(
@@ -1948,13 +1956,14 @@ class FanslyBot:
             self._persist_runtime_state(sending.fan_id)
             return True
         except Exception as exc:
+            processing_error = self._processing_error_code(exc)
             current = self.processing_repo.get_outbox_for_inbound(
                 inbound.id
             )
             if current is None or current.status == OUTBOX_PENDING:
                 self.processing_repo.release_inbound(
                     inbound.id,
-                    type(exc).__name__,
+                    processing_error,
                     retry_base_seconds=(
                         self.processing_retry_base_seconds
                     ),
@@ -1966,7 +1975,7 @@ class FanslyBot:
             elif current.status == OUTBOX_SENDING:
                 self.processing_repo.mark_delivery_unknown(
                     current.id,
-                    type(exc).__name__,
+                    processing_error,
                 )
                 terminal = True
             else:
@@ -2999,6 +3008,24 @@ class FanslyBot:
                         continue
                 break
             if execution["authority"] != "advanced":
+                repaired = self._repair_repeated_style_candidate(
+                    fan_id=fan_id,
+                    text=decision.final_message,
+                    reason_codes=gate.reason_codes,
+                    recent_creator_messages=recent_creator_messages,
+                    question_streak=int(brain_state["question_streak"]),
+                    pet_name_streak=int(brain_state["pet_name_streak"]),
+                    hard_boundaries=hard_boundaries,
+                )
+                if repaired:
+                    approved = repaired
+                    execution["repair_calls"] = (
+                        int(execution.get("repair_calls") or 0) + 1
+                    )
+                    execution["gate_results"][
+                        "deterministic_style_repair"
+                    ] = "approved"
+                    break
                 logger.warning(
                     "Conversation decision rejected by final gates: %s",
                     gate.reason_codes or ("content_or_style_rejected",),
@@ -3187,6 +3214,99 @@ class FanslyBot:
                     type(exc).__name__,
                 )
         return OutboundMessage.text(approved)
+
+    def _repair_repeated_style_candidate(
+        self,
+        *,
+        fan_id: str,
+        text: str,
+        reason_codes: tuple[str, ...],
+        recent_creator_messages: list[str],
+        question_streak: int,
+        pet_name_streak: int,
+        hard_boundaries: list[str],
+    ) -> str | None:
+        """Repair only repetition-style failures, then rerun every final gate."""
+        repairable = {"question_streak", "pet_name_streak"}
+        reasons = set(reason_codes)
+        if not reasons or not reasons.issubset(repairable):
+            return None
+
+        candidate = str(text or "").strip()
+        if "pet_name_streak" in reasons:
+            for pet_name in sorted(
+                (str(name).strip() for name in self.persona.pet_names),
+                key=len,
+                reverse=True,
+            ):
+                if pet_name:
+                    candidate = re.sub(
+                        rf"\b{re.escape(pet_name)}\b",
+                        "",
+                        candidate,
+                        flags=re.IGNORECASE,
+                    )
+        if "question_streak" in reasons:
+            candidate = re.sub(
+                (
+                    r"\b(?:what|who|when|where|why|how|which)\b"
+                    r"[^?]*\?"
+                ),
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+            candidate = re.sub(
+                (
+                    r"(?:^|[,;:!.\-\u2013\u2014]\s*)"
+                    r"(?:do|did|does|is|are|was|were|can|could|"
+                    r"would|will|have|has)\b[^?]*\?"
+                ),
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+            if "?" in candidate:
+                candidate = ""
+
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+        candidate = re.sub(r"\s+([,!.])", r"\1", candidate)
+        candidate = re.sub(r"^[\s,;:.\-]+|[\s,;:\-]+$", "", candidate)
+        candidates = (
+            candidate,
+            "that makes sense",
+            "i hear you",
+            "got you",
+            "mhm i get that",
+        )
+        for option in dict.fromkeys(candidates):
+            normalized = str(option or "").strip()
+            if not normalized:
+                continue
+            gate = self.brain_quality_gate.evaluate(
+                normalized,
+                recent_creator_messages=recent_creator_messages,
+                question_streak=question_streak,
+                pet_name_streak=pet_name_streak,
+                pet_names=tuple(self.persona.pet_names),
+                hard_boundaries=hard_boundaries,
+                max_length=500,
+            )
+            if not gate.approved:
+                continue
+            approved = self._approve_conversation_text(fan_id, normalized)
+            if approved:
+                return approved
+        return None
+
+    @staticmethod
+    def _processing_error_code(exc: Exception) -> str:
+        if (
+            isinstance(exc, RuntimeError)
+            and str(exc) == "conversation_generation_no_approved_reply"
+        ):
+            return "conversation_generation_no_approved_reply"
+        return type(exc).__name__
 
     @staticmethod
     def _safe_conversation_fallback(

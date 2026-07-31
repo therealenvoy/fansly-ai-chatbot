@@ -391,6 +391,66 @@ def test_advanced_post_generation_gate_rejection_falls_back_to_current():
     assert stored.fallback_reason == "advanced_quality_gate_rejected"
 
 
+def test_repeated_style_gate_rejection_is_repaired_without_another_model_call():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.return_value = _decision(
+        "deepen",
+        "specific_follow_up",
+        "that's interesting babe, what part do you like most?",
+        None,
+    )
+    advanced = MagicMock()
+    advanced.decide.return_value = _advanced_outcome(
+        "history sounds fun babe, what part do you like most?"
+    )
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+        advanced_brain_service=advanced,
+        brain_settings_service=RuntimeSettings(_brain_settings()),
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    state = bot.brain_state_repo.get_or_create("creator-a", "fan-a")
+    bot.brain_state_repo.update(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        expected_version=state["state_version"],
+        changes={"question_streak": 2, "pet_name_streak": 2},
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="advanced-style-repair",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="history because it is my only summer course",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="Fan: history because it is my only summer course",
+        fan_message="history because it is my only summer course",
+        known_facts=[],
+    )
+
+    assert reply is not None
+    assert "?" not in reply.content
+    assert "babe" not in reply.content.casefold()
+    assert responder.decide.call_count == 1
+    stored = bot.conversation_decision_repo.get(
+        inbound.id,
+        creator_id="creator-a",
+    )
+    assert stored.fallback_used is True
+    assert stored.repair_calls == 1
+    assert stored.gate_results["deterministic_style_repair"] == "approved"
+
+
 def test_human_delivery_compiles_live_context_and_styles_approved_reply():
     responder = MagicMock()
     responder.enabled = True

@@ -175,6 +175,159 @@ def test_delivery_outcome_preserves_advanced_authority_attribution():
     assert outcome["experiment_id"] == "canary-v2"
 
 
+def test_brain_fallback_keeps_brain2_contact_ownership():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="brain-fallback-owner-inbound",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hey",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+    decision = ConversationDecision(
+        fan_state="engaged",
+        state_summary="engaged",
+        objective="maintain",
+        tactic="direct_answer",
+        open_thread=None,
+        draft="safe fallback reply",
+        critique=(),
+        final_message="safe fallback reply",
+        confidence=0.8,
+    )
+    bot.conversation_decision_repo.save(
+        inbound_message_id=inbound.id,
+        creator_id="creator-a",
+        fan_id="fan-a",
+        trigger_kind="unread",
+        decision=decision,
+        model="deepseek-v4-flash",
+        execution={
+            "authority": "current",
+            "brain_version": "current-v1",
+            "variant": "control",
+            "fallback_used": True,
+            "fallback_reason": "advanced_quality_gate_rejected",
+        },
+    )
+    TriggerOwnershipRepository(engine).assign(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.BRAIN2,
+        actor="test",
+        reason="brain fallback ownership test",
+    )
+    bot._prepare_message = MagicMock(
+        return_value=OutboundMessage.text("safe fallback reply")
+    )
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="brain-fallback-owner-outbound",
+    )
+
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+    assert bot._process_claimed_inbound(claimed) is True
+
+    outbox = _rows(engine, OUTBOX_MESSAGES)[0]
+    assert outbox["service_role"] == "brain2"
+    assert outbox["status"] == "sent"
+
+
+def test_stale_authority_fallback_returns_to_current_brain_ownership():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="stale-authority-owner-inbound",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hey",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+    decision = ConversationDecision(
+        fan_state="engaged",
+        state_summary="engaged",
+        objective="maintain",
+        tactic="direct_answer",
+        open_thread=None,
+        draft="safe current reply",
+        critique=(),
+        final_message="safe current reply",
+        confidence=0.8,
+    )
+    bot.conversation_decision_repo.save(
+        inbound_message_id=inbound.id,
+        creator_id="creator-a",
+        fan_id="fan-a",
+        trigger_kind="unread",
+        decision=decision,
+        model="deepseek-v4-flash",
+        execution={
+            "authority": "current",
+            "brain_version": "current-v1",
+            "variant": "control",
+            "fallback_used": True,
+            "fallback_reason": "stale_authority_after_generation",
+        },
+    )
+    TriggerOwnershipRepository(engine).assign(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.CURRENT_BRAIN,
+        actor="test",
+        reason="stale authority ownership test",
+    )
+    bot._prepare_message = MagicMock(
+        return_value=OutboundMessage.text("safe current reply")
+    )
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="stale-authority-owner-outbound",
+    )
+
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+    assert bot._process_claimed_inbound(claimed) is True
+
+    outbox = _rows(engine, OUTBOX_MESSAGES)[0]
+    assert outbox["service_role"] == "current_brain"
+    assert outbox["status"] == "sent"
+
+
+def test_missing_approved_conversation_reply_records_stable_failure_code():
+    engine, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        processing_retry_base_seconds=0,
+        processing_retry_max_seconds=0,
+    )
+    bot._prepare_message = MagicMock(return_value=None)
+    bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="no-approved-reply-inbound",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hey",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+    assert bot._process_claimed_inbound(claimed) is False
+
+    inbound = _rows(engine, INBOUND_MESSAGES)[0]
+    assert inbound["last_error"] == "conversation_generation_no_approved_reply"
+
+
 def test_pipeline_sorts_oldest_first_and_sends_every_message_once():
     engine, bot = _bot()
     chat = _chat(unread_count=3, last_message_id="message-3")
