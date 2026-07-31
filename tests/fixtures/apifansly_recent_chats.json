@@ -30,8 +30,8 @@
             }
           ]
         }
-      }
-    },
-    "nextCursor": "chat-cursor-sanitized-2"
+      },
+      "nextCursor": "chat-cursor-sanitized-2"
+    }
   }
 }

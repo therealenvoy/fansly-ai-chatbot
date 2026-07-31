@@ -66,6 +66,10 @@ class ResponseParser:
         if not isinstance(outer, dict):
             return None
         value = outer.get("nextCursor")
+        if value in (None, ""):
+            inner = outer.get("data", {})
+            if isinstance(inner, dict):
+                value = inner.get("nextCursor")
         return str(value) if value not in (None, "") else None
 
 

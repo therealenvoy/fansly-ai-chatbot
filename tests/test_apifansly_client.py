@@ -134,7 +134,7 @@ def test_get_profile_statistics_uses_documented_apifansly_contract():
     }
 
 
-def test_lists_cursor_paginated_chats_from_documented_shape():
+def test_lists_cursor_paginated_chats_from_live_nested_shape():
     client = _client()
     fixture = json.loads(
         (FIXTURES / "apifansly_recent_chats.json").read_text(
