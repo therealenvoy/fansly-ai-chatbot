@@ -30,12 +30,14 @@ def _jaccard(left: set, right: set) -> float:
 def structure_signature(text: object) -> str:
     value = str(text or "").strip()
     clauses = [part for part in re.split(r"[.!?\u2026]+", value) if part.strip()]
+    emoji_count = len(re.findall(r"[^\x00-\x7f]", value))
+    has_ellipsis = "..." in value or chr(0x2026) in value
     return "|".join(
         (
             f"clauses:{len(clauses)}",
             f"question:{int('?' in value)}",
-            f"ellipsis:{int('...' in value or chr(0x2026) in value)}",
-            f"emoji:{len(re.findall(r'[^\x00-\x7f]', value))}",
+            f"ellipsis:{int(has_ellipsis)}",
+            f"emoji:{emoji_count}",
             f"words:{min(len(_words(value)) // 5, 8)}",
         )
     )
