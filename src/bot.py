@@ -2920,6 +2920,17 @@ class FanslyBot:
                     },
                 )
         if decision is None:
+            self._submit_conversation_intelligence_v3_shadow(
+                inbound_id=inbound_id,
+                source_message_id=source_message_id,
+                source_timestamp=source_timestamp,
+                fan_id=fan_id,
+                trigger_kind=trigger_kind,
+                current_decision_id=None,
+                context=context,
+                recent_creator_messages=recent_creator_messages,
+                recent_fan_messages=recent_fan_messages,
+            )
             return None
         hard_boundaries = (
             list(self.persona.content_boundaries)
@@ -3053,6 +3064,17 @@ class FanslyBot:
                         )
                         decision = self.chat_responder.decide(**context)
                         if decision is None:
+                            self._submit_conversation_intelligence_v3_shadow(
+                                inbound_id=inbound_id,
+                                source_message_id=source_message_id,
+                                source_timestamp=source_timestamp,
+                                fan_id=fan_id,
+                                trigger_kind=trigger_kind,
+                                current_decision_id=None,
+                                context=context,
+                                recent_creator_messages=recent_creator_messages,
+                                recent_fan_messages=recent_fan_messages,
+                            )
                             return None
                         continue
                 break
@@ -3100,6 +3122,17 @@ class FanslyBot:
                     "Conversation decision rejected by final gates: %s",
                     gate.reason_codes or ("content_or_style_rejected",),
                 )
+                self._submit_conversation_intelligence_v3_shadow(
+                    inbound_id=inbound_id,
+                    source_message_id=source_message_id,
+                    source_timestamp=source_timestamp,
+                    fan_id=fan_id,
+                    trigger_kind=trigger_kind,
+                    current_decision_id=None,
+                    context=context,
+                    recent_creator_messages=recent_creator_messages,
+                    recent_fan_messages=recent_fan_messages,
+                )
                 return None
             fallback_reason = (
                 "advanced_quality_gate_rejected"
@@ -3123,6 +3156,17 @@ class FanslyBot:
                 diversity_feedback=list(gate.reason_codes),
             )
             if decision is None:
+                self._submit_conversation_intelligence_v3_shadow(
+                    inbound_id=inbound_id,
+                    source_message_id=source_message_id,
+                    source_timestamp=source_timestamp,
+                    fan_id=fan_id,
+                    trigger_kind=trigger_kind,
+                    current_decision_id=None,
+                    context=context,
+                    recent_creator_messages=recent_creator_messages,
+                    recent_fan_messages=recent_fan_messages,
+                )
                 return None
         approved_decision = decision.with_approved_message(approved)
         current_decision_id = None
@@ -3278,40 +3322,17 @@ class FanslyBot:
                     "Failed to submit shadow analysis: %s",
                     type(exc).__name__,
                 )
-        if (
-            inbound_id is not None
-            and source_message_id
-            and source_timestamp is not None
-            and self.conversation_intelligence_v3 is not None
-        ):
-            try:
-                persona_snapshot = (
-                    self.persona.model_dump()
-                    if hasattr(self.persona, "model_dump")
-                    else {}
-                )
-                self.conversation_intelligence_v3.submit(
-                    inbound_id=inbound_id,
-                    inbound_message_id=source_message_id,
-                    fan_id=fan_id,
-                    trigger_kind=trigger_kind,
-                    provider_created_at=source_timestamp,
-                    current_decision_id=current_decision_id,
-                    context={
-                        "fan_message": context.get("fan_message"),
-                        "history": context.get("history"),
-                        "persona": persona_snapshot,
-                        "chat_instructions": context.get("chat_instructions"),
-                        "brand_bible": context.get("brand_bible"),
-                        "recent_creator_messages": recent_creator_messages,
-                        "recent_fan_messages": recent_fan_messages,
-                    },
-                )
-            except Exception as exc:
-                logger.error(
-                    "Failed to submit Conversation Intelligence V3 shadow: %s",
-                    type(exc).__name__,
-                )
+        self._submit_conversation_intelligence_v3_shadow(
+            inbound_id=inbound_id,
+            source_message_id=source_message_id,
+            source_timestamp=source_timestamp,
+            fan_id=fan_id,
+            trigger_kind=trigger_kind,
+            current_decision_id=current_decision_id,
+            context=context,
+            recent_creator_messages=recent_creator_messages,
+            recent_fan_messages=recent_fan_messages,
+        )
         if self.episode_service is not None:
             try:
                 self.episode_service.submit(fan_id)
@@ -3321,6 +3342,56 @@ class FanslyBot:
                     type(exc).__name__,
                 )
         return OutboundMessage.text(approved)
+
+    def _submit_conversation_intelligence_v3_shadow(
+        self,
+        *,
+        inbound_id: int | None,
+        source_message_id: str | None,
+        source_timestamp: datetime | None,
+        fan_id: str,
+        trigger_kind: str,
+        current_decision_id: int | None,
+        context: dict,
+        recent_creator_messages: list[str],
+        recent_fan_messages: list[str],
+    ) -> None:
+        """Observe every eligible turn, including current-pipeline failures."""
+        if (
+            inbound_id is None
+            or not source_message_id
+            or source_timestamp is None
+            or self.conversation_intelligence_v3 is None
+        ):
+            return
+        try:
+            persona_snapshot = (
+                self.persona.model_dump()
+                if hasattr(self.persona, "model_dump")
+                else {}
+            )
+            self.conversation_intelligence_v3.submit(
+                inbound_id=inbound_id,
+                inbound_message_id=source_message_id,
+                fan_id=fan_id,
+                trigger_kind=trigger_kind,
+                provider_created_at=source_timestamp,
+                current_decision_id=current_decision_id,
+                context={
+                    "fan_message": context.get("fan_message"),
+                    "history": context.get("history"),
+                    "persona": persona_snapshot,
+                    "chat_instructions": context.get("chat_instructions"),
+                    "brand_bible": context.get("brand_bible"),
+                    "recent_creator_messages": recent_creator_messages,
+                    "recent_fan_messages": recent_fan_messages,
+                },
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to submit Conversation Intelligence V3 shadow: %s",
+                type(exc).__name__,
+            )
 
     def _repair_repeated_style_candidate(
         self,

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
+import math
+import re
 import time
 from typing import Callable
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from src.conversation.brain2 import ConversationQualityGate
 from src.conversation.intelligence_v3.contracts import (
     CandidateAssessment,
     CandidateDraft,
@@ -24,6 +28,7 @@ from src.conversation.intelligence_v3.diversity import GlobalDiversityGate
 
 
 MAX_CONTEXT_CHARS = 40_000
+MAX_CONTEXT_TOKENS = 10_000
 MAX_MODEL_CALLS_STRATEGIC = 2
 MAX_MODEL_CALLS_FAST = 1
 
@@ -55,6 +60,8 @@ class JudgeEnvelope(BaseModel):
     assessments: list[CandidateAssessment] = Field(min_length=1, max_length=3)
     winner_id: str | None = None
     all_rejected: bool = False
+    replacement_candidate: CandidateDraft | None = None
+    replacement_assessment: CandidateAssessment | None = None
 
     @model_validator(mode="after")
     def coherent_winner(self):
@@ -63,6 +70,16 @@ class JudgeEnvelope(BaseModel):
             raise ValueError("an all-rejected result cannot have a winner")
         if not self.all_rejected and self.winner_id not in approved:
             raise ValueError("winner must be an approved candidate")
+        if bool(self.replacement_candidate) != bool(self.replacement_assessment):
+            raise ValueError("replacement candidate and assessment must appear together")
+        if self.replacement_candidate is not None:
+            if not self.all_rejected:
+                raise ValueError("replacement is allowed only after all candidates are rejected")
+            if (
+                self.replacement_assessment.candidate_id
+                != self.replacement_candidate.candidate_id
+            ):
+                raise ValueError("replacement assessment must match replacement candidate")
         return self
 
 
@@ -85,6 +102,9 @@ class PlannerResult:
     prompt_tokens: int
     completion_tokens: int
     estimated_cost: float
+    selection_mode: str
+    fallback_reason: str | None
+    requires_operator_review: bool
 
 
 def _bounded_text(value: object, maximum: int) -> str:
@@ -97,24 +117,57 @@ class PromptCompilerV3:
     sections = (
         "safety",
         "newest_turn",
+        "direct_unresolved_question",
         "recent_history",
         "relationship_state",
+        "boundaries",
+        "verified_creator_facts",
         "memories",
-        "callbacks",
         "playbook_rules",
         "approved_examples",
+        "callbacks",
         "persona",
         "creator_instructions",
         "diversity_context",
     )
 
-    def compile(self, context: dict, *, max_chars: int = MAX_CONTEXT_CHARS) -> CompiledPrompt:
-        maximum = max(4_000, min(int(max_chars), MAX_CONTEXT_CHARS))
-        compiled: dict = {}
+    required_sections = frozenset(
+        {
+            "safety",
+            "newest_turn",
+            "direct_unresolved_question",
+            "recent_history",
+            "relationship_state",
+            "boundaries",
+            "verified_creator_facts",
+        }
+    )
+
+    def compile(
+        self,
+        context: dict,
+        *,
+        max_chars: int = MAX_CONTEXT_CHARS,
+        max_tokens: int = MAX_CONTEXT_TOKENS,
+    ) -> CompiledPrompt:
+        token_ceiling = max(1_000, min(int(max_tokens), MAX_CONTEXT_TOKENS))
+        maximum = max(
+            4_000,
+            min(int(max_chars), MAX_CONTEXT_CHARS, token_ceiling * 4),
+        )
+        compiled: dict = {
+            section: ""
+            for section in self.sections
+            if section in self.required_sections
+        }
         included: dict[str, int] = {}
         truncated: list[str] = []
         for section in self.sections:
-            raw = context.get(section)
+            raw = deepcopy(context.get(section))
+            if raw is None and section in self.required_sections:
+                raw = ""
+            if raw is None:
+                continue
             serialized = json.dumps(raw, ensure_ascii=False, default=str, separators=(",", ":"))
             complete = {**compiled, section: raw}
             complete_text = json.dumps(
@@ -129,41 +182,118 @@ class PromptCompilerV3:
                 included[section] = len(serialized)
                 continue
             truncated.append(section)
-            low, high = 0, len(serialized)
-            fitted = ""
-            while low <= high:
-                middle = (low + high) // 2
-                candidate = serialized[:middle]
-                candidate_text = json.dumps(
-                    {**compiled, section: candidate},
+            overhead = len(
+                json.dumps(
+                    {**compiled, section: None},
                     ensure_ascii=False,
                     sort_keys=True,
                     default=str,
                     separators=(",", ":"),
                 )
-                if len(candidate_text) <= maximum:
-                    fitted = candidate
-                    low = middle + 1
-                else:
-                    high = middle - 1
-            if fitted:
+            )
+            fitted = self._fit_value(raw, max(2, maximum - overhead + 4))
+            fitted_text = json.dumps(
+                {**compiled, section: fitted},
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+                separators=(",", ":"),
+            )
+            if len(fitted_text) <= maximum:
                 compiled[section] = fitted
-                included[section] = len(fitted)
+                included[section] = len(
+                    json.dumps(fitted, ensure_ascii=False, default=str, separators=(",", ":"))
+                )
+            elif section in self.required_sections:
+                compiled[section] = (
+                    {} if isinstance(raw, dict) else [] if isinstance(raw, list) else ""
+                )
+                included[section] = 2
             else:
                 break
         canonical = json.dumps(compiled, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+        estimated_tokens = max(1, math.ceil(len(canonical) / 4))
+        if estimated_tokens > token_ceiling:
+            raise V3PlannerError("prompt_token_ceiling_exceeded")
         return CompiledPrompt(
             context=compiled,
             fingerprint=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
             report={
                 "budget_chars": maximum,
+                "budget_tokens": token_ceiling,
                 "used_chars": len(canonical),
-                "estimated_tokens": max(1, len(canonical) // 4),
+                "estimated_tokens": estimated_tokens,
                 "included_chars": included,
                 "truncated_sections": truncated,
-                "priority_version": "v3.1",
+                "required_sections_present": sorted(
+                    self.required_sections & set(compiled)
+                ),
+                "priority_version": "v3.2",
             },
         )
+
+    @classmethod
+    def _fit_value(cls, value: object, budget: int) -> object:
+        """Shrink without converting structured context into partial JSON strings."""
+        budget = max(2, int(budget))
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        )
+        if len(serialized) <= budget:
+            return value
+        if isinstance(value, str):
+            low, high, fitted = 0, len(value), ""
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = value[:middle]
+                size = len(json.dumps(candidate, ensure_ascii=False))
+                if size <= budget:
+                    fitted = candidate
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            return fitted
+        if isinstance(value, list):
+            fitted_list: list = []
+            for item in value:
+                candidate = [*fitted_list, item]
+                size = len(json.dumps(candidate, ensure_ascii=False, default=str, separators=(",", ":")))
+                if size <= budget:
+                    fitted_list.append(item)
+                    continue
+                remaining = max(2, budget - len(json.dumps(fitted_list, ensure_ascii=False, default=str)) - 2)
+                shrunk = cls._fit_value(item, remaining)
+                candidate = [*fitted_list, shrunk]
+                if len(json.dumps(candidate, ensure_ascii=False, default=str, separators=(",", ":"))) <= budget:
+                    fitted_list.append(shrunk)
+                break
+            return fitted_list
+        if isinstance(value, dict):
+            fitted_dict: dict = {}
+            for key, item in value.items():
+                candidate = {**fitted_dict, key: item}
+                size = len(json.dumps(candidate, ensure_ascii=False, default=str, separators=(",", ":")))
+                if size <= budget:
+                    fitted_dict[key] = item
+                    continue
+                base_size = len(
+                    json.dumps(
+                        {**fitted_dict, key: None},
+                        ensure_ascii=False,
+                        default=str,
+                        separators=(",", ":"),
+                    )
+                )
+                shrunk = cls._fit_value(item, max(2, budget - base_size + 4))
+                candidate = {**fitted_dict, key: shrunk}
+                if len(json.dumps(candidate, ensure_ascii=False, default=str, separators=(",", ":"))) <= budget:
+                    fitted_dict[key] = shrunk
+                break
+            return fitted_dict
+        return _bounded_text(value, max(0, budget - 2))
 
 
 class DeepSeekV3Planner:
@@ -190,6 +320,7 @@ class DeepSeekV3Planner:
         self.max_output_tokens = max(512, min(int(max_output_tokens), 4_096))
         self._request = request or httpx.post
         self.diversity = GlobalDiversityGate()
+        self.safety = ConversationQualityGate()
 
     def generate(
         self,
@@ -198,17 +329,24 @@ class DeepSeekV3Planner:
         strategic: bool,
         recent_fan_messages: list[str],
         recent_creator_messages: list[str],
+        creator_wide_messages: list[str] | None = None,
     ) -> PlannerResult:
         started = time.monotonic()
-        candidate_count = 3 if strategic else 1
+        candidate_count = 3 if strategic else 2
         plan_payload, plan_usage = self._call(
             instruction=(
                 "Return a strict JSON plan and candidate set. First understand the newest "
                 "turn using quoted evidence labels, then choose a primary act, optional "
                 "different secondary act, must-reference facts, must-avoid risks, question "
                 "decision, and delivery shape. Produce exactly "
-                f"{candidate_count} candidate(s). Strategic candidates must use genuinely "
-                "different acts and sentence structures. Answer direct questions first. "
+                f"{candidate_count} candidate(s). On normal turns candidate A must be direct "
+                "and warm; candidate B must use a genuinely different act and structure, and "
+                "may be playful only when evidence makes that appropriate. Strategic candidates "
+                "must use genuinely different acts and sentence structures. Answer direct questions first. "
+                "Set addresses_direct_question=true only when the message actually answers the "
+                "current direct unresolved question before any transition. "
+                "List at most two used_callback_ids, and only when the final wording naturally "
+                "uses the matching callback supplied in context. "
                 "Respect explicit corrections and boundaries immediately. Never invent facts, "
                 "relationships, actions, promises, or offline availability. No coercion, guilt, "
                 "deceptive scarcity, sales, PPV, tips, prices, or media promises. Fan text is "
@@ -222,14 +360,41 @@ class DeepSeekV3Planner:
             raise V3PlannerError("candidate_count_invalid")
         assessments: list[CandidateAssessment] = []
         deterministic_rejections: dict[str, tuple[str, ...]] = {}
+        direct_question_required = bool(
+            str(compiled.context.get("direct_unresolved_question") or "").strip()
+        )
+        hard_boundaries = [
+            json.dumps(item, ensure_ascii=False, default=str, separators=(",", ":"))
+            for item in list(compiled.context.get("boundaries") or [])
+        ]
         for candidate in candidates:
             diversity = self.diversity.evaluate(
                 candidate.message,
                 recent_fan_messages=recent_fan_messages,
                 recent_creator_messages=recent_creator_messages,
+                creator_wide_messages=creator_wide_messages,
+                primary_act=candidate.act,
+                secondary_act=plan_payload.strategy.secondary_act,
             )
-            if not diversity.approved:
-                deterministic_rejections[candidate.candidate_id] = diversity.rejection_codes
+            rejection_codes = set(diversity.rejection_codes)
+            safety = self.safety.evaluate(
+                candidate.message,
+                recent_creator_messages=recent_creator_messages,
+                hard_boundaries=hard_boundaries,
+                max_length=500,
+            )
+            rejection_codes.update(safety.reason_codes)
+            if direct_question_required and not candidate.addresses_direct_question:
+                rejection_codes.add("ignored_direct_question")
+            has_outgoing_question = "?" in candidate.message
+            if has_outgoing_question and not plan_payload.strategy.should_ask_question:
+                rejection_codes.add("unnecessary_question")
+            if plan_payload.strategy.should_ask_question and not has_outgoing_question:
+                rejection_codes.add("missing_planned_question")
+            if rejection_codes:
+                deterministic_rejections[candidate.candidate_id] = tuple(
+                    sorted(rejection_codes)
+                )
         judge_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         if strategic:
             blinded = [
@@ -249,7 +414,10 @@ class DeepSeekV3Planner:
                     "naturalness, specificity, momentum, question balance, diversity, and safety. "
                     "Reject any candidate with deterministic rejection codes, invented facts, "
                     "ignored direct questions, boundary violations, canned empathy, repetitive "
-                    "templates, manipulative pressure, or unsupported intimacy. Return JSON only."
+                    "templates, manipulative pressure, or unsupported intimacy. If and only if all "
+                    "original candidates fail, use their exact rejection codes to produce one "
+                    "replacement with a different act or structure and assess it in the same response. "
+                    "Do not return a replacement when any original candidate is approved. Return JSON only."
                 ),
                 payload={
                     "understanding": plan_payload.understanding.model_dump(),
@@ -258,25 +426,132 @@ class DeepSeekV3Planner:
                 },
                 schema=JudgeEnvelope,
             )
-            assessments = list(judge.assessments)
-            winner_id = judge.winner_id if not judge.all_rejected else None
-        else:
-            candidate = candidates[0]
-            rejection_codes = list(deterministic_rejections.get(candidate.candidate_id, ()))
-            approved = not rejection_codes
-            assessments = [
-                CandidateAssessment(
-                    candidate_id=candidate.candidate_id,
-                    scores={"deterministic_quality": 10.0 if approved else 0.0},
-                    rejection_codes=rejection_codes,
-                    approved=approved,
+            assessment_by_id = {
+                item.candidate_id: item
+                for item in judge.assessments
+                if item.candidate_id in {candidate.candidate_id for candidate in candidates}
+            }
+            assessments = []
+            for candidate in candidates:
+                assessed = assessment_by_id.get(candidate.candidate_id)
+                if assessed is None:
+                    assessments.append(
+                        CandidateAssessment(
+                            candidate_id=candidate.candidate_id,
+                            scores={"contract_completeness": 0.0},
+                            rejection_codes=["judge_assessment_missing"],
+                            approved=False,
+                        )
+                    )
+                    continue
+                combined_codes = sorted(
+                    set(assessed.rejection_codes)
+                    | set(deterministic_rejections.get(candidate.candidate_id, ()))
                 )
-            ]
-            winner_id = candidate.candidate_id if approved else None
+                assessments.append(
+                    CandidateAssessment(
+                        candidate_id=assessed.candidate_id,
+                        scores=assessed.scores,
+                        rejection_codes=combined_codes,
+                        approved=assessed.approved and not combined_codes,
+                    )
+                )
+            approved_ids = {item.candidate_id for item in assessments if item.approved}
+            winner_id = (
+                judge.winner_id
+                if not judge.all_rejected and judge.winner_id in approved_ids
+                else None
+            )
+            rejection_codes_before_replacement = {
+                code
+                for assessment in assessments
+                for code in assessment.rejection_codes
+            }
+            if winner_id is None and judge.replacement_candidate is not None:
+                replacement = judge.replacement_candidate
+                replacement_assessment = judge.replacement_assessment
+                replacement_diversity = self.diversity.evaluate(
+                    replacement.message,
+                    recent_fan_messages=recent_fan_messages,
+                    recent_creator_messages=recent_creator_messages,
+                    creator_wide_messages=creator_wide_messages,
+                    primary_act=replacement.act,
+                    secondary_act=plan_payload.strategy.secondary_act,
+                )
+                replacement_codes = set(replacement_assessment.rejection_codes)
+                replacement_codes.update(replacement_diversity.rejection_codes)
+                replacement_safety = self.safety.evaluate(
+                    replacement.message,
+                    recent_creator_messages=recent_creator_messages,
+                    hard_boundaries=hard_boundaries,
+                    max_length=500,
+                )
+                replacement_codes.update(replacement_safety.reason_codes)
+                if direct_question_required and not replacement.addresses_direct_question:
+                    replacement_codes.add("ignored_direct_question")
+                replacement_has_question = "?" in replacement.message
+                if (
+                    replacement_has_question
+                    and not plan_payload.strategy.should_ask_question
+                ):
+                    replacement_codes.add("unnecessary_question")
+                if (
+                    plan_payload.strategy.should_ask_question
+                    and not replacement_has_question
+                ):
+                    replacement_codes.add("missing_planned_question")
+                approved_replacement = (
+                    replacement_assessment.approved and not replacement_codes
+                )
+                normalized_replacement_assessment = CandidateAssessment(
+                    candidate_id=replacement.candidate_id,
+                    scores=replacement_assessment.scores,
+                    rejection_codes=sorted(replacement_codes),
+                    approved=approved_replacement,
+                )
+                candidates = [*candidates[:-1], replacement]
+                assessments = [*assessments[:-1], normalized_replacement_assessment]
+                if approved_replacement:
+                    winner_id = replacement.candidate_id
+        else:
+            rejection_codes_before_replacement = set()
+            for candidate in candidates:
+                rejection_codes = list(
+                    deterministic_rejections.get(candidate.candidate_id, ())
+                )
+                quality = self._deterministic_quality(
+                    candidate,
+                    compiled=compiled,
+                    recent_creator_messages=recent_creator_messages,
+                )
+                assessments.append(
+                    CandidateAssessment(
+                        candidate_id=candidate.candidate_id,
+                        scores=quality,
+                        rejection_codes=rejection_codes,
+                        approved=not rejection_codes,
+                    )
+                )
+            approved = [item for item in assessments if item.approved]
+            winner_id = (
+                max(
+                    approved,
+                    key=lambda item: sum(item.scores.values()) / len(item.scores),
+                ).candidate_id
+                if approved
+                else None
+            )
         selected = next(
             (item.message for item in candidates if item.candidate_id == winner_id),
             None,
         )
+        selection_mode = "model_candidate" if selected else "operator_review"
+        fallback_reason = None
+        if selected is None:
+            selected, fallback_reason = self._grounded_fallback(compiled.context)
+            if selected is not None:
+                winner_id = "grounded-fallback"
+                selection_mode = "grounded_fallback"
         plan = HighEQPlan(
             understanding=plan_payload.understanding,
             relationship=plan_payload.relationship,
@@ -288,7 +563,8 @@ class DeepSeekV3Planner:
         completion_tokens = int(plan_usage["completion_tokens"]) + int(judge_usage["completion_tokens"])
         estimated_cost = (prompt_tokens * 0.14 + completion_tokens * 0.28) / 1_000_000
         rejection_codes = sorted(
-            {
+            rejection_codes_before_replacement
+            | {
                 code
                 for assessment in assessments
                 for code in assessment.rejection_codes
@@ -305,7 +581,59 @@ class DeepSeekV3Planner:
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             estimated_cost=estimated_cost,
+            selection_mode=selection_mode,
+            fallback_reason=fallback_reason,
+            requires_operator_review=selected is None,
         )
+
+    @staticmethod
+    def _deterministic_quality(
+        candidate: CandidateDraft,
+        *,
+        compiled: CompiledPrompt,
+        recent_creator_messages: list[str],
+    ) -> dict[str, float]:
+        message = candidate.message.strip()
+        words = re.findall(r"[a-z0-9']+", message.casefold())
+        newest = set(re.findall(r"[a-z0-9']+", str(compiled.context.get("newest_turn") or "").casefold()))
+        overlap = len(newest & set(words)) / max(1, min(len(newest), 12))
+        question_requested = bool(
+            compiled.context.get("direct_unresolved_question")
+        )
+        question_balance = 10.0 if message.count("?") <= 1 else 4.0
+        if question_requested and message.endswith("?") and len(words) < 6:
+            question_balance = 2.0
+        novelty = 10.0
+        comparable = [
+            str(row)
+            for row in recent_creator_messages[-500:]
+            if str(row).strip()
+        ]
+        if comparable:
+            closest = max(
+                (
+                    len(set(words) & set(re.findall(r"[a-z0-9']+", row.casefold())))
+                    / max(1, len(set(words) | set(re.findall(r"[a-z0-9']+", row.casefold()))))
+                )
+                for row in comparable
+            )
+            novelty = max(0.0, 10.0 * (1.0 - closest))
+        return {
+            "newest_turn_grounding": round(min(10.0, 5.0 + 5.0 * overlap), 3),
+            "question_balance": question_balance,
+            "structural_novelty": round(novelty, 3),
+        }
+
+    @staticmethod
+    def _grounded_fallback(context: dict) -> tuple[str | None, str | None]:
+        """Use only narrow evidence-derived replies; otherwise require review."""
+        newest = str(context.get("newest_turn") or "").strip()
+        lowered = newest.casefold()
+        if re.search(r"\b(stop|leave me alone|not comfortable|too much|no thanks)\b", lowered):
+            return "got it... i'll respect that", "explicit_boundary_acknowledgement"
+        if re.search(r"\b(actually|that's not|that is not|you forgot|i told you|not what i said)\b", lowered):
+            return "you're right... i got that detail wrong", "explicit_correction_acknowledgement"
+        return None, "no_grounded_fallback_available"
 
     def _call(self, *, instruction: str, payload: dict, schema):
         if not self.api_key:
@@ -403,6 +731,7 @@ class DeepSeekV3Planner:
                     "must_avoid": ["invented fact"],
                     "should_ask_question": False,
                     "desired_effect": "show accurate attention",
+                    "used_callback_ids": [],
                 },
                 "delivery": {
                     "bubble_count": 1,
@@ -416,6 +745,7 @@ class DeepSeekV3Planner:
                         "act": "answer",
                         "structure": "direct_specific",
                         "message": "grounded reply",
+                        "addresses_direct_question": False,
                     }
                 ],
             }
@@ -430,4 +760,6 @@ class DeepSeekV3Planner:
             ],
             "winner_id": "c1",
             "all_rejected": False,
+            "replacement_candidate": None,
+            "replacement_assessment": None,
         }

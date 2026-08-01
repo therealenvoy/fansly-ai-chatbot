@@ -60,7 +60,11 @@ class ConversationIntelligenceV3Service:
         self.memory = MemoryRetrieverV3(engine, creator_id=creator_id)
         self.reducer = RelationshipStateReducer()
         self.compiler = PromptCompilerV3()
-        self.router = BrainRouter(0.55)
+        # V3 escalates explicit risk/ambiguity signals at score 2 while routine
+        # turns remain on the one-call path. Use an integer threshold so the
+        # routing contract stays auditable and independent of probability-like
+        # configuration from older experiments.
+        self.router = BrainRouter(2)
         self._executor = ThreadPoolExecutor(
             max_workers=max(1, min(int(max_workers), 2)),
             thread_name_prefix="conversation-intelligence-v3",
@@ -121,7 +125,12 @@ class ConversationIntelligenceV3Service:
         prompt_fingerprint = hashlib.sha256(f"pending:{inbound_id}".encode()).hexdigest()
         compilation_report: dict = {}
         try:
-            prior = self.states.get_or_create(self.creator_id, fan_id)
+            durable_prior = self.states.get_or_create(self.creator_id, fan_id)
+            prior = (
+                self.intelligence.shadow_state(fan_id=fan_id, base=durable_prior)
+                if self.settings.relationship_state_v2_mode == "shadow"
+                else durable_prior
+            )
             proposal = infer_deterministic_proposal(
                 message=str(context.get("fan_message") or ""),
                 source_message_id=inbound_message_id,
@@ -189,16 +198,23 @@ class ConversationIntelligenceV3Service:
                     now=provider_created_at,
                 )
                 if self.settings.memory_retrieval_v3_mode == "shadow"
-                else {"memories": [], "callbacks": []}
+                else {"memories": [], "callbacks": [], "conflicts_excluded": 0}
             )
             playbook = (
                 self.knowledge.retrieve(
                     query=str(context.get("fan_message") or ""),
                     relationship_stage=str(state.get("relationship_stage") or "new"),
+                    scenario=str(proposal.current_intent or ""),
                 )
                 if self.settings.playbook_engine_mode == "shadow"
-                else {"rules": [], "examples": [], "fingerprint": "off"}
+                else {
+                    "rules": [],
+                    "boundaries": [],
+                    "examples": [],
+                    "fingerprint": "off",
+                }
             )
+            creator_facts = self.intelligence.verified_creator_facts()
             global_creator_messages = self.message_store.get_recent_creator_messages(
                 self.creator_id,
                 limit=500,
@@ -214,10 +230,25 @@ class ConversationIntelligenceV3Service:
                         "respect_boundaries": True,
                     },
                     "newest_turn": str(context.get("fan_message") or "")[:4_000],
+                    "direct_unresolved_question": (
+                        proposal.direct_question
+                        or state.get("direct_unanswered_question")
+                        or ""
+                    ),
                     "recent_history": str(context.get("history") or "")[-8_000:],
                     "relationship_state": state,
+                    "boundaries": [
+                        {
+                            "id": row["id"],
+                            "scenario": row["scenario"],
+                            "conditions": row["conditions"],
+                            "forbidden_acts": row["forbidden_acts"],
+                            "source_page": row["source_page"],
+                        }
+                        for row in playbook.get("boundaries", [])
+                    ],
+                    "verified_creator_facts": creator_facts,
                     "memories": memory["memories"],
-                    "callbacks": memory["callbacks"],
                     "playbook_rules": [
                         {
                             "id": row["id"],
@@ -239,6 +270,7 @@ class ConversationIntelligenceV3Service:
                         }
                         for row in playbook["examples"]
                     ],
+                    "callbacks": memory["callbacks"],
                     "persona": context.get("persona") or {},
                     "creator_instructions": {
                         "chat": str(context.get("chat_instructions") or "")[:20_000],
@@ -252,26 +284,47 @@ class ConversationIntelligenceV3Service:
             )
             prompt_fingerprint = compiled.fingerprint
             compilation_report = compiled.report
+            has_memory_conflict = int(memory.get("conflicts_excluded") or 0) > 0
+            context_confidence = 0.8
+            if not reduction.accepted or has_memory_conflict:
+                context_confidence = 0.4
+            elif float(proposal.uncertainty or 0.0) >= 0.75:
+                context_confidence = 0.5
             route = self.router.route(
                 fan_message=str(context.get("fan_message") or ""),
                 trigger_kind=trigger_kind,
                 history=str(context.get("history") or ""),
-                has_memory_conflict=False,
+                has_memory_conflict=has_memory_conflict,
                 failed_tactic_count=len(state.get("recent_failed_acts") or []),
-                context_confidence=0.8,
+                context_confidence=context_confidence,
             )
             result = self.planner.generate(
                 compiled,
                 strategic=route.path == "strategic",
                 recent_fan_messages=recent_fan_messages,
-                recent_creator_messages=(
+                recent_creator_messages=recent_creator_messages,
+                creator_wide_messages=(
                     global_creator_messages
                     if self.settings.global_diversity_mode == "shadow"
-                    else recent_creator_messages
+                    else []
                 ),
             )
+            # A shadow draft is evidence, not a delivered callback. Callback
+            # cooldowns may only advance after a future authorized send is
+            # confirmed, so shadow evaluation cannot influence live behavior.
             candidate_fingerprints = [
-                hashlib.sha256(item.message.encode("utf-8")).hexdigest()
+                self.planner.diversity.evaluate(
+                    item.message,
+                    recent_fan_messages=recent_fan_messages,
+                    recent_creator_messages=recent_creator_messages,
+                    creator_wide_messages=(
+                        global_creator_messages
+                        if self.settings.global_diversity_mode == "shadow"
+                        else []
+                    ),
+                    primary_act=item.act,
+                    secondary_act=result.plan.strategy.secondary_act,
+                ).fingerprint
                 for item in result.plan.candidates
             ]
             selected_fingerprint = (
@@ -284,7 +337,13 @@ class ConversationIntelligenceV3Service:
                     "fan_id": fan_id,
                     "inbound_message_id": inbound_id,
                     "current_decision_id": current_decision_id,
-                    "status": "complete" if result.selected_message else "no_approved_reply",
+                    "status": (
+                        "complete"
+                        if result.selection_mode == "model_candidate"
+                        else "grounded_fallback"
+                        if result.selection_mode == "grounded_fallback"
+                        else "operator_review_required"
+                    ),
                     "shadow": True,
                     "versions": {
                         "pipeline": "conversation-intelligence-v3.1",
@@ -306,6 +365,16 @@ class ConversationIntelligenceV3Service:
                         "primary_act": result.plan.strategy.primary_act,
                         "secondary_act": result.plan.strategy.secondary_act,
                         "should_ask_question": result.plan.strategy.should_ask_question,
+                        "execution_path": route.path,
+                        "routing_reasons": list(route.reasons),
+                        "routing_risk_flags": list(route.risk_flags),
+                        "memory_conflicts_excluded": int(
+                            memory.get("conflicts_excluded") or 0
+                        ),
+                        "context_confidence": context_confidence,
+                        "selection_mode": result.selection_mode,
+                        "fallback_reason": result.fallback_reason,
+                        "requires_operator_review": result.requires_operator_review,
                     },
                     "delivery": result.plan.delivery.model_dump(),
                     "candidate_fingerprints": candidate_fingerprints,
