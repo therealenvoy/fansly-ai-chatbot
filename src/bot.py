@@ -2764,6 +2764,8 @@ class FanslyBot:
                 ]
             except Exception:
                 logger.exception("Failed to load delivery style context")
+        context["recent_creator_messages"] = recent_creator_messages
+        context["recent_fan_messages"] = recent_fan_messages
         human_context_applied = False
         if self.human_delivery is not None:
             try:
@@ -2880,10 +2882,7 @@ class FanslyBot:
                 fallback_reason="advanced_service_unavailable",
             )
         if decision is None:
-            decision = self.chat_responder.decide(
-                **context,
-                recent_creator_messages=recent_creator_messages,
-            )
+            decision = self.chat_responder.decide(**context)
         if decision is None:
             fallback = self._safe_conversation_fallback(
                 trigger_kind=trigger_kind,
@@ -3045,10 +3044,7 @@ class FanslyBot:
                                 ],
                             },
                         )
-                        decision = self.chat_responder.decide(
-                            **context,
-                            recent_creator_messages=recent_creator_messages,
-                        )
+                        decision = self.chat_responder.decide(**context)
                         if decision is None:
                             return None
                         continue
@@ -3061,7 +3057,6 @@ class FanslyBot:
                     diversity_regeneration_attempted = True
                     regenerated = self.chat_responder.decide(
                         **context,
-                        recent_creator_messages=recent_creator_messages,
                         diversity_feedback=list(gate.reason_codes),
                     )
                     execution["repair_calls"] = (
@@ -3118,7 +3113,6 @@ class FanslyBot:
             )
             decision = self.chat_responder.decide(
                 **context,
-                recent_creator_messages=recent_creator_messages,
                 diversity_feedback=list(gate.reason_codes),
             )
             if decision is None:

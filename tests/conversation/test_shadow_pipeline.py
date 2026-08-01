@@ -55,6 +55,29 @@ def test_strategic_analyzer_uses_40k_instruction_context():
     assert len(safe["chat_instructions"]) == MAX_INSTRUCTION_CONTEXT_CHARS
 
 
+def test_safe_context_exposes_recent_turns_and_continuity_contract():
+    safe = DeepSeekStrategicAnalyzer._safe_context(
+        {
+            "fan_message": "his name was buddy",
+            "recent_creator_messages": [
+                "i still miss my dog sometimes",
+                "how is your leg healing?",
+            ],
+            "recent_fan_messages": [
+                "what was his name?",
+                "my leg is getting better",
+            ],
+        }
+    )
+
+    packet = safe["turn_understanding"]
+    assert packet["newest_fan_turn"] == "his name was buddy"
+    assert packet["recent_creator_messages"][-1] == "how is your leg healing?"
+    assert packet["recent_fan_messages"][-1] == "my leg is getting better"
+    assert "answer_or_acknowledge_newest_turn_first" in packet["response_contract"]
+    assert "do_not_invent_creator_or_fan_facts" in packet["response_contract"]
+
+
 def _setup():
     engine = create_database_engine(
         "sqlite:///:memory:",
@@ -274,10 +297,15 @@ def test_fast_analyzer_serializes_durable_datetime_state(monkeypatch):
                     "content": "```json\n"
                     + json.dumps(
                         {
-                            "fan_state": "engaged",
+                            "fan_emotion": "curious",
+                            "fan_intent": "continue chatting",
                             "objective": "maintain",
                             "tactic": "direct_answer",
-                            "open_thread": None,
+                            "active_thread": "school",
+                            "evidence_labels": ["newest_fan_turn"],
+                            "must_reference": ["school"],
+                            "must_avoid": ["topic pivot"],
+                            "reply_act": "answer_then_deepen",
                             "confidence": 0.8,
                             "message": "hey, how are you?",
                         }
@@ -331,10 +359,15 @@ def _provider_response(content, *, finish_reason="stop", usage=None):
 
 def _fast_payload(**changes):
     payload = {
-        "fan_state": "engaged",
+        "fan_emotion": "curious",
+        "fan_intent": "continue chatting",
         "objective": "maintain",
         "tactic": "direct_answer",
-        "open_thread": None,
+        "active_thread": "school",
+        "evidence_labels": ["newest_fan_turn"],
+        "must_reference": ["school"],
+        "must_avoid": ["topic pivot"],
+        "reply_act": "answer_then_deepen",
         "confidence": 0.8,
         "message": "hey, how are you?",
     }
@@ -353,8 +386,29 @@ def test_fast_contract_uses_json_mode_and_exact_schema_example(monkeypatch):
 
     request = post.call_args.kwargs["json"]
     assert request["response_format"] == {"type": "json_object"}
-    assert '"fan_state"' in request["messages"][0]["content"]
+    assert '"fan_emotion"' in request["messages"][0]["content"]
+    assert '"must_reference"' in request["messages"][0]["content"]
     assert '"message"' in request["messages"][0]["content"]
+
+
+def test_fast_prompt_requires_grounded_continuity_before_drafting(monkeypatch):
+    post = MagicMock(return_value=_provider_response(_fast_payload()))
+    monkeypatch.setattr(httpx, "post", post)
+
+    DeepSeekStrategicAnalyzer(
+        api_key="secret",
+        model="deepseek-v4-flash",
+    ).analyze_fast(
+        {
+            "fan_message": "history is my only summer course",
+            "recent_creator_messages": ["what class are you taking?"],
+        }
+    )
+
+    system_prompt = post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert "Address the newest fan turn before any topic change" in system_prompt
+    assert "Do not invent any personal fact" in system_prompt
+    assert "Do not reuse a recent conversational move" in system_prompt
 
 
 def test_fast_contract_classifies_empty_output_and_retries_once(monkeypatch):

@@ -204,6 +204,61 @@ def test_advanced_authority_uses_advanced_decision_and_skips_current_generator()
     assert stored.authority == "advanced"
 
 
+def test_advanced_brain_receives_recent_creator_and_fan_turns():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    advanced = MagicMock()
+    advanced.decide.return_value = _advanced_outcome("grounded reply")
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+        advanced_brain_service=advanced,
+        brain_settings_service=RuntimeSettings(_brain_settings()),
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    bot.message_store.save_message(
+        "fan-a",
+        "creator-a",
+        "creator",
+        "what class are you taking?",
+        "creator-history-1",
+    )
+    bot.message_store.save_message(
+        "fan-a",
+        "creator-a",
+        "fan",
+        "history is my only summer course",
+        "fan-history-1",
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="advanced-context-1",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="history is my only summer course",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="Creator: what class are you taking?\nFan: history",
+        fan_message="history is my only summer course",
+        known_facts=[],
+    )
+
+    advanced_context = advanced.decide.call_args.kwargs["context"]
+    assert advanced_context["recent_creator_messages"] == [
+        "what class are you taking?"
+    ]
+    assert advanced_context["recent_fan_messages"] == [
+        "history is my only summer course"
+    ]
+
+
 def test_rollback_after_generation_falls_back_before_advanced_decision_is_saved():
     responder = MagicMock()
     responder.enabled = True

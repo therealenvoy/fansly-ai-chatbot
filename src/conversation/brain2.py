@@ -125,6 +125,14 @@ class BrainRouter:
         r"\b(stop|don't|do not|uncomfortable|boundary|leave me alone)\b",
         re.IGNORECASE,
     )
+    _HIGH_EQ_DISCLOSURE = re.compile(
+        r"(?:\b(?:grief|grieving|died|death|passed away|lost (?:him|her|them)|"
+        r"miss (?:him|her|them)|lonely|nobody.{0,20}understands|hospital|surgery|"
+        r"healing|injur(?:y|ed)|in pain|hurts?|sick|ill|worried|afraid)\b|"
+        r"\b(?:my|our)\s+(?:dog|cat|pet|friend|parent|mother|father|mom|dad)\b.{0,48}"
+        r"\b(?:gone|died|passed|miss))",
+        re.IGNORECASE,
+    )
 
     def __init__(self, threshold: int = 3):
         self.threshold = threshold
@@ -154,6 +162,10 @@ class BrainRouter:
             reasons.append("boundary_sensitive")
             risks.append("boundary")
             score += 5
+        if self._HIGH_EQ_DISCLOSURE.search(text):
+            reasons.append("high_eq_disclosure")
+            risks.append("emotional_continuity")
+            score += 4
         if has_memory_conflict:
             reasons.append("memory_conflict")
             score += 3

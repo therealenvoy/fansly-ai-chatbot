@@ -31,6 +31,27 @@ def test_router_selects_strategic_for_vulnerability_and_stalled_turns():
     assert "stalled_reopening" in stalled.reasons
 
 
+def test_router_treats_grief_health_and_relationship_disclosure_as_high_eq():
+    router = BrainRouter()
+
+    for message in (
+        "my dog passed away and i still miss him",
+        "my leg is healing but the pain still scares me",
+        "i feel like nobody really understands me lately",
+    ):
+        route = router.route(
+            fan_message=message,
+            trigger_kind="unread",
+            history="",
+            has_memory_conflict=False,
+            failed_tactic_count=0,
+            context_confidence=1.0,
+        )
+
+        assert route.path == "strategic"
+        assert "high_eq_disclosure" in route.reasons
+
+
 def test_quality_gate_rejects_sales_tracking_repetition_and_question_streak():
     gate = ConversationQualityGate()
 
