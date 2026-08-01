@@ -610,9 +610,11 @@ def test_second_semantically_repetitive_candidate_is_never_sent():
             None,
         ),
     ]
+    v3 = MagicMock()
     _, bot = _bot(
         bot_mode=BotMode.CONVERSATION,
         chat_responder=responder,
+        conversation_intelligence_v3=v3,
     )
     bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
     now = datetime.now(timezone.utc)
@@ -637,6 +639,8 @@ def test_second_semantically_repetitive_candidate_is_never_sent():
         inbound_id=inbound.id,
         trigger_kind="unread",
         fan_id="fan-a",
+        source_message_id="semantic-repeat-block",
+        source_timestamp=now,
         persona=bot.persona,
         history="Fan: -kiss-",
         fan_message="-kiss-",
@@ -645,6 +649,11 @@ def test_second_semantically_repetitive_candidate_is_never_sent():
 
     assert reply is None
     assert responder.decide.call_count == 2
+    v3.submit.assert_called_once()
+    assert v3.submit.call_args.kwargs["current_decision_id"] is None
+    assert v3.submit.call_args.kwargs["inbound_message_id"] == (
+        "semantic-repeat-block"
+    )
 
 
 def test_human_delivery_compiles_live_context_and_styles_approved_reply():

@@ -1565,6 +1565,28 @@ class TestDashboardSecurity:
         assert status == 403
         assert body == {"error": "forbidden for this dashboard role"}
 
+    def test_posting_va_cannot_access_conversation_intelligence(
+        self,
+        running_server,
+    ):
+        host, _, _ = running_server
+        authorization = _authorization(TEST_VA_USER, TEST_VA_PASSWORD)
+        for path in (
+            "/api/conversation-intelligence/status",
+            "/api/conversation-intelligence/knowledge",
+            "/api/conversation-intelligence/quality",
+            "/api/conversation-intelligence/fan-insights?fan_id=internal-test",
+            "/api/human-delivery/memory?fan_id=internal-test",
+        ):
+            status, body, _ = _request(
+                host,
+                "GET",
+                path,
+                headers={"Authorization": authorization},
+            )
+            assert status == 403
+            assert body == {"error": "forbidden for this dashboard role"}
+
     def test_posting_va_can_reach_posting_and_fyp_apis(
         self,
         running_server,

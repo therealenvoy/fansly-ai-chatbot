@@ -67,6 +67,7 @@ from ..conversation.intelligence_v3.knowledge import (
     KnowledgeIngestionError,
     extract_pdf,
 )
+from ..evaluation.conversation_intelligence_v3 import pending_evaluation_summary
 from ..settings.brain import BrainSettingsError
 from ..unread_backlog import UnreadBacklogError
 from ..settings.chat_guidance import (
@@ -1318,6 +1319,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._human_delivery_memory_update(p, b)
         if p=="/api/human-delivery/preview": return self._human_delivery_preview(b)
         if p=="/api/conversation-intelligence/rules": return self._conversation_intelligence_rule_save(b)
+        if p=="/api/conversation-intelligence/examples": return self._conversation_intelligence_example_save(b)
+        if p.startswith("/api/conversation-intelligence/examples/") and p.endswith("/status"):
+            return self._conversation_intelligence_example_status(p, b)
+        if p.startswith("/api/conversation-intelligence/documents/") and p.endswith("/status"):
+            return self._conversation_intelligence_document_status(p, b)
         if p.startswith("/api/conversation-intelligence/rules/") and p.endswith("/status"):
             return self._conversation_intelligence_rule_status(p, b)
         if p.startswith("/api/conversation-intelligence/conflicts/") and p.endswith("/resolve"):
@@ -2126,6 +2132,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             document = service.knowledge.ingest(
                 extracted,
                 actor=getattr(self, "_dashboard_identity", "owner"),
+                document_type=self.headers.get(
+                    "X-Knowledge-Document-Type",
+                    "conversation_playbook",
+                ),
             )
         except PayloadTooLargeError as error:
             return self.j({"error": str(error)}, 413)
@@ -2172,6 +2182,84 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "send_authority": False,
             },
             201,
+        )
+
+    def _conversation_intelligence_document_status(self, path: str, body: str):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            parts = path.strip("/").split("/")
+            if len(parts) != 5:
+                raise ValueError("invalid document status path")
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            document = service.knowledge.set_document_status(
+                int(parts[3]),
+                status=str(data.get("status") or ""),
+                actor=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "status": "saved",
+                "document": service.knowledge._sanitize_document(document),
+                "runtime_applied": document["status"] == "active",
+                "send_authority": False,
+            }
+        )
+
+    def _conversation_intelligence_example_save(self, body: str):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            example = service.knowledge.create_example(
+                data,
+                actor=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "status": "saved",
+                "example": service.knowledge._sanitize_example(example),
+                "runtime_applied": example["status"] == "active",
+                "send_authority": False,
+            },
+            201,
+        )
+
+    def _conversation_intelligence_example_status(self, path: str, body: str):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            parts = path.strip("/").split("/")
+            if len(parts) != 5:
+                raise ValueError("invalid example status path")
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            example = service.knowledge.set_example_status(
+                int(parts[3]),
+                status=str(data.get("status") or ""),
+                actor=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "status": "saved",
+                "example": service.knowledge._sanitize_example(example),
+                "runtime_applied": example["status"] == "active",
+                "send_authority": False,
+            }
         )
 
     def _conversation_intelligence_rule_status(self, path: str, body: str):
@@ -2262,6 +2350,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return self.j(
             {
                 **payload,
+                "frozen_evaluation": pending_evaluation_summary(),
                 "candidate_content_exposed": False,
                 "private_reasoning_exposed": False,
                 "send_authority": False,

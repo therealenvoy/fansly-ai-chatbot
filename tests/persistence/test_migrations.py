@@ -30,6 +30,9 @@ def test_upgrade_creates_exact_durable_schema(tmp_path):
     with engine.connect() as connection:
         context = MigrationContext.configure(connection)
         assert compare_metadata(context, metadata) == []
+        assert connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one() == "20260801_27"
 
 
 def test_upgrade_is_idempotent_and_downgrade_preserves_adopted_tables(tmp_path):
@@ -173,6 +176,9 @@ def test_postgresql_offline_upgrade_compiles_without_sqlite_types():
     assert "CREATE TABLE human_response_bubbles" in sql
     assert "CREATE TABLE provider_read_cache" in sql
     assert "ALTER TABLE fan_memories_v2 ADD COLUMN sensitivity_class" in sql
+    assert "CREATE TABLE conversation_knowledge_rules" in sql
+    assert "ix_conversation_rule_search_fts" in sql
+    assert "to_tsvector('simple', coalesce(search_text, ''))" in sql
     assert "JSON NOT NULL" in sql
 
 

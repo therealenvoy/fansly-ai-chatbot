@@ -20,10 +20,15 @@ from src.conversation.intelligence_v3.outcomes import (
 )
 from src.conversation.intelligence_v3.planner import (
     MAX_CONTEXT_CHARS,
+    MAX_CONTEXT_TOKENS,
     DeepSeekV3Planner,
     PromptCompilerV3,
 )
-from src.conversation.intelligence_v3.repository import KnowledgeRepository
+from src.conversation.intelligence_v3.retrieval import MemoryRetrieverV3
+from src.conversation.intelligence_v3.repository import (
+    IntelligenceRepository,
+    KnowledgeRepository,
+)
 from src.conversation.intelligence_v3.service import ConversationIntelligenceV3Service
 from src.conversation.intelligence_v3.settings import V3RuntimeSettings
 from src.conversation.intelligence_v3.state import (
@@ -35,12 +40,16 @@ from src.evaluation.conversation_intelligence_v3 import (
     FROZEN_CASE_COUNT,
     FROZEN_SUITE_FINGERPRINT,
     SEEDS,
+    evaluate_candidate_artifact,
     frozen_cases,
+    pending_evaluation_summary,
 )
 from src.persistence.database import create_database_engine
 from src.persistence.pipeline import MessageProcessingRepository
 from src.persistence.schema import CREATORS, OUTBOX_MESSAGES, metadata, utcnow
 from src.persistence.state import ConversationStateRepository
+from src.conversation.brain2_memory import ExtractedMemoryWriter
+from src.conversation.brain2_repository import FanMemoryV2Repository
 
 
 def _engine():
@@ -116,14 +125,26 @@ def test_prompt_compiler_honors_total_budget_and_priority():
         {
             "safety": {"conversation_only": True},
             "newest_turn": "newest evidence",
+            "direct_unresolved_question": "what happened?",
             "recent_history": "h" * 80_000,
+            "relationship_state": {"active_topic": "interview", "notes": "n" * 40_000},
+            "boundaries": [{"forbidden_acts": ["pressure"]}],
+            "verified_creator_facts": [{"fact_key": "city", "fact_value": "source backed"}],
             "creator_instructions": "i" * 80_000,
-        }
+        },
+        max_tokens=MAX_CONTEXT_TOKENS,
     )
 
     assert compiled.context["safety"] == {"conversation_only": True}
     assert compiled.context["newest_turn"] == "newest evidence"
+    assert compiled.context["direct_unresolved_question"] == "what happened?"
+    assert isinstance(compiled.context["relationship_state"], dict)
+    assert isinstance(compiled.context["boundaries"], list)
+    assert set(compiled.report["required_sections_present"]) == set(
+        PromptCompilerV3.required_sections
+    )
     assert compiled.report["used_chars"] <= MAX_CONTEXT_CHARS
+    assert compiled.report["estimated_tokens"] <= MAX_CONTEXT_TOKENS
     assert "recent_history" in compiled.report["truncated_sections"]
 
 
@@ -138,6 +159,289 @@ def test_planner_rejects_pro_model_and_multi_bubble_stays_inert():
     )
     assert plan.shadow_only is True
     assert plan.bubble_count <= 3
+
+
+def _planner_payload(messages):
+    acts = ("support", "learn", "reassure")
+    structures = ("direct_warm", "specific_reflection", "grounded_statement")
+    return {
+        "understanding": {
+            "emotion": "nervous",
+            "intent": "seek_support",
+            "active_thread": "interview",
+            "underlying_need": "reassurance",
+            "direct_question": None,
+            "evidence": [
+                {
+                    "source_message_id": "current",
+                    "observation": "explicit nervous wording",
+                    "confidence": 0.95,
+                }
+            ],
+        },
+        "relationship": {
+            "stage": "recognition",
+            "trust": 0.2,
+            "familiarity": 0.2,
+            "warmth": 0.4,
+            "reciprocity": 0.2,
+            "playfulness": 0.1,
+            "emotional_depth": 0.2,
+            "fantasy_openness": 0.0,
+            "question_fatigue": 0.0,
+            "pet_name_tolerance": "unknown",
+            "momentum": "steady",
+            "intimacy_ceiling": "warm",
+            "evidence": [],
+        },
+        "strategy": {
+            "primary_act": "support",
+            "secondary_act": "learn",
+            "must_reference": ["interview"],
+            "must_avoid": ["invented reassurance"],
+            "should_ask_question": False,
+            "desired_effect": "help the fan feel understood",
+        },
+        "delivery": {
+            "bubble_count": 1,
+            "energy": "medium",
+            "length": "short",
+            "emoji_budget": 0,
+        },
+        "candidates": [
+            {
+                "candidate_id": f"c{index}",
+                "act": acts[index - 1],
+                "structure": structures[index - 1],
+                "message": message,
+            }
+            for index, message in enumerate(messages, start=1)
+        ],
+    }
+
+
+class _PlannerResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {
+            "choices": [{"message": {"content": json.dumps(self.payload)}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+        }
+
+
+def test_fast_planner_generates_two_distinct_candidates_in_one_call():
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append(kwargs["json"])
+        return _PlannerResponse(
+            _planner_payload(
+                [
+                    "interview nerves are real... i'm listening",
+                    "the interview matters to u, and that makes sense",
+                ]
+            )
+        )
+
+    planner = DeepSeekV3Planner(api_key="secret", request=request)
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "i feel nervous about my interview tomorrow",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+    result = planner.generate(
+        compiled,
+        strategic=False,
+        recent_fan_messages=[],
+        recent_creator_messages=[],
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["messages"][1]["content"].find('"candidate_count":2') >= 0
+    assert len(result.plan.candidates) == 2
+    assert result.selected_message is not None
+    assert result.model_calls == 1
+    assert result.selection_mode == "model_candidate"
+
+
+def test_all_rejected_fast_candidates_use_only_evidence_grounded_fallback():
+    repeated = [
+        "got it... i'll respect that",
+        "please stop, i hear u and i'll back off",
+    ]
+
+    def request(*args, **kwargs):
+        return _PlannerResponse(_planner_payload(repeated))
+
+    planner = DeepSeekV3Planner(api_key="secret", request=request)
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "please stop, this is too much",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {"boundary_signal": "stop"},
+            "boundaries": [{"forbidden_acts": ["pressure"]}],
+            "verified_creator_facts": [],
+        }
+    )
+    result = planner.generate(
+        compiled,
+        strategic=False,
+        recent_fan_messages=[],
+        recent_creator_messages=repeated,
+    )
+
+    assert result.selected_message == "got it... i'll respect that"
+    assert result.selection_mode == "grounded_fallback"
+    assert result.fallback_reason == "explicit_boundary_acknowledgement"
+    assert result.requires_operator_review is False
+
+
+def test_fast_path_rejects_candidate_that_does_not_answer_direct_question():
+    payload = _planner_payload(
+        ["that sounds interesting", "i live in new york, what about u?"]
+    )
+    payload["understanding"]["direct_question"] = "where do you live?"
+    payload["candidates"][1]["addresses_direct_question"] = True
+    payload["strategy"]["should_ask_question"] = True
+
+    planner = DeepSeekV3Planner(
+        api_key="secret",
+        request=lambda *args, **kwargs: _PlannerResponse(payload),
+    )
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "where do you live?",
+            "direct_unresolved_question": "where do you live?",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [{"city": "new york"}],
+        }
+    )
+    result = planner.generate(
+        compiled,
+        strategic=False,
+        recent_fan_messages=[],
+        recent_creator_messages=[],
+    )
+
+    assert result.selected_candidate_id == "c2"
+    assert "ignored_direct_question" in result.rejection_codes
+
+
+def test_fast_path_applies_deterministic_safety_gate_without_a_second_call():
+    payload = _planner_payload(
+        ["i just got home from the gym", "unlock my ppv for $10"]
+    )
+    planner = DeepSeekV3Planner(
+        api_key="secret",
+        request=lambda *args, **kwargs: _PlannerResponse(payload),
+    )
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "hey",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+
+    result = planner.generate(
+        compiled,
+        strategic=False,
+        recent_fan_messages=[],
+        recent_creator_messages=[],
+    )
+
+    assert result.selected_message is None
+    assert result.requires_operator_review is True
+    assert result.model_calls == 1
+    assert "invented_real_world_activity" in result.rejection_codes
+    assert "sales_or_ppv" in result.rejection_codes
+
+
+def test_strategic_judge_regenerates_once_inside_two_call_ceiling():
+    original_messages = [
+        "i hear you and that makes sense right now",
+        "i understand and that makes sense right now",
+        "i get you and that makes sense right now",
+    ]
+    responses = [
+        _planner_payload(original_messages),
+        {
+            "assessments": [
+                {
+                    "candidate_id": f"c{index}",
+                    "scores": {"relevance": 4.0},
+                    "rejection_codes": ["canned_empathy"],
+                    "approved": False,
+                }
+                for index in range(1, 4)
+            ],
+            "winner_id": None,
+            "all_rejected": True,
+            "replacement_candidate": {
+                "candidate_id": "r1",
+                "act": "support",
+                "structure": "specific_observation",
+                "message": "the interview clearly matters to u... nerves don't erase how prepared u are",
+                "addresses_direct_question": False,
+            },
+            "replacement_assessment": {
+                "candidate_id": "r1",
+                "scores": {"relevance": 9.0, "grounding": 9.0},
+                "rejection_codes": [],
+                "approved": True,
+            },
+        },
+    ]
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append(kwargs["json"])
+        return _PlannerResponse(responses[len(calls) - 1])
+
+    planner = DeepSeekV3Planner(api_key="secret", request=request)
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "i feel nervous about my interview tomorrow",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+    result = planner.generate(
+        compiled,
+        strategic=True,
+        recent_fan_messages=[],
+        recent_creator_messages=original_messages,
+    )
+
+    assert len(calls) == 2
+    assert result.model_calls == 2
+    assert result.selected_candidate_id == "r1"
+    assert result.selection_mode == "model_candidate"
+    assert any(item.candidate_id == "r1" for item in result.plan.candidates)
 
 
 def test_state_reducer_rejects_duplicate_and_stale_evidence_and_captures_callback():
@@ -166,6 +470,11 @@ def test_state_reducer_rejects_duplicate_and_stale_evidence_and_captures_callbac
 
     assert first.accepted is True
     assert first.state["relationship_stage"] == "recognition"
+    assert first.state["current_emotion"] == "vulnerable"
+    assert first.state["current_energy"] == "medium"
+    assert first.state["active_topic"] == "interview"
+    assert first.state["future_callback"] == "interview"
+    assert first.state["recommended_next_act"] == "support"
     assert duplicate.reason == "stale_source"
     assert stale.reason == "stale_source"
     assert callback is not None
@@ -175,6 +484,64 @@ def test_state_reducer_rejects_duplicate_and_stale_evidence_and_captures_callbac
         source_message_id="message-2",
         source_timestamp=when,
     ) is None
+
+
+def test_shadow_state_accumulates_without_mutating_live_state_and_callback_cools_down():
+    engine = _engine()
+    repository = IntelligenceRepository(engine, creator_id="creator-a")
+    reducer = RelationshipStateReducer()
+    when = datetime.now(timezone.utc) - timedelta(hours=2)
+    first = reducer.reduce(
+        {},
+        infer_deterministic_proposal(
+            message="i feel nervous about my interview tomorrow",
+            source_message_id="message-1",
+            source_timestamp=when,
+        ),
+    )
+    for transition in first.transitions:
+        repository.record_transition(fan_id="fan-a", transition=transition)
+    overlay = repository.shadow_state(
+        fan_id="fan-a",
+        base={"relationship_stage": "unknown", "state_version": 1},
+    )
+    second = reducer.reduce(
+        overlay,
+        infer_deterministic_proposal(
+            message="i'm calmer now and ready for it",
+            source_message_id="message-2",
+            source_timestamp=when + timedelta(minutes=5),
+            previous=overlay,
+        ),
+    )
+    for transition in second.transitions:
+        repository.record_transition(fan_id="fan-a", transition=transition)
+    accumulated = repository.shadow_state(
+        fan_id="fan-a",
+        base={"relationship_stage": "unknown", "state_version": 1},
+    )
+    callback_id = repository.upsert_callback(
+        fan_id="fan-a",
+        callback={
+            "subject": "interview tomorrow",
+            "subject_key": "interview",
+            "source_message_id": "message-1",
+            "first_mentioned_at": when,
+            "earliest_safe_reuse_at": when,
+            "current_relevance": 0.8,
+        },
+    )
+    assert repository.relevant_callbacks(fan_id="fan-a", limit=2)
+    assert repository.mark_callback_used(
+        fan_id="fan-a",
+        callback_id=callback_id,
+        used_at=datetime.now(timezone.utc),
+    )
+
+    assert accumulated["last_source_message_id"] == "message-2"
+    assert accumulated["version"] == 2
+    assert accumulated["current_energy"] == "medium"
+    assert repository.relevant_callbacks(fan_id="fan-a", limit=2) == []
 
 
 def test_knowledge_is_versioned_source_backed_creator_scoped_and_sales_excluded():
@@ -220,6 +587,44 @@ def test_knowledge_is_versioned_source_backed_creator_scoped_and_sales_excluded(
     assert any(row["id"] == conversation_rule["id"] for row in retrieved["rules"])
     assert all(row["knowledge_profile"] != "sales" for row in retrieved["rules"])
     assert other_creator["documents"] == []
+
+
+def test_knowledge_boundaries_are_always_retrieved_and_document_revisions_roll_back():
+    engine = _engine()
+    repository = KnowledgeRepository(engine, creator_id="creator-a")
+    first = repository.ingest(_extracted(), actor="original-uploader")
+    second = repository.ingest(_extracted("second.pdf"), actor="original-uploader")
+    assert first["document_type"] == "conversation_playbook"
+    assert second["revision"] == 2
+    repository.set_document_status(first["id"], status="active", actor="owner")
+    repository.set_document_status(second["id"], status="active", actor="owner")
+    documents = repository.overview()["documents"]
+    statuses = {row["id"]: row["status"] for row in documents}
+    assert statuses[first["id"]] == "archived"
+    assert statuses[second["id"]] == "active"
+    assert next(
+        row["created_by"] for row in documents if row["id"] == second["id"]
+    ) == "original-uploader"
+    repository.create_rule(
+        {
+            "rule_key": "respect-boundary",
+            "knowledge_profile": "conversation",
+            "knowledge_type": "boundary",
+            "scenario": "all",
+            "source_document_id": second["id"],
+            "source_page": 1,
+            "search_text": "never pressure after a refusal",
+            "forbidden_acts": ["pressure"],
+            "status": "active",
+        }
+    )
+    retrieved = repository.retrieve(
+        query="totally unrelated wording",
+        relationship_stage="new",
+    )
+    assert [row["rule_key"] for row in retrieved["boundaries"]] == [
+        "respect-boundary"
+    ]
 
 
 def test_conflicting_knowledge_is_review_gated_before_activation():
@@ -302,6 +707,183 @@ def test_global_diversity_rejects_repeated_creator_template():
     )
     assert result.approved is False
     assert "repeated_opener" in result.rejection_codes
+
+
+def test_diversity_does_not_treat_fan_structure_as_creator_template_history():
+    result = GlobalDiversityGate().evaluate(
+        "i can see why that felt hard today",
+        recent_fan_messages=["i have been working late every day"],
+        recent_creator_messages=[],
+    )
+    assert result.approved is True
+
+
+def test_memory_v3_is_source_backed_bounded_and_always_returns_boundaries():
+    engine = _engine()
+    ConversationStateRepository(engine).ensure_conversation(
+        "creator-a", "fan-a", "chat-a"
+    )
+    repository = FanMemoryV2Repository(engine)
+    writer = ExtractedMemoryWriter(repository)
+    now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    written = writer.write(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        source_message_id="message-9",
+        source_timestamp=now,
+        extracted={
+            "memory_candidates": [
+                {
+                    "type": "preference",
+                    "value": "likes running before work",
+                    "confidence": 0.9,
+                    "importance": 0.8,
+                    "sensitivity_class": "standard",
+                },
+                {
+                    "type": "boundary",
+                    "value": "does not want pet names",
+                    "confidence": 0.2,
+                    "importance": 0.1,
+                },
+                {
+                    "type": "uncertain_hypothesis",
+                    "value": "may prefer quiet evenings",
+                    "confidence": 0.95,
+                    "importance": 0.4,
+                    "temporary_days": 14,
+                },
+                {
+                    "type": "correction",
+                    "value": "works nights now",
+                    "confidence": 1.0,
+                },
+            ]
+        },
+    )
+    retrieved = MemoryRetrieverV3(engine, creator_id="creator-a").retrieve(
+        fan_id="fan-a",
+        query="you said you like running before work",
+        now=now,
+    )
+    durable = repository.relevant(
+        creator_id="creator-a", fan_id="fan-a", limit=20
+    )
+
+    assert written == 3
+    assert {item["type"] for item in retrieved["memories"]} >= {
+        "preference",
+        "boundary",
+    }
+    boundary = next(item for item in durable if item["memory_type"] == "boundary")
+    uncertain = next(
+        item for item in durable if item["memory_type"] == "uncertain_hypothesis"
+    )
+    assert boundary["confidence"] == 1.0
+    assert uncertain["confidence"] <= 0.69
+    assert uncertain["expires_at"] is not None
+
+
+def test_memory_v3_reports_conflicts_without_putting_conflicting_values_in_prompt():
+    engine = _engine()
+    ConversationStateRepository(engine).ensure_conversation(
+        "creator-a", "fan-a", "chat-a"
+    )
+    repository = FanMemoryV2Repository(engine)
+    now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    writer = ExtractedMemoryWriter(repository)
+    assert writer.write(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        source_message_id="message-conflict",
+        source_timestamp=now,
+        extracted={
+            "memory_candidates": [
+                {
+                    "type": "identity_fact",
+                    "value": "works nights",
+                    "confidence": 0.95,
+                    "importance": 0.8,
+                }
+            ]
+        },
+    ) == 1
+    with engine.begin() as connection:
+        from src.conversation.brain2_schema import FAN_MEMORIES_V2
+
+        connection.execute(
+            FAN_MEMORIES_V2.update()
+            .where(FAN_MEMORIES_V2.c.creator_id == "creator-a")
+            .where(FAN_MEMORIES_V2.c.fan_id == "fan-a")
+            .values(contradiction_status="conflicted")
+        )
+
+    retrieved = MemoryRetrieverV3(engine, creator_id="creator-a").retrieve(
+        fan_id="fan-a",
+        query="when do you work?",
+        now=now,
+    )
+
+    assert retrieved["conflicts_excluded"] == 1
+    assert retrieved["memories"] == []
+
+
+def test_explicit_correction_supersedes_stale_fact_across_memory_types():
+    engine = _engine()
+    ConversationStateRepository(engine).ensure_conversation(
+        "creator-a", "fan-a", "chat-a"
+    )
+    repository = FanMemoryV2Repository(engine)
+    writer = ExtractedMemoryWriter(repository)
+    first = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert writer.write(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        source_message_id="message-old",
+        source_timestamp=first,
+        extracted={
+            "memory_candidates": [
+                {
+                    "type": "identity_fact",
+                    "value": "works days",
+                    "confidence": 0.95,
+                    "importance": 0.8,
+                    "contradiction_key": "work_schedule",
+                }
+            ]
+        },
+    ) == 1
+    assert writer.write(
+        creator_id="creator-a",
+        fan_id="fan-a",
+        source_message_id="message-correction",
+        source_timestamp=first + timedelta(minutes=1),
+        extracted={
+            "memory_candidates": [
+                {
+                    "type": "correction",
+                    "value": "works nights now",
+                    "confidence": 1.0,
+                    "importance": 1.0,
+                    "contradiction_key": "work_schedule",
+                }
+            ]
+        },
+    ) == 1
+
+    active = repository.relevant(
+        creator_id="creator-a", fan_id="fan-a", limit=20
+    )
+    assert [row["display_value"] for row in active] == ["works nights now"]
+    stale = next(
+        row
+        for row in (
+            repository.get(memory_id)
+            for memory_id in range(1, 3)
+        )
+        if row and row["display_value"] == "works days"
+    )
+    assert stale["status"] == "superseded"
 
 
 def test_outcome_observation_measures_more_than_reply_existence():
@@ -413,3 +995,64 @@ def test_frozen_suite_has_204_sanitized_cases_and_all_required_scenarios():
     assert manifest["current_production_reference"]["score"] == 64
     assert manifest["identical_case_current_candidate_baseline"]["score"] is None
     assert manifest["promotion_eligible"] is False
+
+
+def test_frozen_evaluator_requires_complete_blinded_evidence_and_never_promotes():
+    rows = [
+        {
+            "case_id": case["case_id"],
+            "response": f"specific synthetic response {index}",
+            "newest_turn_relevant": True,
+            "unsupported_creator_facts": 0,
+            "direct_question_answered": True,
+            "structure_fingerprint": f"structure-{index}",
+            "unnecessary_question_ending": False,
+            "generic_fallback": False,
+            "latency_ms": 2_000,
+            "model_calls": 1,
+            "path": "fast",
+            "model": "deepseek-v4-flash",
+            "safety_failure": False,
+        }
+        for index, case in enumerate(frozen_cases())
+    ]
+    pending = evaluate_candidate_artifact(rows)
+    assert all(pending["gates"].values())
+    assert pending["blinded"]["gate_passed"] is False
+    assert pending["frozen_thresholds_pass"] is False
+    assert pending["promotion_eligible"] is False
+
+    reviewed = evaluate_candidate_artifact(
+        rows,
+        blinded_reviews=[
+            {"case_id": case["case_id"], "winner": "candidate"}
+            for case in frozen_cases()
+        ],
+    )
+    assert reviewed["blinded"]["candidate_preference_rate"] == 1.0
+    assert reviewed["blinded"]["gate_passed"] is True
+
+    invalid = [dict(row) for row in rows]
+    invalid[0]["newest_turn_relevant"] = "false"
+    with pytest.raises(ValueError, match="non-boolean"):
+        evaluate_candidate_artifact(invalid)
+
+    zero_call = [dict(row) for row in rows]
+    zero_call[0]["model_calls"] = 0
+    zero_call_summary = evaluate_candidate_artifact(zero_call)
+    assert zero_call_summary["gates"]["model_call_ceiling"] is False
+
+    generic = [dict(row) for row in rows]
+    for row in generic[:7]:
+        row["response"] = "aww babe 🥺 tell me more"
+    generic_summary = evaluate_candidate_artifact(generic)
+    assert generic_summary["metrics"]["generic_opening_rate"] > 0.03
+    assert generic_summary["gates"]["generic_openings"] is False
+    assert reviewed["frozen_thresholds_pass"] is True
+    assert reviewed["promotion_eligible"] is False
+    assert pending_evaluation_summary()["promotion_eligible"] is False
+
+
+def test_frozen_evaluator_rejects_partial_artifacts():
+    with pytest.raises(ValueError, match="every case exactly once"):
+        evaluate_candidate_artifact([])
