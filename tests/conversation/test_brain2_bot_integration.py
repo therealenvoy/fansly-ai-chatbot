@@ -460,6 +460,138 @@ def test_repeated_style_gate_rejection_is_repaired_without_another_model_call():
     assert stored.gate_results["deterministic_style_repair"] == "approved"
 
 
+def test_semantic_repetition_is_regenerated_once_before_send():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.side_effect = [
+        _decision(
+            "maintain",
+            "validation",
+            "mm i'd hold u close again, just us right here",
+            None,
+        ),
+        _decision(
+            "play",
+            "playful_challenge",
+            "look at u stealing another kiss like that 😌",
+            None,
+        ),
+    ]
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    now = datetime.now(timezone.utc)
+    bot.message_store.save_messages(
+        [
+            {
+                "fan_id": "fan-a",
+                "creator_id": "creator-a",
+                "sender": "creator",
+                "content": "mmm i'd hold u tighter, just us right here",
+                "message_id": "creator-recent-1",
+                "created_at": now,
+            },
+            {
+                "fan_id": "fan-a",
+                "creator_id": "creator-a",
+                "sender": "creator",
+                "content": "mm babe i'd hold u close and let the world fade away",
+                "message_id": "creator-recent-2",
+                "created_at": now,
+            },
+        ]
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="semantic-repeat-repair",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="-kiss-",
+        provider_created_at=now,
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="Fan: -kiss-",
+        fan_message="-kiss-",
+        known_facts=[],
+    )
+
+    assert reply is not None
+    assert reply.content == "look at u stealing another kiss like that 😌"
+    assert responder.decide.call_count == 2
+    retry_context = responder.decide.call_args_list[1].kwargs
+    assert "diversity_feedback" in retry_context
+    assert "recent_creator_messages" in retry_context
+    stored = bot.conversation_decision_repo.get(
+        inbound.id,
+        creator_id="creator-a",
+    )
+    assert stored.repair_calls == 1
+    assert stored.gate_results["diversity_regeneration"] == "approved"
+
+
+def test_second_semantically_repetitive_candidate_is_never_sent():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.side_effect = [
+        _decision(
+            "maintain",
+            "validation",
+            "mm i'd hold u close again, just us right here",
+            None,
+        ),
+        _decision(
+            "maintain",
+            "validation",
+            "mmm i'd hold u tighter again, just us right here",
+            None,
+        ),
+    ]
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    now = datetime.now(timezone.utc)
+    bot.message_store.save_message(
+        "fan-a",
+        "creator-a",
+        "creator",
+        "mm babe i'd hold u close, just us right here",
+        "creator-recent-block",
+        created_at=now,
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="semantic-repeat-block",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="-kiss-",
+        provider_created_at=now,
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="Fan: -kiss-",
+        fan_message="-kiss-",
+        known_facts=[],
+    )
+
+    assert reply is None
+    assert responder.decide.call_count == 2
+
+
 def test_human_delivery_compiles_live_context_and_styles_approved_reply():
     responder = MagicMock()
     responder.enabled = True

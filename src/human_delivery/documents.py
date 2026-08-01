@@ -7,6 +7,8 @@ import hashlib
 import re
 from typing import Iterable
 
+from src.conversation.diversity import select_diverse_records
+
 
 DOCUMENT_TYPES = frozenset(
     {
@@ -457,15 +459,36 @@ class PromptCompiler:
                 required=True,
                 preserve_reserved=False,
             )
-        for index, example in enumerate(list(examples)[:12], start=1):
+        recent_creator_messages = [
+            line.split(":", 1)[1].strip()
+            for line in str(history or "").splitlines()
+            if line.casefold().startswith("creator:") and ":" in line
+        ]
+        selected_examples = select_diverse_records(
+            (item for item in examples if isinstance(item, dict)),
+            query=query,
+            recent_creator_messages=recent_creator_messages,
+            limit=4,
+        )
+        allowed_example_fields = (
+            "stage",
+            "fan_tone",
+            "relationship_depth",
+            "intended_act",
+            "good_response",
+            "anti_example",
+            "explanation",
+            "language",
+        )
+        for index, example in enumerate(selected_examples, start=1):
             if not isinstance(example, dict):
                 continue
             add(
                 f"winning_example:{index}",
                 "\n".join(
-                    f"{key}: {value}"
-                    for key, value in example.items()
-                    if value not in (None, "", [], {})
+                    f"{key}: {example.get(key)}"
+                    for key in allowed_example_fields
+                    if example.get(key) not in (None, "", [], {})
                 ),
             )
         prompt = "\n\n".join(parts)

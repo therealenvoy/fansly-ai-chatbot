@@ -125,6 +125,48 @@ def test_prompt_compiler_reserves_space_for_newest_turn_and_ranks_sections():
     )
 
 
+def test_prompt_compiler_selects_four_diverse_examples_without_identifiers():
+    compiler = PromptCompiler(budget=8_000)
+    examples = [
+        {
+            "id": index,
+            "creator_id": "private-creator-id",
+            "stage": "warm",
+            "fan_tone": "playful",
+            "relationship_depth": "developing",
+            "intended_act": "callback",
+            "good_response": response,
+        }
+        for index, response in enumerate(
+            [
+                "mm babe i'd hold u close",
+                "mmm babe i'd hold u tighter",
+                "history is wild, what era are u covering?",
+                "which part of class surprised u most?",
+                "okayyy that is actually impressive",
+                "take it easy tonight, u earned that",
+            ],
+            start=1,
+        )
+    ]
+
+    compiled = compiler.compile(
+        runtime_rules="Conversation only.",
+        documents={"conversation_guide": "reply naturally"},
+        history="Creator: mm babe i'd hold u close\nFan: my history class",
+        newest_turn="history is my only summer class",
+        examples=examples,
+    )
+
+    labels = [
+        label for label in compiled.included if label.startswith("winning_example:")
+    ]
+    assert len(labels) <= 4
+    assert "history is wild, what era are u covering?" in compiled.prompt
+    assert "private-creator-id" not in compiled.prompt
+    assert "creator_id:" not in compiled.prompt
+
+
 def test_linter_reports_sales_mixing_and_legacy_truncation():
     findings = DocumentLinter().lint(
         {

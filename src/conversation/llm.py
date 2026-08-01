@@ -10,6 +10,10 @@ from typing import TYPE_CHECKING
 import httpx
 
 from src.conversation.brain import ConversationDecision
+from src.conversation.diversity import (
+    diversity_prompt_guidance,
+    select_diverse_texts,
+)
 from src.settings.ai import DEFAULT_DEEPSEEK_MODEL
 
 if TYPE_CHECKING:
@@ -124,6 +128,8 @@ class DeepSeekChatResponder:
         conversation_state: dict | None = None,
         question_streak: int = 0,
         pet_name_streak: int = 0,
+        recent_creator_messages: list[str] | None = None,
+        diversity_feedback: list[str] | None = None,
     ) -> ConversationDecision | None:
         with self._lock:
             api_key = self.api_key
@@ -162,11 +168,26 @@ class DeepSeekChatResponder:
             chat_instructions,
             MAX_PROMPT_DOCUMENT_CHARS,
         )
+        selected_examples = select_diverse_texts(
+            (
+                example
+                for example in persona.sample_winning_messages
+                if str(example).strip()
+                and str(example).strip().casefold()
+                not in instruction_document.casefold()
+            ),
+            query=f"{fan_message or ''}\n{_recent_history(history)}",
+            recent_creator_messages=recent_creator_messages or [],
+            limit=4,
+        )
         winning_examples = "\n".join(
             f"- {_bounded_text(example, 500)}"
-            for example in persona.sample_winning_messages[:12]
-            if str(example).strip()
+            for example in selected_examples
         )
+        diversity_guidance = diversity_prompt_guidance(
+            recent_creator_messages or []
+        )
+        diversity_rejection = ", ".join(diversity_feedback or []) or "none"
         system = (
             "You write one Fansly chat message as the creator.\n\n"
             "NON-NEGOTIABLE RUNTIME RULES:\n"
@@ -201,7 +222,15 @@ class DeepSeekChatResponder:
             f"Never use: {', '.join(persona.forbidden_phrases) or 'none'}\n"
             f"Boundaries: {'; '.join(persona.content_boundaries) or 'none'}\n"
             "Winning message examples (copy the style, not necessarily the "
-            f"exact wording):\n{winning_examples or '- none saved'}"
+            f"exact wording):\n{winning_examples or '- none selected'}\n\n"
+            "CONVERSATIONAL DIVERSITY:\n"
+            "Do not fall back to a signature template. Never repeat the same "
+            "opening, pet-name placement, imagery, question form, physical "
+            "action, emotional conclusion, or conversational move used in "
+            "recent creator messages. Relevance to the newest fan turn comes "
+            "first, but express it with a genuinely new structure.\n"
+            f"{diversity_guidance}\n"
+            f"Previous candidate rejection codes: {diversity_rejection}"
         )
         user = (
             f"Task: {mode_instruction}\n"

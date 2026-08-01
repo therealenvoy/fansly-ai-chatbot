@@ -8,6 +8,8 @@ import re
 import unicodedata
 from typing import Mapping
 
+from src.conversation.diversity import diversity_reason_codes
+
 
 def _integer(value, default: int, low: int, high: int) -> int:
     try:
@@ -276,4 +278,7 @@ class ConversationQualityGate:
             ):
                 codes.append("excessive_similarity")
                 break
+        codes.extend(
+            diversity_reason_codes(normalized, recent_creator_messages)
+        )
         return GateResult(not codes, tuple(dict.fromkeys(codes)))

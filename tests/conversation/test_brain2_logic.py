@@ -91,3 +91,49 @@ def test_quality_gate_rejects_injection_echo_invented_activity_and_boundaries():
     assert "prompt_injection_echo" in injection.reason_codes
     assert "invented_real_world_activity" in invented.reason_codes
     assert "hard_boundary_conflict" in boundary.reason_codes
+
+
+def test_quality_gate_rejects_reworded_opener_phrase_and_template_reuse():
+    gate = ConversationQualityGate()
+    recent = [
+        "mmm babe, i'd hold u close and let the world fade away, just us right here",
+        "mm, i'm glad u loved it... i'd kiss ur forehead and hold u tight",
+        "mmm i love that... what do u want next?",
+    ]
+
+    result = gate.evaluate(
+        (
+            "mm... that kiss landed right where i needed it. i'd kiss u back "
+            "slow and hold u tighter, just us right here"
+        ),
+        recent_creator_messages=recent,
+    )
+
+    assert result.approved is False
+    assert "repeated_opener" in result.reason_codes
+    assert {
+        "repeated_phrase",
+        "repeated_template",
+        "semantic_repetition",
+    } & set(result.reason_codes)
+
+
+def test_quality_gate_allows_relevant_reply_with_a_new_conversational_move():
+    gate = ConversationQualityGate()
+    recent = [
+        "aww that sounds exhausting, take it easy tonight",
+        "mm i get that babe, tell me what happened next?",
+    ]
+
+    result = gate.evaluate(
+        "history as a summer class is kinda intense, which era are u covering?",
+        recent_creator_messages=recent,
+    )
+
+    assert result.approved is True
+    assert not {
+        "repeated_opener",
+        "repeated_phrase",
+        "repeated_template",
+        "semantic_repetition",
+    } & set(result.reason_codes)

@@ -2880,7 +2880,10 @@ class FanslyBot:
                 fallback_reason="advanced_service_unavailable",
             )
         if decision is None:
-            decision = self.chat_responder.decide(**context)
+            decision = self.chat_responder.decide(
+                **context,
+                recent_creator_messages=recent_creator_messages,
+            )
         if decision is None:
             fallback = self._safe_conversation_fallback(
                 trigger_kind=trigger_kind,
@@ -2921,6 +2924,14 @@ class FanslyBot:
                 and memory["status"] == "active"
             ]
         )
+        diversity_regeneration_attempted = False
+        diversity_reason_set = {
+            "excessive_similarity",
+            "repeated_opener",
+            "repeated_phrase",
+            "repeated_template",
+            "semantic_repetition",
+        }
         while True:
             gate = self.brain_quality_gate.evaluate(
                 decision.final_message,
@@ -2937,6 +2948,15 @@ class FanslyBot:
                 else None
             )
             if gate.approved and approved:
+                if (
+                    execution["gate_results"].get(
+                        "diversity_regeneration"
+                    )
+                    == "attempted"
+                ):
+                    execution["gate_results"][
+                        "diversity_regeneration"
+                    ] = "approved"
                 if (
                     execution["gate_results"].get(
                         "deterministic_safe_fallback"
@@ -3025,12 +3045,37 @@ class FanslyBot:
                                 ],
                             },
                         )
-                        decision = self.chat_responder.decide(**context)
+                        decision = self.chat_responder.decide(
+                            **context,
+                            recent_creator_messages=recent_creator_messages,
+                        )
                         if decision is None:
                             return None
                         continue
                 break
             if execution["authority"] != "advanced":
+                if (
+                    not diversity_regeneration_attempted
+                    and set(gate.reason_codes) & diversity_reason_set
+                ):
+                    diversity_regeneration_attempted = True
+                    regenerated = self.chat_responder.decide(
+                        **context,
+                        recent_creator_messages=recent_creator_messages,
+                        diversity_feedback=list(gate.reason_codes),
+                    )
+                    execution["repair_calls"] = (
+                        int(execution.get("repair_calls") or 0) + 1
+                    )
+                    if regenerated is not None:
+                        decision = regenerated
+                        execution["gate_results"][
+                            "diversity_regeneration"
+                        ] = "attempted"
+                        continue
+                    execution["gate_results"][
+                        "diversity_regeneration"
+                    ] = "failed"
                 repaired = self._repair_repeated_style_candidate(
                     fan_id=fan_id,
                     text=decision.final_message,
@@ -3071,7 +3116,11 @@ class FanslyBot:
                     "reason_codes": list(gate.reason_codes),
                 },
             )
-            decision = self.chat_responder.decide(**context)
+            decision = self.chat_responder.decide(
+                **context,
+                recent_creator_messages=recent_creator_messages,
+                diversity_feedback=list(gate.reason_codes),
+            )
             if decision is None:
                 return None
         approved_decision = decision.with_approved_message(approved)
