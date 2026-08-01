@@ -1,0 +1,28 @@
+{
+  "suite": "conversation-intelligence-v3-baseline",
+  "suite_version": "conversation-intelligence-v3-baseline-v1",
+  "case_count": 204,
+  "suite_fingerprint": "e96ceb2832896a247084cf477c5e27753b76d191c7261b02b196692ae72b8442",
+  "privacy": {
+    "production_identifiers": false,
+    "provider_identifiers": false,
+    "usernames": false,
+    "verbatim_production_messages": false
+  },
+  "current_production_reference": {
+    "suite": "conversation-v1",
+    "case_count": 21,
+    "score": 64,
+    "deterministic_errors": 40,
+    "safety_failures": 2,
+    "captured_from_commit": "d6f31fe06bf28aa425817e1bf95e7264f48cc85f",
+    "evidence_scope": "existing synthetic deterministic regression",
+    "comparable_to_v3_cases": false
+  },
+  "identical_case_current_candidate_baseline": {
+    "status": "pending_shadow_candidate_capture",
+    "score": null,
+    "reason": "No production send or fabricated current candidate was used to manufacture a score. Shadow evidence must populate this before promotion."
+  },
+  "promotion_eligible": false
+}

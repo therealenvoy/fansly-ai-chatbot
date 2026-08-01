@@ -25,6 +25,10 @@ from src.conversation.brain2_schema import (
     FAN_MEMORIES_V2,
 )
 from src.persistence.schema import INBOUND_MESSAGES, utcnow
+from src.conversation.intelligence_v3.outcomes import (
+    composite_quality,
+    observe_reply,
+)
 
 
 class _Repository:
@@ -78,6 +82,7 @@ class ConversationOutcomeRepository(_Repository):
         received_at: datetime,
         meaningful: bool,
         negative_signal: bool = False,
+        reply_text: str | None = None,
     ) -> int | None:
         """Attribute one durable inbound event to the newest eligible outcome.
 
@@ -149,11 +154,18 @@ class ConversationOutcomeRepository(_Repository):
                 durable_turns,
                 1 if first_reply else int(row["additional_turns"] or 0),
             )
+            observed = observe_reply(reply_text)
             values = {
                 "fan_replied": True,
                 "additional_turns": additional_turns,
                 "continued_three_turns": additional_turns >= 3,
                 "negative_signal": bool(row["negative_signal"]) or bool(negative_signal),
+                "correction_signal": bool(row["correction_signal"])
+                or bool(observed["correction_signal"]),
+                "boundary_signal": bool(row["boundary_signal"])
+                or bool(observed["boundary_signal"]),
+                "bot_suspicion": bool(row["bot_suspicion"])
+                or bool(observed["bot_suspicion"]),
                 "updated_at": now,
             }
             if first_reply:
@@ -163,7 +175,13 @@ class ConversationOutcomeRepository(_Repository):
                     meaningful_reply=bool(meaningful),
                     returned_within_24h=latency <= 86_400,
                     stalled_recovered=row["trigger_kind"] == "stalled",
+                    reply_length=observed["reply_length"],
+                    semantic_substance=observed["semantic_substance"],
+                    emotional_shift=observed["emotional_shift"],
+                    disclosure_depth=observed["disclosure_depth"],
                 )
+            quality_input = {**dict(row), **values}
+            values["composite_quality"] = composite_quality(quality_input)
             connection.execute(
                 update(CONVERSATION_OUTCOMES)
                 .where(CONVERSATION_OUTCOMES.c.id == row["id"])

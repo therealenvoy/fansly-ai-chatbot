@@ -201,6 +201,33 @@ class MessageStore:
             lines.append(f"{speaker}: {m['content']}")
         return "\n".join(lines)
 
+    def get_recent_creator_messages(
+        self,
+        creator_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[str]:
+        """Return a bounded creator-wide diversity window, oldest first."""
+        limit = max(1, min(int(limit), 500))
+        statement = (
+            select(MESSAGES_TABLE.c.content)
+            .where(
+                and_(
+                    MESSAGES_TABLE.c.creator_id == creator_id,
+                    MESSAGES_TABLE.c.sender == "creator",
+                    MESSAGES_TABLE.c.deleted_at.is_(None),
+                )
+            )
+            .order_by(
+                desc(MESSAGES_TABLE.c.created_at),
+                desc(MESSAGES_TABLE.c.id),
+            )
+            .limit(limit)
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(statement).all()
+        return [str(row.content or "") for row in reversed(rows) if row.content]
+
     def get_latest_message(
         self,
         fan_id: str,

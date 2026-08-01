@@ -141,6 +141,7 @@ class FanslyBot:
         memory_extraction_service=None,
         chat_guidance: "ChatGuidanceService | None" = None,
         human_delivery: "HumanDeliveryService | None" = None,
+        conversation_intelligence_v3=None,
         enable_unread_replies: bool = True,
         enable_online_outreach: bool = False,
         enable_stalled_outreach: bool = False,
@@ -203,6 +204,7 @@ class FanslyBot:
         self.episode_service = episode_service
         self.chat_guidance = chat_guidance
         self.human_delivery = human_delivery
+        self.conversation_intelligence_v3 = conversation_intelligence_v3
         self.auto_messages_settings = None
         self.enable_unread_replies = bool(enable_unread_replies)
         self.enable_online_outreach = bool(enable_online_outreach)
@@ -1002,6 +1004,7 @@ class FanslyBot:
                 received_at=received_at,
                 meaningful=meaningful,
                 negative_signal=negative_signal,
+                reply_text=inbound.content,
             )
         except Exception as exc:
             logger.error(
@@ -2349,6 +2352,8 @@ class FanslyBot:
                 inbound_id=inbound_id,
                 trigger_kind=trigger_kind,
                 fan_id=fan_id,
+                source_message_id=latest.message_id,
+                source_timestamp=self._provider_datetime(latest.created_at),
                 persona=self.persona,
                 history=history,
                 fan_message=latest.content,
@@ -2657,6 +2662,8 @@ class FanslyBot:
         inbound_id: int | None,
         trigger_kind: str,
         fan_id: str,
+        source_message_id: str | None = None,
+        source_timestamp: datetime | None = None,
         **context,
     ) -> OutboundMessage | None:
         """Generate the authoritative live turn with durable continuity."""
@@ -3269,6 +3276,40 @@ class FanslyBot:
             except Exception as exc:
                 logger.error(
                     "Failed to submit shadow analysis: %s",
+                    type(exc).__name__,
+                )
+        if (
+            inbound_id is not None
+            and source_message_id
+            and source_timestamp is not None
+            and self.conversation_intelligence_v3 is not None
+        ):
+            try:
+                persona_snapshot = (
+                    self.persona.model_dump()
+                    if hasattr(self.persona, "model_dump")
+                    else {}
+                )
+                self.conversation_intelligence_v3.submit(
+                    inbound_id=inbound_id,
+                    inbound_message_id=source_message_id,
+                    fan_id=fan_id,
+                    trigger_kind=trigger_kind,
+                    provider_created_at=source_timestamp,
+                    current_decision_id=current_decision_id,
+                    context={
+                        "fan_message": context.get("fan_message"),
+                        "history": context.get("history"),
+                        "persona": persona_snapshot,
+                        "chat_instructions": context.get("chat_instructions"),
+                        "brand_bible": context.get("brand_bible"),
+                        "recent_creator_messages": recent_creator_messages,
+                        "recent_fan_messages": recent_fan_messages,
+                    },
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to submit Conversation Intelligence V3 shadow: %s",
                     type(exc).__name__,
                 )
         if self.episode_service is not None:

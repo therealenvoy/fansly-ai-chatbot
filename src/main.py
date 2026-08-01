@@ -73,6 +73,9 @@ from .conversation.shadow import (
     DeepSeekStrategicAnalyzer,
     ShadowBrainService,
 )
+from .conversation.intelligence_v3.planner import DeepSeekV3Planner
+from .conversation.intelligence_v3.service import ConversationIntelligenceV3Service
+from .conversation.intelligence_v3.settings import V3RuntimeSettings
 
 load_dotenv()
 
@@ -384,6 +387,29 @@ except AISettingsError as error:
 
 # Long-term memory: persistent message history + LLM fact extraction
 message_store = MessageStore(engine=database_engine)
+conversation_intelligence_v3_settings = V3RuntimeSettings.from_mappings(
+    os.environ
+)
+conversation_intelligence_v3_planner = DeepSeekV3Planner(
+    api_key=deepseek_api_key,
+    model=os.getenv(
+        "CONVERSATION_INTELLIGENCE_V3_MODEL",
+        "deepseek-v4-flash",
+    ),
+    max_output_tokens=int(os.getenv("CONVERSATION_INTELLIGENCE_V3_MAX_OUTPUT_TOKENS", "2000")),
+)
+conversation_intelligence_v3 = ConversationIntelligenceV3Service(
+    engine=database_engine,
+    creator_id=CREATOR_ID,
+    settings=conversation_intelligence_v3_settings,
+    planner=conversation_intelligence_v3_planner,
+    message_store=message_store,
+    shadow_percent=int(os.getenv("CONVERSATION_INTELLIGENCE_V3_SHADOW_PERCENT", "10")),
+)
+logger.info(
+    "Conversation Intelligence V3 controls: %s",
+    conversation_intelligence_v3.safe_status(),
+)
 fact_extractor = LLMFactExtractor(
     api_key=deepseek_api_key,
     model=ai_settings.model,
@@ -543,6 +569,7 @@ if api_ok:
             episode_service=episode_service,
             chat_guidance=chat_guidance,
             human_delivery=human_delivery,
+            conversation_intelligence_v3=conversation_intelligence_v3,
             enable_unread_replies=ENABLE_UNREAD_REPLIES,
             enable_online_outreach=auto_messages_settings.online.enabled,
             enable_stalled_outreach=auto_messages_settings.stalled.enabled,
@@ -684,6 +711,7 @@ dashboard = DashboardServer(
     chat_guidance=chat_guidance,
     human_delivery=human_delivery,
     human_delivery_control=human_delivery_control,
+    conversation_intelligence_v3=conversation_intelligence_v3,
     auto_messages_control=auto_messages_control,
     bulk_posting=bulk_posting,
     fyp_analytics=fyp_analytics,
@@ -934,5 +962,6 @@ if bulk_posting_client is not None:
     bulk_posting_client.close()
 advanced_brain_service.shutdown()
 shadow_brain_service.shutdown()
+conversation_intelligence_v3.shutdown()
 client.close()
 logger.info("Bot stopped.")
