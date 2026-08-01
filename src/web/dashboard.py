@@ -62,6 +62,11 @@ from ..conversation.brain2_repository import (
     BrainBlindedReviewRepository,
     PersistentExperimentRepository,
 )
+from ..conversation.intelligence_v3.knowledge import (
+    MAX_PDF_BYTES,
+    KnowledgeIngestionError,
+    extract_pdf,
+)
 from ..settings.brain import BrainSettingsError
 from ..unread_backlog import UnreadBacklogError
 from ..settings.chat_guidance import (
@@ -908,6 +913,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return getattr(self.server, "auto_messages_control", None)
 
     @property
+    def conversation_intelligence_v3(self):
+        return getattr(self.server, "conversation_intelligence_v3", None)
+
+    @property
     def bulk_posting(self):
         if self.creator_id == self.server.creator_id:
             return getattr(self.server, "bulk_posting", None)
@@ -1247,6 +1256,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p=="/api/human-delivery/creator-facts": return self._human_delivery_creator_facts()
         if p=="/api/human-delivery/memory": return self._human_delivery_memory(q)
         if p=="/api/human-delivery/review": return self._human_delivery_review()
+        if p=="/api/conversation-intelligence/status": return self._conversation_intelligence_status()
+        if p=="/api/conversation-intelligence/knowledge": return self._conversation_intelligence_knowledge()
+        if p=="/api/conversation-intelligence/knowledge/pages": return self._conversation_intelligence_document_pages(q)
+        if p=="/api/conversation-intelligence/quality": return self._conversation_intelligence_quality(q)
+        if p=="/api/conversation-intelligence/fan-insights": return self._conversation_intelligence_fan_insights(q)
         if p=="/api/auto-messages": return self._auto_messages_status()
         if p=="/api/unread-backlog": return self._unread_backlog_status()
         if p=="/api/bulk-posting": return self._bulk_posting_status()
@@ -1264,6 +1278,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if p=="/api/bulk-posting/media":
             return self._bulk_posting_upload()
+        if p=="/api/conversation-intelligence/knowledge/upload":
+            return self._conversation_intelligence_pdf_upload()
         q = parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
         try:
             b = _body(self)
@@ -1301,6 +1317,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if p.startswith("/api/human-delivery/memory/"):
             return self._human_delivery_memory_update(p, b)
         if p=="/api/human-delivery/preview": return self._human_delivery_preview(b)
+        if p=="/api/conversation-intelligence/rules": return self._conversation_intelligence_rule_save(b)
+        if p.startswith("/api/conversation-intelligence/rules/") and p.endswith("/status"):
+            return self._conversation_intelligence_rule_status(p, b)
+        if p.startswith("/api/conversation-intelligence/conflicts/") and p.endswith("/resolve"):
+            return self._conversation_intelligence_conflict_resolve(p, b)
+        if p=="/api/conversation-intelligence/feedback": return self._conversation_intelligence_feedback(b)
         if p=="/api/auto-messages/settings": return self._auto_messages_settings_save(b)
         if p=="/api/auto-messages/preview": return self._auto_messages_preview(b)
         if p=="/api/auto-messages/campaigns": return self._auto_messages_campaign_save(b)
@@ -2008,6 +2030,285 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError) as error:
             return self.j({"error": str(error)}, 400)
         return self.j(preview)
+
+    def _conversation_intelligence_service(self):
+        service = self.conversation_intelligence_v3
+        if service is None or self.creator_id != self.server.creator_id:
+            self.j(
+                {
+                    "error": (
+                        "Conversation Intelligence V3 is unavailable for this model"
+                    )
+                },
+                503,
+            )
+            return None
+        return service
+
+    def _conversation_intelligence_status(self):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            knowledge = service.knowledge.overview()
+            quality = service.intelligence.quality_overview(recent_limit=1)
+        except Exception as error:
+            logger.warning(
+                "Conversation Intelligence status failed safely type=%s",
+                type(error).__name__,
+            )
+            return self.j(
+                {"error": "Conversation Intelligence status is unavailable"},
+                503,
+            )
+        return self.j(
+            {
+                "settings": service.safe_status(),
+                "knowledge": {
+                    "documents": len(knowledge["documents"]),
+                    "rules": len(knowledge["rules"]),
+                    "open_conflicts": knowledge["open_conflicts"],
+                },
+                "quality": {
+                    "statuses": quality["statuses"],
+                    "feedback": quality["feedback"],
+                    "estimated_cost": quality["estimated_cost"],
+                    "model_calls": quality["model_calls"],
+                },
+                "runtime_applied": True,
+                "send_authority": False,
+                "outbox_write_capability": False,
+                "provider_write_capability": False,
+            }
+        )
+
+    def _conversation_intelligence_knowledge(self):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            payload = service.knowledge.overview()
+        except Exception as error:
+            logger.warning(
+                "Conversation Intelligence knowledge read failed type=%s",
+                type(error).__name__,
+            )
+            return self.j({"error": "Knowledge Center is unavailable"}, 503)
+        return self.j(
+            {
+                **payload,
+                "supported_format": "application/pdf",
+                "maximum_bytes": MAX_PDF_BYTES,
+                "ocr_automatic": False,
+                "send_authority": False,
+            }
+        )
+
+    def _conversation_intelligence_pdf_upload(self):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            raw_length = self.headers.get("Content-Length", "0")
+            length = int(raw_length)
+            if length <= 0:
+                raise KnowledgeIngestionError("Select a non-empty PDF")
+            if length > MAX_PDF_BYTES:
+                raise PayloadTooLargeError("PDF must be 25 MB or smaller")
+            payload = self.rfile.read(length)
+            if len(payload) != length:
+                raise KnowledgeIngestionError("The PDF upload was incomplete")
+            extracted = extract_pdf(
+                payload,
+                filename=self.headers.get("X-File-Name", ""),
+                mime_type=self.headers.get("Content-Type", "application/pdf"),
+            )
+            document = service.knowledge.ingest(
+                extracted,
+                actor=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except PayloadTooLargeError as error:
+            return self.j({"error": str(error)}, 413)
+        except (KnowledgeIngestionError, TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        except Exception as error:
+            logger.warning(
+                "Conversation Intelligence PDF ingestion failed type=%s",
+                type(error).__name__,
+            )
+            return self.j({"error": "The PDF could not be ingested"}, 503)
+        cached = bool(document.pop("cached", False))
+        return self.j(
+            {
+                "status": "cached" if cached else "ingested",
+                "document": service.knowledge._sanitize_document(document),
+                "runtime_applied": False,
+                "operator_review_required": True,
+                "ocr_used": False,
+                "send_authority": False,
+            },
+            200 if cached else 201,
+        )
+
+    def _conversation_intelligence_rule_save(self, body: str):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            rule = service.knowledge.create_rule(
+                data,
+                actor=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "status": "saved",
+                "rule": service.knowledge._sanitize_rule(rule),
+                "runtime_applied": rule["status"] == "active",
+                "send_authority": False,
+            },
+            201,
+        )
+
+    def _conversation_intelligence_rule_status(self, path: str, body: str):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            parts = path.strip("/").split("/")
+            if len(parts) != 5:
+                raise ValueError("invalid rule status path")
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            rule = service.knowledge.set_rule_status(
+                int(parts[3]),
+                status=str(data.get("status") or ""),
+                actor=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "status": "saved",
+                "rule": service.knowledge._sanitize_rule(rule),
+                "runtime_applied": rule["status"] == "active",
+                "send_authority": False,
+            }
+        )
+
+    def _conversation_intelligence_document_pages(self, query: dict):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            document_id = int(query.get("document_id", [0])[0])
+            pages = service.knowledge.document_pages(document_id)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "document_id": document_id,
+                "pages": pages,
+                "owner_only": True,
+                "send_authority": False,
+            }
+        )
+
+    def _conversation_intelligence_conflict_resolve(
+        self,
+        path: str,
+        body: str,
+    ):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            parts = path.strip("/").split("/")
+            if len(parts) != 5:
+                raise ValueError("invalid conflict resolution path")
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            conflict = service.knowledge.resolve_conflict(
+                int(parts[3]),
+                resolution=str(data.get("resolution") or ""),
+                actor=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "status": "resolved",
+                "conflict": conflict,
+                "autonomous_runtime_change": False,
+                "send_authority": False,
+            }
+        )
+
+    def _conversation_intelligence_quality(self, query: dict):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            limit = int(query.get("limit", [30])[0])
+            payload = service.intelligence.quality_overview(recent_limit=limit)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                **payload,
+                "candidate_content_exposed": False,
+                "private_reasoning_exposed": False,
+                "send_authority": False,
+            }
+        )
+
+    def _conversation_intelligence_fan_insights(self, query: dict):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            fan_id = str(query.get("fan_id", [""])[0])
+            payload = service.intelligence.fan_insight(fan_id=fan_id)
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                **payload,
+                "fan_id": fan_id,
+                "shadow_only": True,
+                "send_authority": False,
+            }
+        )
+
+    def _conversation_intelligence_feedback(self, body: str):
+        service = self._conversation_intelligence_service()
+        if service is None:
+            return
+        try:
+            data = json.loads(body) if body else {}
+            if not isinstance(data, dict):
+                raise ValueError("request body must be an object")
+            feedback_id = service.intelligence.record_feedback(
+                data,
+                reviewer=getattr(self, "_dashboard_identity", "owner"),
+            )
+        except (TypeError, ValueError) as error:
+            return self.j({"error": str(error)}, 400)
+        return self.j(
+            {
+                "status": "recorded",
+                "feedback_id": feedback_id,
+                "autonomous_runtime_change": False,
+                "send_authority": False,
+            },
+            201,
+        )
 
     def _record_webhook_dead_letter(
         self,
@@ -4983,6 +5284,7 @@ class DashboardServer:
         chat_guidance=None,
         human_delivery=None,
         human_delivery_control=None,
+        conversation_intelligence_v3=None,
         auto_messages_control=None,
         bulk_posting=None,
         fyp_analytics=None,
@@ -5057,6 +5359,9 @@ class DashboardServer:
         self.server.chat_guidance = chat_guidance
         self.server.human_delivery = human_delivery
         self.server.human_delivery_control = human_delivery_control
+        self.server.conversation_intelligence_v3 = (
+            conversation_intelligence_v3
+        )
         self.server.auto_messages_control = auto_messages_control
         self.server.bulk_posting = bulk_posting
         self.server.fyp_analytics = fyp_analytics
