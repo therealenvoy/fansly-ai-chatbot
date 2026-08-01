@@ -3006,7 +3006,9 @@ class FanslyBot:
                 fallback_reason="advanced_service_unavailable",
             )
         if decision is None:
-            decision = self.chat_responder.decide(**context)
+            decision = self.chat_responder.decide(
+                **self._current_responder_context(context)
+            )
         if decision is None:
             fallback = self._safe_conversation_fallback(
                 trigger_kind=trigger_kind,
@@ -3172,7 +3174,9 @@ class FanslyBot:
                             ],
                         },
                     )
-                    decision = self.chat_responder.decide(**context)
+                    decision = self.chat_responder.decide(
+                        **self._current_responder_context(context)
+                    )
                     if decision is None:
                         return None
                     continue
@@ -3204,7 +3208,9 @@ class FanslyBot:
                                 ],
                             },
                         )
-                        decision = self.chat_responder.decide(**context)
+                        decision = self.chat_responder.decide(
+                            **self._current_responder_context(context)
+                        )
                         if decision is None:
                             self._submit_conversation_intelligence_v3_shadow(
                                 inbound_id=inbound_id,
@@ -3235,7 +3241,7 @@ class FanslyBot:
                     },
                 )
                 decision = self.chat_responder.decide(
-                    **context,
+                    **self._current_responder_context(context),
                     diversity_feedback=list(gate.reason_codes),
                 )
                 if decision is None:
@@ -3248,7 +3254,7 @@ class FanslyBot:
                 ):
                     diversity_regeneration_attempted = True
                     regenerated = self.chat_responder.decide(
-                        **context,
+                        **self._current_responder_context(context),
                         diversity_feedback=list(gate.reason_codes),
                     )
                     execution["repair_calls"] = (
@@ -3315,7 +3321,7 @@ class FanslyBot:
                 },
             )
             decision = self.chat_responder.decide(
-                **context,
+                **self._current_responder_context(context),
                 diversity_feedback=list(gate.reason_codes),
             )
             if decision is None:
@@ -3659,6 +3665,30 @@ class FanslyBot:
             if approved:
                 return approved
         return None
+
+    @staticmethod
+    def _current_responder_context(context: dict) -> dict:
+        """Keep advanced-only context out of the strict current responder."""
+        allowed = (
+            "persona",
+            "history",
+            "fan_message",
+            "known_facts",
+            "display_name",
+            "proactive",
+            "proactive_kind",
+            "chat_instructions",
+            "brand_bible",
+            "previous_decision",
+            "recent_objectives",
+            "recent_tactics",
+            "episode_summaries",
+            "conversation_state",
+            "question_streak",
+            "pet_name_streak",
+            "recent_creator_messages",
+        )
+        return {key: context[key] for key in allowed if key in context}
 
     @staticmethod
     def _processing_error_code(exc: Exception) -> str:

@@ -441,6 +441,79 @@ def test_advanced_brain_receives_recent_creator_and_fan_turns():
     ]
 
 
+def test_current_responder_does_not_receive_advanced_only_context():
+    class StrictResponder:
+        enabled = True
+        model = "deepseek-v4-flash"
+
+        def decide(
+            self,
+            *,
+            persona,
+            history,
+            fan_message,
+            known_facts,
+            display_name=None,
+            proactive=False,
+            proactive_kind=None,
+            chat_instructions="",
+            brand_bible="",
+            previous_decision=None,
+            recent_objectives=None,
+            recent_tactics=None,
+            episode_summaries=None,
+            conversation_state=None,
+            question_streak=0,
+            pet_name_streak=0,
+            recent_creator_messages=None,
+            diversity_feedback=None,
+        ):
+            return _decision(
+                "deepen",
+                "callback",
+                "history as the only summer course sounds intense",
+                "summer course",
+            )
+
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=StrictResponder(),
+    )
+    bot._approve_conversation_text = MagicMock(
+        side_effect=lambda _, text: text
+    )
+    bot.message_store.save_message(
+        "fan-a",
+        "creator-a",
+        "fan",
+        "history is my only summer course",
+        "fan-history-strict",
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="strict-current-context",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="history is my only summer course",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="Fan: history is my only summer course",
+        fan_message="history is my only summer course",
+        known_facts=[],
+    )
+
+    assert reply is not None
+    assert reply.content == (
+        "history as the only summer course sounds intense"
+    )
+
+
 def test_rollback_after_generation_falls_back_before_advanced_decision_is_saved():
     responder = MagicMock()
     responder.enabled = True
