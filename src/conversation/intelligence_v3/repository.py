@@ -861,11 +861,17 @@ class IntelligenceRepository:
             for row in rows
         ]
 
-    def record_transition(self, *, fan_id: str, transition: dict) -> bool:
+    def record_transition(
+        self,
+        *,
+        fan_id: str,
+        transition: dict,
+        shadow: bool = True,
+    ) -> bool:
         values = {
             "creator_id": self.creator_id,
             "fan_id": fan_id,
-            "shadow": True,
+            "shadow": bool(shadow),
             **transition,
             "created_at": utcnow(),
         }
@@ -887,8 +893,14 @@ class IntelligenceRepository:
             connection.execute(insert(FAN_STATE_TRANSITIONS).values(**values))
         return True
 
-    def shadow_state(self, *, fan_id: str, base: dict | None = None) -> dict:
-        """Reconstruct the latest shadow overlay without mutating live Brain state."""
+    def overlay_state(
+        self,
+        *,
+        fan_id: str,
+        base: dict | None = None,
+        shadow: bool,
+    ) -> dict:
+        """Reconstruct one isolated V3 state overlay."""
         state = dict(base or {})
         aliases = {
             "current_emotion": state.get("current_mood"),
@@ -903,7 +915,7 @@ class IntelligenceRepository:
                 and_(
                     FAN_STATE_TRANSITIONS.c.creator_id == self.creator_id,
                     FAN_STATE_TRANSITIONS.c.fan_id == fan_id,
-                    FAN_STATE_TRANSITIONS.c.shadow.is_(True),
+                    FAN_STATE_TRANSITIONS.c.shadow.is_(bool(shadow)),
                 )
             )
             .group_by(FAN_STATE_TRANSITIONS.c.field_name)
@@ -927,6 +939,9 @@ class IntelligenceRepository:
         else:
             state["version"] = int(state.get("state_version") or 0)
         return state
+
+    def shadow_state(self, *, fan_id: str, base: dict | None = None) -> dict:
+        return self.overlay_state(fan_id=fan_id, base=base, shadow=True)
 
     def upsert_callback(self, *, fan_id: str, callback: dict) -> int:
         subject = str(callback["subject"]).strip()[:2_000]
@@ -1069,11 +1084,72 @@ class IntelligenceRepository:
                 )
             ).scalar_one_or_none()
             if existing is not None:
+                connection.execute(
+                    update(CONVERSATION_INTELLIGENCE_RUNS)
+                    .where(
+                        and_(
+                            CONVERSATION_INTELLIGENCE_RUNS.c.id
+                            == int(existing),
+                            CONVERSATION_INTELLIGENCE_RUNS.c.creator_id
+                            == self.creator_id,
+                        )
+                    )
+                    .values(
+                        **{
+                            key: value
+                            for key, value in values.items()
+                            if key not in {"creator_id", "created_at"}
+                        }
+                    )
+                )
                 return int(existing)
             result = connection.execute(
                 insert(CONVERSATION_INTELLIGENCE_RUNS).values(**values)
             )
         return int(result.inserted_primary_key[0])
+
+    def link_run_decision(
+        self,
+        *,
+        run_id: int,
+        decision_id: int,
+        shadow: bool,
+    ) -> bool:
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(CONVERSATION_INTELLIGENCE_RUNS)
+                .where(
+                    and_(
+                        CONVERSATION_INTELLIGENCE_RUNS.c.id == int(run_id),
+                        CONVERSATION_INTELLIGENCE_RUNS.c.creator_id
+                        == self.creator_id,
+                        CONVERSATION_INTELLIGENCE_RUNS.c.shadow.is_(
+                            bool(shadow)
+                        ),
+                    )
+                )
+                .values(current_decision_id=int(decision_id))
+            )
+        return bool(result.rowcount)
+
+    def live_cost_since(self, since: datetime) -> float:
+        with self.engine.connect() as connection:
+            value = connection.execute(
+                select(
+                    func.coalesce(
+                        func.sum(CONVERSATION_INTELLIGENCE_RUNS.c.estimated_cost),
+                        0.0,
+                    )
+                ).where(
+                    and_(
+                        CONVERSATION_INTELLIGENCE_RUNS.c.creator_id
+                        == self.creator_id,
+                        CONVERSATION_INTELLIGENCE_RUNS.c.shadow.is_(False),
+                        CONVERSATION_INTELLIGENCE_RUNS.c.created_at >= since,
+                    )
+                )
+            ).scalar_one()
+        return float(value or 0.0)
 
     def record_feedback(self, payload: dict, *, reviewer: str) -> int:
         allowed_types = {

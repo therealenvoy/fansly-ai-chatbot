@@ -18,10 +18,12 @@ from src.conversation.intelligence_v3.outcomes import (
     observe_reply,
     plan_bubbles,
 )
+from src.conversation.intelligence_v3.contracts import HighEQPlan
 from src.conversation.intelligence_v3.planner import (
     MAX_CONTEXT_CHARS,
     MAX_CONTEXT_TOKENS,
     DeepSeekV3Planner,
+    PlannerResult,
     PromptCompilerV3,
 )
 from src.conversation.intelligence_v3.retrieval import MemoryRetrieverV3
@@ -46,6 +48,7 @@ from src.evaluation.conversation_intelligence_v3 import (
 )
 from src.persistence.database import create_database_engine
 from src.persistence.pipeline import MessageProcessingRepository
+from src.conversation.intelligence_v3.schema import CONVERSATION_INTELLIGENCE_RUNS
 from src.persistence.schema import CREATORS, OUTBOX_MESSAGES, metadata, utcnow
 from src.persistence.state import ConversationStateRepository
 from src.conversation.brain2_memory import ExtractedMemoryWriter
@@ -116,6 +119,31 @@ def test_feature_ceilings_fail_closed_and_never_grant_outbox_authority():
     assert settings.relationship_state_v2_mode == "shadow"
     assert settings.strategy_planner_v2_mode == "shadow"
     assert settings.live_send_authority is False
+    assert settings.safe_status()["outbox_write_capability"] is False
+
+
+def test_live_authority_requires_every_core_ceiling_and_bounded_percentage():
+    settings = V3RuntimeSettings.from_mappings(
+        {
+            "PLAYBOOK_ENGINE_MODE": "live",
+            "RELATIONSHIP_STATE_V2_MODE": "live",
+            "MEMORY_RETRIEVAL_V3_MODE": "live",
+            "STRATEGY_PLANNER_V2_MODE": "live",
+            "GLOBAL_DIVERSITY_MODE": "live",
+            "OUTCOME_LEARNING_MODE": "observe",
+            "MULTI_BUBBLE_MODE": "shadow",
+            "CONVERSATION_INTELLIGENCE_V3_ALLOW_SEND": "true",
+            "CONVERSATION_INTELLIGENCE_V3_LIVE_PERCENT": "100",
+            "CONVERSATION_INTELLIGENCE_V3_MAX_LIVE_PERCENT": "100",
+            "CONVERSATION_INTELLIGENCE_V3_MAX_DAILY_COST": "10",
+        }
+    )
+
+    assert settings.live_send_authority is True
+    assert settings.live_percent == 100
+    assert settings.max_live_percent == 100
+    assert settings.max_daily_cost == 10
+    assert settings.multi_bubble_mode == "shadow"
     assert settings.safe_status()["outbox_write_capability"] is False
 
 
@@ -966,6 +994,137 @@ def test_shadow_state_observation_makes_zero_model_calls_and_zero_outbox_writes(
     assert status["live_send_authority"] is False
     assert quality["outcomes"]["observed"] == 0
     assert insight["facts"] == []
+
+
+def test_live_decision_returns_candidate_without_outbox_or_provider_capability():
+    engine = _engine()
+    ConversationStateRepository(engine).ensure_conversation(
+        "creator-a",
+        "fan-a",
+        "chat-a",
+    )
+    inbound, created = MessageProcessingRepository(engine).insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="provider-live-1",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="my interview is tomorrow and i feel nervous",
+        provider_created_at=utcnow(),
+    )
+    assert created is True
+
+    plan = HighEQPlan.model_validate(
+        _planner_payload(
+            [
+                "that interview has been sitting heavy on u",
+                "nervous makes sense when it matters this much",
+            ]
+        )
+    )
+
+    class Planner:
+        model = "deepseek-v4-flash"
+        diversity = GlobalDiversityGate()
+
+        def generate(self, *args, **kwargs):
+            return PlannerResult(
+                plan=plan,
+                assessments=(),
+                selected_message=plan.candidates[0].message,
+                selected_candidate_id=plan.candidates[0].candidate_id,
+                rejection_codes=(),
+                model_calls=1,
+                latency_ms=25,
+                prompt_tokens=120,
+                completion_tokens=30,
+                estimated_cost=0.000025,
+                selection_mode="model_candidate",
+                fallback_reason=None,
+                requires_operator_review=False,
+            )
+
+    class MessageStore:
+        def get_recent_creator_messages(self, creator_id, limit):
+            return []
+
+    service = ConversationIntelligenceV3Service(
+        engine=engine,
+        creator_id="creator-a",
+        settings=V3RuntimeSettings(
+            playbook_engine_mode="live",
+            relationship_state_v2_mode="live",
+            memory_retrieval_v3_mode="live",
+            strategy_planner_v2_mode="live",
+            global_diversity_mode="live",
+            outcome_learning_mode="observe",
+            multi_bubble_mode="shadow",
+            allow_live_send=True,
+            live_percent=100,
+            max_live_percent=100,
+            max_daily_cost=10,
+        ),
+        planner=Planner(),
+        message_store=MessageStore(),
+        shadow_percent=100,
+    )
+    decision = service.decide_live(
+        inbound_id=inbound.id,
+        inbound_message_id="provider-live-1",
+        fan_id="fan-a",
+        trigger_kind="unread",
+        provider_created_at=inbound.provider_created_at,
+        context={
+            "fan_message": inbound.content,
+            "history": "",
+            "recent_fan_messages": [],
+            "recent_creator_messages": [],
+        },
+    )
+
+    assert decision is not None
+    assert decision.message == "that interview has been sitting heavy on u"
+    assert service.decide_live(
+        inbound_id=inbound.id,
+        inbound_message_id="provider-live-1",
+        fan_id="fan-a",
+        trigger_kind="stalled",
+        provider_created_at=inbound.provider_created_at,
+        context={"fan_message": inbound.content},
+    ) is None
+    with engine.connect() as connection:
+        outbox_count = connection.execute(
+            select(func.count()).select_from(OUTBOX_MESSAGES)
+        ).scalar_one()
+        live_run = connection.execute(
+            select(CONVERSATION_INTELLIGENCE_RUNS).where(
+                CONVERSATION_INTELLIGENCE_RUNS.c.id
+                == decision.intelligence_run_id
+            )
+        ).mappings().one()
+    live_cost_since = service.intelligence.live_cost_since
+    service.intelligence.live_cost_since = lambda _since: 10.0
+    assert service.can_decide_live(
+        fan_id="fan-a",
+        trigger_kind="unread",
+    ) is False
+    service.intelligence.live_cost_since = live_cost_since
+    service.record_live_failure()
+    service.record_live_failure()
+    service.record_live_failure()
+    assert service.can_decide_live(
+        fan_id="fan-a",
+        trigger_kind="unread",
+    ) is False
+    status = service.safe_status()
+    service.shutdown()
+
+    assert outbox_count == 0
+    assert live_run["shadow"] is False
+    assert live_run["model"] == "deepseek-v4-flash"
+    assert status["live_send_authority"] is True
+    assert status["outbox_write_capability"] is False
+    assert status["provider_write_capability"] is False
+    assert status["live_circuit_open"] is True
 
 
 def test_frozen_suite_has_204_sanitized_cases_and_all_required_scenarios():

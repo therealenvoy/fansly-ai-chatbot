@@ -30,6 +30,7 @@ from .conversation.authority import (
     BrainAuthorityRouter,
 )
 from .conversation.brain2 import BrainRuntimeSettings, ConversationQualityGate
+from .conversation.intelligence_v3.service import V3LiveDecision
 from .conversation.brain2_repository import (
     ConversationEpisodeRepository,
     ConversationOutcomeRepository,
@@ -1812,7 +1813,15 @@ class FanslyBot:
                         inbound.id,
                         creator_id=self.creator_id,
                     )
-                    if decision is not None and (
+                    if (
+                        decision is not None
+                        and decision.authority
+                        == "conversation_intelligence_v3"
+                    ):
+                        # V3 selects the Brain 2.0 reply; it is not a separate
+                        # contact owner or delivery service.
+                        service_role = "brain2"
+                    elif decision is not None and (
                         decision.authority == "advanced"
                         or (
                             decision.fallback_used
@@ -1911,6 +1920,10 @@ class FanslyBot:
                         creator_id=self.creator_id,
                     )
                     if stored_decision is not None:
+                        sent_at = (
+                            delivered_outbox.sent_at
+                            or datetime.now(timezone.utc)
+                        )
                         self.conversation_outcome_repo.create_for_delivery(
                             decision_id=stored_decision.id,
                             inbound_message_id=inbound.id,
@@ -1922,11 +1935,32 @@ class FanslyBot:
                             experiment_id=stored_decision.experiment_id,
                             variant=stored_decision.variant,
                             trigger_kind=inbound.trigger_kind,
-                            sent_at=(
-                                delivered_outbox.sent_at
-                                or datetime.now(timezone.utc)
-                            ),
+                            sent_at=sent_at,
                         )
+                        if (
+                            stored_decision.authority
+                            == "conversation_intelligence_v3"
+                            and self.conversation_intelligence_v3 is not None
+                        ):
+                            callback_ids = tuple(
+                                int(value)
+                                for value in (
+                                    stored_decision.gate_results or {}
+                                ).get("used_callback_ids", [])[:2]
+                                if str(value).isdigit()
+                            )
+                            try:
+                                self.conversation_intelligence_v3.confirm_callback_use(
+                                    fan_id=sending.fan_id,
+                                    callback_ids=callback_ids,
+                                    sent_at=sent_at,
+                                )
+                            except Exception as exc:
+                                self.conversation_intelligence_v3.open_live_circuit()
+                                logger.error(
+                                    "V3 callback cooldown failed; live circuit opened: %s",
+                                    type(exc).__name__,
+                                )
                 except Exception as exc:
                     logger.error(
                         "Failed to schedule conversation outcome: %s",
@@ -2835,7 +2869,90 @@ class FanslyBot:
         }
         decision = None
         advanced_outcome = None
-        if requested_authority == "advanced" and self.advanced_brain_service is not None:
+        v3_outcome = None
+        if (
+            inbound_id is not None
+            and source_message_id
+            and source_timestamp is not None
+            and self.conversation_intelligence_v3 is not None
+        ):
+            try:
+                persona_snapshot = (
+                    self.persona.model_dump()
+                    if hasattr(self.persona, "model_dump")
+                    else {}
+                )
+                v3_outcome = self.conversation_intelligence_v3.decide_live(
+                    inbound_id=inbound_id,
+                    inbound_message_id=source_message_id,
+                    fan_id=fan_id,
+                    trigger_kind=trigger_kind,
+                    provider_created_at=source_timestamp,
+                    context={
+                        "fan_message": context.get("fan_message"),
+                        "history": context.get("history"),
+                        "persona": persona_snapshot,
+                        "chat_instructions": context.get("chat_instructions"),
+                        "brand_bible": context.get("brand_bible"),
+                        "recent_creator_messages": recent_creator_messages,
+                        "recent_fan_messages": recent_fan_messages,
+                    },
+                )
+            except Exception as exc:
+                logger.error(
+                    "Conversation Intelligence V3 live decision failed safely: %s",
+                    type(exc).__name__,
+                )
+            if not isinstance(v3_outcome, V3LiveDecision):
+                v3_outcome = None
+            if v3_outcome is not None:
+                decision = ConversationDecision(
+                    fan_state=v3_outcome.emotion,
+                    state_summary=(
+                        "Evidence-backed Conversation Intelligence V3 decision."
+                    ),
+                    objective=v3_outcome.primary_act,
+                    tactic=(
+                        v3_outcome.secondary_act or v3_outcome.primary_act
+                    ),
+                    open_thread=v3_outcome.active_thread,
+                    draft=v3_outcome.message,
+                    critique=tuple(v3_outcome.rejection_codes),
+                    final_message=v3_outcome.message,
+                    confidence=0.85,
+                )
+                execution.update(
+                    authority="conversation_intelligence_v3",
+                    brain_version="conversation-intelligence-v3.1",
+                    route=v3_outcome.route,
+                    variant="v3-live",
+                    provider_attempts=1,
+                    model_calls=v3_outcome.model_calls,
+                    prompt_tokens=v3_outcome.prompt_tokens,
+                    completion_tokens=v3_outcome.completion_tokens,
+                    total_tokens=(
+                        v3_outcome.prompt_tokens
+                        + v3_outcome.completion_tokens
+                    ),
+                    latency_ms=v3_outcome.latency_ms,
+                    estimated_cost=v3_outcome.estimated_cost,
+                    gate_results={
+                        **execution["gate_results"],
+                        "conversation_intelligence_v3": "selected",
+                        "selection_mode": v3_outcome.selection_mode,
+                        "intelligence_run_id": (
+                            v3_outcome.intelligence_run_id
+                        ),
+                        "used_callback_ids": list(
+                            v3_outcome.used_callback_ids
+                        ),
+                    },
+                )
+        if (
+            decision is None
+            and requested_authority == "advanced"
+            and self.advanced_brain_service is not None
+        ):
             advanced_outcome = self.advanced_brain_service.decide(
                 fan_id=fan_id,
                 trigger_kind=trigger_kind,
@@ -2883,7 +3000,7 @@ class FanslyBot:
                         "reason_codes": list(advanced_outcome.gate_reason_codes),
                     },
                 )
-        elif requested_authority == "advanced":
+        elif decision is None and requested_authority == "advanced":
             execution.update(
                 fallback_used=True,
                 fallback_reason="advanced_service_unavailable",
@@ -3035,6 +3152,31 @@ class FanslyBot:
                             type(exc).__name__,
                         )
                 if (
+                    execution["authority"] == "conversation_intelligence_v3"
+                    and not self.conversation_intelligence_v3.can_decide_live(
+                        fan_id=fan_id,
+                        trigger_kind=trigger_kind,
+                    )
+                ):
+                    execution.update(
+                        authority="current",
+                        brain_version="current-v1",
+                        variant="control",
+                        fallback_used=True,
+                        fallback_reason="stale_v3_authority_after_generation",
+                        gate_results={
+                            **execution["gate_results"],
+                            "conversation_intelligence_v3": "rejected",
+                            "reason_codes": [
+                                "stale_v3_authority_after_generation"
+                            ],
+                        },
+                    )
+                    decision = self.chat_responder.decide(**context)
+                    if decision is None:
+                        return None
+                    continue
+                if (
                     execution["authority"] == "advanced"
                     and self.brain_settings_service is not None
                 ):
@@ -3078,6 +3220,27 @@ class FanslyBot:
                             return None
                         continue
                 break
+            if execution["authority"] == "conversation_intelligence_v3":
+                self.conversation_intelligence_v3.record_live_failure()
+                execution.update(
+                    authority="current",
+                    brain_version="current-v1",
+                    variant="control",
+                    fallback_used=True,
+                    fallback_reason="v3_final_gate_rejected",
+                    gate_results={
+                        **execution["gate_results"],
+                        "conversation_intelligence_v3": "rejected",
+                        "reason_codes": list(gate.reason_codes),
+                    },
+                )
+                decision = self.chat_responder.decide(
+                    **context,
+                    diversity_feedback=list(gate.reason_codes),
+                )
+                if decision is None:
+                    return None
+                continue
             if execution["authority"] != "advanced":
                 if (
                     not diversity_regeneration_attempted
@@ -3178,12 +3341,30 @@ class FanslyBot:
                 trigger_kind=trigger_kind,
                 decision=approved_decision,
                 model=(
+                    v3_outcome.model
+                    if (
+                        execution["authority"]
+                        == "conversation_intelligence_v3"
+                        and v3_outcome is not None
+                    )
+                    else
                     advanced_outcome.model
                     if execution["authority"] == "advanced" and advanced_outcome is not None
                     else self.chat_responder.model
                 ),
                 execution=execution,
             )
+            if (
+                execution["authority"] == "conversation_intelligence_v3"
+                and v3_outcome is not None
+            ):
+                linked = self.conversation_intelligence_v3.link_live_decision(
+                    run_id=v3_outcome.intelligence_run_id,
+                    decision_id=current_decision_id,
+                )
+                if not linked:
+                    self.conversation_intelligence_v3.open_live_circuit()
+                    raise RuntimeError("v3_live_decision_link_failed")
         if (
             requested_authority == "advanced"
             and runtime_settings.auto_rollback
@@ -3341,6 +3522,8 @@ class FanslyBot:
                     "Failed to submit episode generation: %s",
                     type(exc).__name__,
                 )
+        if execution["authority"] == "conversation_intelligence_v3":
+            self.conversation_intelligence_v3.record_live_success()
         return OutboundMessage.text(approved)
 
     def _submit_conversation_intelligence_v3_shadow(

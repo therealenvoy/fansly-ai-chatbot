@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import logging
 import threading
@@ -32,8 +33,31 @@ from src.persistence.schema import utcnow
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class V3LiveDecision:
+    """A bounded reply decision; delivery remains owned by the bot pipeline."""
+
+    message: str
+    emotion: str
+    intent: str
+    active_thread: str | None
+    primary_act: str
+    secondary_act: str | None
+    route: str
+    model: str
+    model_calls: int
+    latency_ms: int
+    prompt_tokens: int
+    completion_tokens: int
+    estimated_cost: float
+    selection_mode: str
+    rejection_codes: tuple[str, ...]
+    used_callback_ids: tuple[int, ...]
+    intelligence_run_id: int
+
+
 class ConversationIntelligenceV3Service:
-    """Observe authoritative turns; it cannot write to the outbox or provider."""
+    """Produce decisions without direct access to the outbox or provider."""
 
     outbox_write_capability = False
     provider_write_capability = False
@@ -71,6 +95,9 @@ class ConversationIntelligenceV3Service:
         )
         self._lock = threading.Lock()
         self._futures: set[Future] = set()
+        self._live_circuit_open = False
+        self._consecutive_live_failures = 0
+        self._live_failure_threshold = 3
 
     def update_settings(self, settings: V3RuntimeSettings) -> None:
         self.settings = settings
@@ -80,6 +107,96 @@ class ConversationIntelligenceV3Service:
             f"{self.creator_id}:{fan_id}:conversation-intelligence-v3".encode()
         ).digest()
         return int.from_bytes(digest[:8], "big") % 100 < self.shadow_percent
+
+    def is_live_sampled(self, fan_id: str) -> bool:
+        digest = hashlib.sha256(
+            f"{self.creator_id}:{fan_id}:conversation-intelligence-v3-live".encode()
+        ).digest()
+        return int.from_bytes(digest[:8], "big") % 100 < self.settings.live_percent
+
+    def can_decide_live(self, *, fan_id: str, trigger_kind: str) -> bool:
+        eligible = bool(
+            trigger_kind == "unread"
+            and self.settings.live_send_authority
+            and not self._live_circuit_open
+            and self.is_live_sampled(fan_id)
+        )
+        if not eligible:
+            return False
+        try:
+            now = datetime.now(timezone.utc)
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            return self.intelligence.live_cost_since(day_start) < float(
+                self.settings.max_daily_cost
+            )
+        except Exception as error:
+            logger.error(
+                "Conversation Intelligence V3 cost guard failed closed type=%s",
+                type(error).__name__,
+            )
+            return False
+
+    def decide_live(
+        self,
+        *,
+        inbound_id: int,
+        inbound_message_id: str,
+        fan_id: str,
+        trigger_kind: str,
+        provider_created_at: datetime,
+        context: dict,
+    ) -> V3LiveDecision | None:
+        """Synchronously select a candidate for the existing safe send path."""
+        if not self.can_decide_live(fan_id=fan_id, trigger_kind=trigger_kind):
+            return None
+        decision = self._evaluate(
+            inbound_id,
+            str(inbound_message_id),
+            fan_id,
+            trigger_kind,
+            provider_created_at,
+            None,
+            dict(context),
+            shadow=False,
+        )
+        if decision is None:
+            self.record_live_failure()
+        return decision
+
+    def record_live_success(self) -> None:
+        with self._lock:
+            self._consecutive_live_failures = 0
+
+    def record_live_failure(self) -> None:
+        with self._lock:
+            self._consecutive_live_failures += 1
+            if self._consecutive_live_failures >= self._live_failure_threshold:
+                self._live_circuit_open = True
+
+    def open_live_circuit(self) -> None:
+        with self._lock:
+            self._live_circuit_open = True
+
+    def link_live_decision(self, *, run_id: int, decision_id: int) -> bool:
+        return self.intelligence.link_run_decision(
+            run_id=run_id,
+            decision_id=decision_id,
+            shadow=False,
+        )
+
+    def confirm_callback_use(
+        self,
+        *,
+        fan_id: str,
+        callback_ids: tuple[int, ...],
+        sent_at: datetime,
+    ) -> None:
+        for callback_id in callback_ids[:2]:
+            self.intelligence.mark_callback_used(
+                fan_id=fan_id,
+                callback_id=callback_id,
+                used_at=sent_at,
+            )
 
     def submit(
         self,
@@ -122,14 +239,38 @@ class ConversationIntelligenceV3Service:
         current_decision_id: int | None,
         context: dict,
     ) -> None:
+        self._evaluate(
+            inbound_id,
+            inbound_message_id,
+            fan_id,
+            trigger_kind,
+            provider_created_at,
+            current_decision_id,
+            context,
+            shadow=True,
+        )
+
+    def _evaluate(
+        self,
+        inbound_id: int,
+        inbound_message_id: str,
+        fan_id: str,
+        trigger_kind: str,
+        provider_created_at: datetime,
+        current_decision_id: int | None,
+        context: dict,
+        *,
+        shadow: bool,
+    ) -> V3LiveDecision | None:
         prompt_fingerprint = hashlib.sha256(f"pending:{inbound_id}".encode()).hexdigest()
         compilation_report: dict = {}
+        active_mode = "shadow" if shadow else "live"
         try:
             durable_prior = self.states.get_or_create(self.creator_id, fan_id)
-            prior = (
-                self.intelligence.shadow_state(fan_id=fan_id, base=durable_prior)
-                if self.settings.relationship_state_v2_mode == "shadow"
-                else durable_prior
+            prior = self.intelligence.overlay_state(
+                fan_id=fan_id,
+                base=durable_prior,
+                shadow=shadow,
             )
             proposal = infer_deterministic_proposal(
                 message=str(context.get("fan_message") or ""),
@@ -138,9 +279,16 @@ class ConversationIntelligenceV3Service:
                 previous=prior,
             )
             reduction = self.reducer.reduce(prior, proposal)
-            if reduction.accepted and self.settings.relationship_state_v2_mode == "shadow":
+            if (
+                reduction.accepted
+                and self.settings.relationship_state_v2_mode == active_mode
+            ):
                 for transition in reduction.transitions:
-                    self.intelligence.record_transition(fan_id=fan_id, transition=transition)
+                    self.intelligence.record_transition(
+                        fan_id=fan_id,
+                        transition=transition,
+                        shadow=shadow,
+                    )
                 callback = infer_callback(
                     message=str(context.get("fan_message") or ""),
                     source_message_id=inbound_message_id,
@@ -152,14 +300,14 @@ class ConversationIntelligenceV3Service:
                         callback=callback,
                     )
             state = reduction.state if reduction.accepted else prior
-            if self.settings.strategy_planner_v2_mode != "shadow":
+            if self.settings.strategy_planner_v2_mode != active_mode:
                 self.intelligence.record_run(
                     {
                         "fan_id": fan_id,
                         "inbound_message_id": inbound_id,
                         "current_decision_id": current_decision_id,
                         "status": "state_observed",
-                        "shadow": True,
+                        "shadow": shadow,
                         "versions": {
                             "pipeline": "conversation-intelligence-v3.1",
                             "planner": "off",
@@ -190,14 +338,14 @@ class ConversationIntelligenceV3Service:
                         "completed_at": utcnow(),
                     }
                 )
-                return
+                return None
             memory = (
                 self.memory.retrieve(
                     fan_id=fan_id,
                     query=str(context.get("fan_message") or ""),
                     now=provider_created_at,
                 )
-                if self.settings.memory_retrieval_v3_mode == "shadow"
+                if self.settings.memory_retrieval_v3_mode == active_mode
                 else {"memories": [], "callbacks": [], "conflicts_excluded": 0}
             )
             playbook = (
@@ -206,7 +354,7 @@ class ConversationIntelligenceV3Service:
                     relationship_stage=str(state.get("relationship_stage") or "new"),
                     scenario=str(proposal.current_intent or ""),
                 )
-                if self.settings.playbook_engine_mode == "shadow"
+                if self.settings.playbook_engine_mode == active_mode
                 else {
                     "rules": [],
                     "boundaries": [],
@@ -305,7 +453,7 @@ class ConversationIntelligenceV3Service:
                 recent_creator_messages=recent_creator_messages,
                 creator_wide_messages=(
                     global_creator_messages
-                    if self.settings.global_diversity_mode == "shadow"
+                    if self.settings.global_diversity_mode == active_mode
                     else []
                 ),
             )
@@ -319,7 +467,7 @@ class ConversationIntelligenceV3Service:
                     recent_creator_messages=recent_creator_messages,
                     creator_wide_messages=(
                         global_creator_messages
-                        if self.settings.global_diversity_mode == "shadow"
+                        if self.settings.global_diversity_mode == active_mode
                         else []
                     ),
                     primary_act=item.act,
@@ -332,7 +480,7 @@ class ConversationIntelligenceV3Service:
                 if result.selected_message
                 else None
             )
-            self.intelligence.record_run(
+            run_id = self.intelligence.record_run(
                 {
                     "fan_id": fan_id,
                     "inbound_message_id": inbound_id,
@@ -344,7 +492,7 @@ class ConversationIntelligenceV3Service:
                         if result.selection_mode == "grounded_fallback"
                         else "operator_review_required"
                     ),
-                    "shadow": True,
+                    "shadow": shadow,
                     "versions": {
                         "pipeline": "conversation-intelligence-v3.1",
                         "playbook": playbook["fingerprint"],
@@ -387,6 +535,27 @@ class ConversationIntelligenceV3Service:
                     "completed_at": utcnow(),
                 }
             )
+            if shadow or not result.selected_message or result.requires_operator_review:
+                return None
+            return V3LiveDecision(
+                message=result.selected_message,
+                emotion=result.plan.understanding.emotion,
+                intent=result.plan.understanding.intent,
+                active_thread=(result.plan.understanding.active_thread or None),
+                primary_act=result.plan.strategy.primary_act,
+                secondary_act=result.plan.strategy.secondary_act,
+                route=route.path,
+                model=self.planner.model,
+                model_calls=result.model_calls,
+                latency_ms=result.latency_ms,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+                estimated_cost=result.estimated_cost,
+                selection_mode=result.selection_mode,
+                rejection_codes=tuple(result.rejection_codes),
+                used_callback_ids=tuple(result.plan.strategy.used_callback_ids),
+                intelligence_run_id=run_id,
+            )
         except V3PlannerError as error:
             self._record_failure(
                 inbound_id,
@@ -395,10 +564,11 @@ class ConversationIntelligenceV3Service:
                 error.code,
                 prompt_fingerprint,
                 compilation_report,
+                shadow=shadow,
             )
         except Exception as error:
             logger.error(
-                "Conversation Intelligence V3 shadow failure type=%s",
+                "Conversation Intelligence V3 evaluation failure type=%s",
                 type(error).__name__,
             )
             self._record_failure(
@@ -408,7 +578,9 @@ class ConversationIntelligenceV3Service:
                 "internal_error",
                 prompt_fingerprint,
                 compilation_report,
+                shadow=shadow,
             )
+        return None
 
     def _record_failure(
         self,
@@ -418,6 +590,8 @@ class ConversationIntelligenceV3Service:
         status: str,
         prompt_fingerprint: str,
         compilation_report: dict,
+        *,
+        shadow: bool,
     ) -> None:
         self.intelligence.record_run(
             {
@@ -425,7 +599,7 @@ class ConversationIntelligenceV3Service:
                 "inbound_message_id": inbound_id,
                 "current_decision_id": current_decision_id,
                 "status": str(status)[:24],
-                "shadow": True,
+                "shadow": shadow,
                 "versions": {"pipeline": "conversation-intelligence-v3.1"},
                 "prompt_fingerprint": prompt_fingerprint,
                 "compilation_report": compilation_report,
@@ -463,5 +637,8 @@ class ConversationIntelligenceV3Service:
             "shadow_percent": self.shadow_percent,
             "outbox_write_capability": False,
             "provider_write_capability": False,
+            "live_decision_capability": True,
+            "live_circuit_open": self._live_circuit_open,
+            "consecutive_live_failures": self._consecutive_live_failures,
             "model": self.planner.model,
         }

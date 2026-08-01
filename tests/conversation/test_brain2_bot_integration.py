@@ -1,10 +1,17 @@
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from src.conversation.advanced import AdvancedDecisionOutcome
 from src.conversation.brain import ConversationDecision
 from src.conversation.brain2 import BrainRuntimeSettings
+from src.conversation.intelligence_v3.service import V3LiveDecision
 from src.conversation.mode import BotMode
+from src.engagement.control_plane import (
+    TriggerOwner,
+    TriggerOwnershipRepository,
+    TriggerType,
+)
 from tests.persistence.test_message_pipeline import _bot
 
 
@@ -160,6 +167,181 @@ def _brain_settings(percent=100):
         live_percent=percent,
         max_live_percent=100,
     )
+
+
+def test_v3_live_candidate_uses_existing_decision_and_delivery_boundary():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    v3 = MagicMock()
+    v3.decide_live.return_value = V3LiveDecision(
+        message="that interview has been sitting heavy on u",
+        emotion="nervous",
+        intent="seek_support",
+        active_thread="interview",
+        primary_act="support",
+        secondary_act="learn",
+        route="fast",
+        model="deepseek-v4-flash",
+        model_calls=1,
+        latency_ms=25,
+        prompt_tokens=120,
+        completion_tokens=30,
+        estimated_cost=0.000025,
+        selection_mode="model_candidate",
+        rejection_codes=(),
+        used_callback_ids=(),
+        intelligence_run_id=17,
+    )
+    v3.can_decide_live.return_value = True
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+        conversation_intelligence_v3=v3,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    now = datetime.now(timezone.utc)
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="v3-live-1",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="my interview is tomorrow and i feel nervous",
+        provider_created_at=now,
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        source_message_id="v3-live-1",
+        source_timestamp=now,
+        persona=bot.persona,
+        history="",
+        fan_message=inbound.content,
+        known_facts=[],
+    )
+
+    assert reply is not None
+    assert reply.content == "that interview has been sitting heavy on u"
+    responder.decide.assert_not_called()
+    stored = bot.conversation_decision_repo.get(
+        inbound.id,
+        creator_id="creator-a",
+    )
+    assert stored.authority == "conversation_intelligence_v3"
+    assert stored.brain_version == "conversation-intelligence-v3.1"
+    assert stored.model == "deepseek-v4-flash"
+    assert stored.model_calls == 1
+    assert stored.gate_results["intelligence_run_id"] == 17
+    v3.link_live_decision.assert_called_once_with(
+        run_id=17,
+        decision_id=stored.id,
+    )
+    v3.record_live_success.assert_called_once_with()
+
+    bot._prepare_message = MagicMock(return_value=reply)
+    TriggerOwnershipRepository(bot.note_repo.engine).assign(
+        "creator-a",
+        TriggerType.INBOUND_REPLY,
+        TriggerOwner.BRAIN2,
+        actor="test",
+        reason="V3 uses the Brain 2.0 delivery owner",
+    )
+    bot.client.send_message.return_value = SimpleNamespace(
+        success=True,
+        message_id="v3-live-outbound-1",
+    )
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+    assert bot._process_claimed_inbound(claimed) is True
+    outbox = bot.processing_repo.get_outbox_for_inbound(inbound.id)
+    assert outbox is not None
+    assert outbox.status == "sent"
+    assert outbox.service_role == "brain2"
+    assert outbox.message_kind == "text"
+    assert outbox.media_ids == ()
+    assert outbox.price_millis is None
+    v3.confirm_callback_use.assert_called_once()
+
+
+def test_v3_gate_rejection_falls_back_to_current_brain_without_silence():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.return_value = _decision(
+        "support",
+        "validation",
+        "that sounds like a lot to carry",
+        "interview",
+    )
+    v3 = MagicMock()
+    v3.decide_live.return_value = V3LiveDecision(
+        message="same canned reply again",
+        emotion="nervous",
+        intent="seek_support",
+        active_thread="interview",
+        primary_act="support",
+        secondary_act=None,
+        route="fast",
+        model="deepseek-v4-flash",
+        model_calls=1,
+        latency_ms=25,
+        prompt_tokens=120,
+        completion_tokens=30,
+        estimated_cost=0.000025,
+        selection_mode="model_candidate",
+        rejection_codes=(),
+        used_callback_ids=(),
+        intelligence_run_id=18,
+    )
+    v3.can_decide_live.return_value = True
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+        conversation_intelligence_v3=v3,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    bot.brain_quality_gate = MagicMock()
+    bot.brain_quality_gate.evaluate.side_effect = [
+        SimpleNamespace(
+            approved=False,
+            reason_codes=("repeated_template",),
+        ),
+        SimpleNamespace(approved=True, reason_codes=()),
+    ]
+    now = datetime.now(timezone.utc)
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="v3-live-rejected-1",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="i feel nervous about tomorrow",
+        provider_created_at=now,
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        source_message_id="v3-live-rejected-1",
+        source_timestamp=now,
+        persona=bot.persona,
+        history="",
+        fan_message=inbound.content,
+        known_facts=[],
+    )
+
+    assert reply is not None
+    assert reply.content == "that sounds like a lot to carry"
+    stored = bot.conversation_decision_repo.get(
+        inbound.id,
+        creator_id="creator-a",
+    )
+    assert stored.authority == "current"
+    assert stored.fallback_used is True
+    assert stored.fallback_reason == "v3_final_gate_rejected"
+    v3.record_live_failure.assert_called_once_with()
+    v3.record_live_success.assert_not_called()
 
 
 def test_advanced_authority_uses_advanced_decision_and_skips_current_generator():

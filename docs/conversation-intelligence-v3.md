@@ -1,23 +1,28 @@
 # Conversation Intelligence V3
 
-Conversation Intelligence V3 extends Brain 2.0. It is not a second reply
-pipeline and, in its initial release, has no live send capability.
+Conversation Intelligence V3 extends Brain 2.0. It is not a second delivery
+pipeline. When explicitly granted live decision authority, it may select the
+candidate returned to the existing durable inbox/outbox pipeline.
 
 ## Authority boundary
 
-The V3 service receives a copy of an already-authenticated, creator-scoped
-inbound turn after the durable Brain 2.0 pipeline owns it. V3 may write only:
+The V3 service receives an already-authenticated, creator-scoped inbound turn
+after the durable Brain 2.0 pipeline owns it. V3 may write only:
 
 - reviewed knowledge revisions and their page evidence;
-- shadow fan-state transitions and callback metadata;
+- isolated shadow or live fan-state transitions and callback metadata;
 - privacy-safe candidate fingerprints and aggregate run telemetry;
 - attributable operator feedback.
 
-It cannot write to `outbox_messages`, call a Fansly provider, or alter the
-current Brain 2.0 decision. `CONVERSATION_INTELLIGENCE_V3_ALLOW_SEND=false`
-must remain the production ceiling for this release. Every component also has
-an independent `off`/`shadow`/`live` ceiling; a database request can never
-exceed its environment ceiling.
+It cannot write to `outbox_messages` or call a Fansly provider. Live selection
+requires every core V3 component to have a `live` environment ceiling,
+`CONVERSATION_INTELLIGENCE_V3_ALLOW_SEND=true`, and a non-zero effective live
+percentage bounded by `CONVERSATION_INTELLIGENCE_V3_MAX_LIVE_PERCENT`. Only
+authenticated inbound text turns are eligible. Proactive, PPV, media, and
+multi-bubble work is excluded. If V3 fails or its final gates reject the
+candidate, the current Brain pipeline remains the fallback. A positive
+`CONVERSATION_INTELLIGENCE_V3_MAX_DAILY_COST` is also required; the live V3
+path fails closed when that UTC-day ceiling is reached or cannot be read.
 
 ## Turn flow
 
@@ -42,8 +47,9 @@ exceed its environment ceiling.
 8. If all candidates fail, acknowledge only an explicit boundary or correction
    when that response is deterministically grounded. Otherwise record an
    operator-review state. Generic emergency filler is not allowed.
-9. Store only the shadow plan, version fingerprints, rejection codes, latency,
-   token usage, estimated cost, and privacy-safe candidate fingerprints.
+9. Store the shadow or live plan, version fingerprints, rejection codes,
+   latency, token usage, estimated cost, and privacy-safe candidate
+   fingerprints.
    Eligible inbound turns are observed even when the current reply pipeline
    returns no approved reply, so silent failures remain measurable.
 
@@ -87,11 +93,10 @@ with reviewer evidence. Frozen gates require:
 - at least 200 blinded reviews, at least 150 decisive reviews, at least 65%
   candidate preference, and zero safety regressions.
 
-Passing frozen gates still does not authorize a promotion. Authentic Tiffany
-shadow evidence, no negative/correction/bot-suspicion regression, no provider
-or safety regression, and separate explicit operator authorization are also
-required. Future live rollout is 5% -> 20% -> 50% -> 100%, with evidence review
-at each step.
+Passing frozen gates does not itself authorize a promotion. Live authority is
+an explicit operator and deployment decision. A three-consecutive-failure
+runtime circuit fails back to the current Brain pipeline without granting V3
+any outbox or provider capability.
 
 ## Multi-bubble delivery
 
