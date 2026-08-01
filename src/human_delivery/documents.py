@@ -146,7 +146,7 @@ class DocumentLinter:
         self,
         documents: dict[str, str],
         *,
-        runtime_document_limit: int = 20_000,
+        runtime_document_limit: int = 40_000,
     ) -> list[LintFinding]:
         findings: list[LintFinding] = []
         for document_type, raw in documents.items():
@@ -325,7 +325,7 @@ class DocumentLinter:
 class PromptCompiler:
     """Select complete prompt chunks under an explicit budget."""
 
-    def __init__(self, *, budget: int = 30_000):
+    def __init__(self, *, budget: int = 40_000):
         self.budget = min(max(int(budget), 8_000), 60_000)
 
     def compile(

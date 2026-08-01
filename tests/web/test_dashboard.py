@@ -2314,7 +2314,7 @@ class TestTruthfulDashboardControls:
         )
         assert chat_get_status == 200
         assert bible_get_status == 200
-        assert chat_get["max_characters"] == 50_000
+        assert chat_get["max_characters"] == 40_000
         assert chat_get["content"] == (
             "Reply directly and ask one natural question."
         )

@@ -11,7 +11,7 @@ from .store import SettingsStore
 
 CHAT_INSTRUCTIONS_SETTING = "conversation.chat_instructions"
 BRAND_BIBLE_SETTING = "conversation.brand_bible"
-MAX_CHAT_INSTRUCTIONS_CHARS = 50_000
+MAX_CHAT_INSTRUCTIONS_CHARS = 40_000
 MAX_BRAND_BIBLE_CHARS = 20_000
 
 

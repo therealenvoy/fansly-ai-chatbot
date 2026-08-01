@@ -55,7 +55,7 @@ class HumanDeliveryService:
         *,
         creator_id: str,
         settings: HumanDeliverySettings,
-        prompt_budget: int = 30_000,
+        prompt_budget: int = 40_000,
     ):
         self.engine = engine
         self.creator_id = creator_id

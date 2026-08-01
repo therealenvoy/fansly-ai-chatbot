@@ -86,6 +86,29 @@ def test_deepseek_responder_uses_context_and_returns_message(monkeypatch):
     assert "- works nights" in user
 
 
+def test_deepseek_responder_keeps_instructions_beyond_20k(monkeypatch):
+    response = MagicMock(spec=httpx.Response)
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [{"message": {"content": "got u babe"}}]
+    }
+    post = MagicMock(return_value=response)
+    monkeypatch.setattr(httpx, "post", post)
+    marker = "instruction-after-twenty-thousand"
+
+    result = DeepSeekChatResponder("secret").respond(
+        persona=_persona(),
+        history="Fan: hey",
+        fan_message="hey",
+        known_facts=[],
+        chat_instructions=("x" * 25_000) + marker,
+    )
+
+    assert result == "got u babe"
+    system = post.call_args.kwargs["json"]["messages"][0]["content"]
+    assert marker in system
+
+
 def test_stalled_responder_continues_without_calling_out_inactivity(
     monkeypatch,
 ):

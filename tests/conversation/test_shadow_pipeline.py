@@ -11,6 +11,7 @@ from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.shadow import (
     CONTRACT_EXAMPLES,
     DeepSeekStrategicAnalyzer,
+    MAX_INSTRUCTION_CONTEXT_CHARS,
     ProviderContractError,
     ShadowBrainService,
     StrategicResult,
@@ -40,6 +41,18 @@ class FakeStrategicAnalyzer:
             selected_candidate="shadow-only candidate",
             model_calls=3,
         )
+
+
+def test_strategic_analyzer_uses_40k_instruction_context():
+    marker = "instruction-after-eight-thousand"
+    instructions = ("x" * 25_000) + marker + ("y" * 20_000)
+
+    safe = DeepSeekStrategicAnalyzer._safe_context(
+        {"chat_instructions": instructions}
+    )
+
+    assert marker in safe["chat_instructions"]
+    assert len(safe["chat_instructions"]) == MAX_INSTRUCTION_CONTEXT_CHARS
 
 
 def _setup():

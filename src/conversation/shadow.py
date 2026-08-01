@@ -30,6 +30,8 @@ from src.conversation.brain2_repository import (
 
 logger = logging.getLogger(__name__)
 
+MAX_INSTRUCTION_CONTEXT_CHARS = 40_000
+
 
 def _parse_json_object(raw: str) -> dict:
     normalized = str(raw or "").strip()
@@ -437,8 +439,12 @@ class DeepSeekStrategicAnalyzer:
             "recent_episodes": list(context.get("episode_summaries") or [])[:3],
             "conversation_state": context.get("conversation_state") or {},
             "persona": context.get("persona") or {},
-            "chat_instructions": str(context.get("chat_instructions") or "")[:8_000],
-            "brand_bible": str(context.get("brand_bible") or "")[:8_000],
+            "chat_instructions": str(
+                context.get("chat_instructions") or ""
+            )[:MAX_INSTRUCTION_CONTEXT_CHARS],
+            "brand_bible": str(
+                context.get("brand_bible") or ""
+            )[:MAX_INSTRUCTION_CONTEXT_CHARS],
         }
 
     def _json_call(

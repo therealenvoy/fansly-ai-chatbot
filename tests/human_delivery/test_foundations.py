@@ -167,13 +167,13 @@ def test_prompt_compiler_selects_four_diverse_examples_without_identifiers():
     assert "creator_id:" not in compiled.prompt
 
 
-def test_linter_reports_sales_mixing_and_legacy_truncation():
+def test_linter_reports_sales_mixing_and_runtime_truncation():
     findings = DocumentLinter().lint(
         {
             "conversation_guide": (
                 "Always ask a question in every reply.\n"
                 "Offer a PPV discount and ask them to unlock it.\n"
-                + ("x" * 20_100)
+                + ("x" * 40_100)
             ),
             "sales_playbook": "Pricing rules belong here.",
         }
@@ -182,6 +182,20 @@ def test_linter_reports_sales_mixing_and_legacy_truncation():
     assert "sales_rules_mixed_into_conversation" in codes
     assert "legacy_runtime_truncation" in codes
     assert "forced_question_quota" in codes
+
+
+def test_linter_accepts_documents_within_40k_runtime_limit():
+    findings = DocumentLinter().lint(
+        {"conversation_guide": "x" * 40_000}
+    )
+
+    assert "legacy_runtime_truncation" not in {
+        finding.code for finding in findings
+    }
+
+
+def test_default_prompt_compiler_budget_is_40k():
+    assert PromptCompiler().budget == 40_000
 
 
 def test_linter_reports_creator_fact_and_emotional_conflicts():
