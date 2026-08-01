@@ -83,6 +83,7 @@ class StrategyDecision(StrictContract):
     must_avoid: list[str] = Field(default_factory=list, max_length=12)
     should_ask_question: bool = False
     desired_effect: str = Field(min_length=1, max_length=160)
+    used_callback_ids: list[int] = Field(default_factory=list, max_length=2)
 
     @model_validator(mode="after")
     def distinct_acts(self):
@@ -103,6 +104,7 @@ class CandidateDraft(StrictContract):
     act: PrimaryAct
     structure: str = Field(min_length=1, max_length=64)
     message: str = Field(min_length=1, max_length=500)
+    addresses_direct_question: bool = False
 
 
 class CandidateAssessment(StrictContract):

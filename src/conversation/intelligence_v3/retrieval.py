@@ -39,9 +39,12 @@ class MemoryRetrieverV3:
             fan_id=fan_id,
             limit=100,
         )
+        boundaries = []
         scored = []
+        conflicts_excluded = 0
         for memory in candidates:
             if str(memory.get("contradiction_status") or "clear") != "clear":
+                conflicts_excluded += 1
                 continue
             age_days = max(
                 0.0,
@@ -55,18 +58,32 @@ class MemoryRetrieverV3:
             )
             confidence = float(memory.get("confidence") or 0.0)
             importance = float(memory.get("importance") or 0.0)
-            usefulness = 1.0 if memory.get("memory_key") else 0.7
-            score = (
-                0.35 * relevance
-                + 0.2 * confidence
-                + 0.2 * importance
-                + 0.15 * recency
-                + 0.1 * usefulness
-            )
+            usefulness = _usefulness(memory.get("memory_type"))
+            if str(memory.get("memory_type")) == "boundary":
+                # Explicit fan boundaries are required context, not optional recall.
+                relevance = 1.0
+                boundaries.append(memory)
+            score = relevance * confidence * importance * recency * usefulness
             scored.append((score, memory))
         scored.sort(key=lambda item: item[0], reverse=True)
         selected = []
-        for score, memory in scored[: max(1, min(int(memory_limit), 12))]:
+        maximum = max(8, min(int(memory_limit), 12))
+        ordered = []
+        seen_ids = set()
+        for memory in boundaries:
+            memory_id = int(memory["id"])
+            if memory_id not in seen_ids:
+                ordered.append((1.0, memory))
+                seen_ids.add(memory_id)
+        for score, memory in scored:
+            memory_id = int(memory["id"])
+            if memory_id in seen_ids or score <= 0:
+                continue
+            ordered.append((score, memory))
+            seen_ids.add(memory_id)
+            if len(ordered) >= maximum:
+                break
+        for score, memory in ordered[:maximum]:
             selected.append(
                 {
                     "id": int(memory["id"]),
@@ -83,9 +100,13 @@ class MemoryRetrieverV3:
         )
         return {
             "memories": selected,
+            # Routing may use this count to force a strategic, fail-closed turn.
+            # The conflicting values themselves never enter the prompt.
+            "conflicts_excluded": conflicts_excluded,
             "callbacks": [
                 {
                     "id": int(row["id"]),
+                    "subject_key": str(row["subject_key"])[:128],
                     "subject": str(row["subject"])[:500],
                     "source_message_id": str(row["source_message_id"])[:128],
                     "sensitivity": str(row["emotional_sensitivity"]),
@@ -94,3 +115,21 @@ class MemoryRetrieverV3:
                 for row in callbacks
             ],
         }
+
+
+def _usefulness(memory_type: object) -> float:
+    return {
+        "boundary": 1.0,
+        "correction": 1.0,
+        "fan_promise": 0.95,
+        "callback": 0.95,
+        "emotional_sensitivity": 0.9,
+        "relationship_event": 0.9,
+        "preference": 0.85,
+        "dislike": 0.85,
+        "identity_fact": 0.8,
+        "interest": 0.8,
+        "recurring_life_event": 0.8,
+        "fantasy_theme": 0.75,
+        "uncertain_hypothesis": 0.4,
+    }.get(str(memory_type), 0.7)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from collections import Counter
 import hashlib
 import json
+import re
 from typing import Iterable
 
-from sqlalchemy import Integer, and_, desc, func, insert, or_, select, update
+from sqlalchemy import Integer, and_, case, desc, func, insert, or_, select, update
 
 from src.conversation.brain2_schema import CONVERSATION_OUTCOMES, FAN_MEMORIES_V2
 from src.conversation.intelligence_v3.knowledge import (
@@ -24,7 +26,11 @@ from src.conversation.intelligence_v3.schema import (
     FAN_CALLBACKS,
     FAN_STATE_TRANSITIONS,
 )
-from src.human_delivery.schema import CONVERSATION_DOCUMENTS, CONVERSATION_EXAMPLES
+from src.human_delivery.schema import (
+    CONVERSATION_DOCUMENTS,
+    CONVERSATION_EXAMPLES,
+    CREATOR_FACTS,
+)
 from src.persistence.schema import utcnow
 
 
@@ -46,7 +52,24 @@ class KnowledgeRepository:
         self.engine = engine
         self.creator_id = creator_id
 
-    def ingest(self, extracted: ExtractedDocument, *, actor: str = "operator") -> dict:
+    def ingest(
+        self,
+        extracted: ExtractedDocument,
+        *,
+        actor: str = "operator",
+        document_type: str = "conversation_playbook",
+    ) -> dict:
+        normalized_type = str(document_type or "conversation_playbook").strip().lower()
+        if normalized_type not in {
+            "conversation_playbook",
+            "relationship_playbook",
+            "sales_playbook",
+            "principles",
+            "decision_rules",
+            "approved_examples",
+            "boundaries",
+        }:
+            raise ValueError("invalid knowledge document type")
         now = utcnow()
         with self.engine.begin() as connection:
             existing = connection.execute(
@@ -65,7 +88,7 @@ class KnowledgeRepository:
                     select(func.coalesce(func.max(CONVERSATION_DOCUMENTS.c.revision), 0)).where(
                         and_(
                             CONVERSATION_DOCUMENTS.c.creator_id == self.creator_id,
-                            CONVERSATION_DOCUMENTS.c.document_type == "sales_playbook",
+                            CONVERSATION_DOCUMENTS.c.document_type == normalized_type,
                         )
                     )
                 ).scalar_one()
@@ -73,7 +96,7 @@ class KnowledgeRepository:
             result = connection.execute(
                 insert(CONVERSATION_DOCUMENTS).values(
                     creator_id=self.creator_id,
-                    document_type="sales_playbook",
+                    document_type=normalized_type,
                     revision=revision,
                     status="draft",
                     content=extracted.content,
@@ -123,6 +146,13 @@ class KnowledgeRepository:
             "sales",
         }:
             raise ValueError("invalid knowledge profile")
+        if values["knowledge_type"] not in {
+            "principle",
+            "decision_rule",
+            "approved_example",
+            "boundary",
+        }:
+            raise ValueError("invalid knowledge type")
         status = str(payload.get("status") or "draft").strip().lower()
         if status not in {"draft", "approved", "active", "archived"}:
             raise ValueError("invalid rule status")
@@ -395,11 +425,163 @@ class KnowledgeRepository:
             for row in rows
         ]
 
+    def set_document_status(
+        self,
+        document_id: int,
+        *,
+        status: str,
+        actor: str,
+    ) -> dict:
+        """Activate or roll back one reviewed revision without deleting history."""
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"draft", "active", "archived"}:
+            raise ValueError("invalid document status")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(CONVERSATION_DOCUMENTS).where(
+                    and_(
+                        CONVERSATION_DOCUMENTS.c.id == int(document_id),
+                        CONVERSATION_DOCUMENTS.c.creator_id == self.creator_id,
+                    )
+                )
+            ).mappings().first()
+            if row is None:
+                raise ValueError("knowledge document was not found")
+            if normalized_status == "active":
+                if str(row.get("extraction_status") or "") != "complete":
+                    raise ValueError("review extraction quality before activation")
+                connection.execute(
+                    update(CONVERSATION_DOCUMENTS)
+                    .where(
+                        and_(
+                            CONVERSATION_DOCUMENTS.c.creator_id == self.creator_id,
+                            CONVERSATION_DOCUMENTS.c.document_type == row["document_type"],
+                            CONVERSATION_DOCUMENTS.c.status == "active",
+                            CONVERSATION_DOCUMENTS.c.id != int(document_id),
+                        )
+                    )
+                    .values(status="archived", updated_at=now)
+                )
+            connection.execute(
+                update(CONVERSATION_DOCUMENTS)
+                .where(CONVERSATION_DOCUMENTS.c.id == int(document_id))
+                .values(
+                    status=normalized_status,
+                    activated_at=now if normalized_status == "active" else row.get("activated_at"),
+                    updated_at=now,
+                )
+            )
+            updated = connection.execute(
+                select(CONVERSATION_DOCUMENTS).where(
+                    CONVERSATION_DOCUMENTS.c.id == int(document_id)
+                )
+            ).mappings().one()
+        return dict(updated)
+
+    def create_example(self, payload: dict, *, actor: str) -> dict:
+        required = (
+            "scenario",
+            "stage",
+            "fan_tone",
+            "relationship_depth",
+            "intended_act",
+            "good_response",
+        )
+        values = {key: str(payload.get(key) or "").strip() for key in required}
+        if any(not value for value in values.values()):
+            raise ValueError("scenario, stage, tone, depth, act, and response are required")
+        source_document_id = int(payload.get("source_document_id") or 0)
+        source_page = int(payload.get("source_page") or 0)
+        if source_document_id <= 0 or source_page <= 0:
+            raise ValueError("a source document and page are required")
+        status = str(payload.get("status") or "draft").strip().lower()
+        if status not in {"draft", "active", "archived"}:
+            raise ValueError("invalid example status")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            source_exists = connection.execute(
+                select(CONVERSATION_DOCUMENT_PAGES.c.id).where(
+                    and_(
+                        CONVERSATION_DOCUMENT_PAGES.c.creator_id == self.creator_id,
+                        CONVERSATION_DOCUMENT_PAGES.c.document_id == source_document_id,
+                        CONVERSATION_DOCUMENT_PAGES.c.page_number == source_page,
+                    )
+                )
+            ).scalar_one_or_none()
+            if source_exists is None:
+                raise ValueError("the cited source page does not exist")
+            result = connection.execute(
+                insert(CONVERSATION_EXAMPLES).values(
+                    creator_id=self.creator_id,
+                    stage=values["stage"][:64],
+                    fan_tone=values["fan_tone"][:64],
+                    relationship_depth=values["relationship_depth"][:64],
+                    intended_act=values["intended_act"][:64],
+                    good_response=values["good_response"][:2_000],
+                    language=str(payload.get("language") or "en")[:16],
+                    anti_example=str(payload.get("anti_example") or "")[:2_000] or None,
+                    explanation=str(payload.get("explanation") or "")[:2_000] or None,
+                    safety_class="conversation_only",
+                    status=status,
+                    revision=1,
+                    scenario=values["scenario"][:128],
+                    conversation_context=str(payload.get("conversation_context") or "")[:4_000] or None,
+                    fan_state=dict(payload.get("fan_state") or {}),
+                    source_document_id=source_document_id,
+                    source_page=source_page,
+                    reviewer=str(actor)[:64] if status == "active" else None,
+                    reviewed_at=now if status == "active" else None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            row = connection.execute(
+                select(CONVERSATION_EXAMPLES).where(
+                    CONVERSATION_EXAMPLES.c.id == int(result.inserted_primary_key[0])
+                )
+            ).mappings().one()
+        return dict(row)
+
+    def set_example_status(self, example_id: int, *, status: str, actor: str) -> dict:
+        normalized = str(status or "").strip().lower()
+        if normalized not in {"draft", "active", "archived"}:
+            raise ValueError("invalid example status")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(CONVERSATION_EXAMPLES).where(
+                    and_(
+                        CONVERSATION_EXAMPLES.c.id == int(example_id),
+                        CONVERSATION_EXAMPLES.c.creator_id == self.creator_id,
+                    )
+                )
+            ).mappings().first()
+            if row is None:
+                raise ValueError("example was not found")
+            connection.execute(
+                update(CONVERSATION_EXAMPLES)
+                .where(CONVERSATION_EXAMPLES.c.id == int(example_id))
+                .values(
+                    status=normalized,
+                    reviewer=str(actor)[:64],
+                    reviewed_at=now,
+                    updated_at=now,
+                )
+            )
+            updated = connection.execute(
+                select(CONVERSATION_EXAMPLES).where(
+                    CONVERSATION_EXAMPLES.c.id == int(example_id)
+                )
+            ).mappings().one()
+        return dict(updated)
+
     def retrieve(
         self,
         *,
         query: str,
         relationship_stage: str,
+        scenario: str | None = None,
         profiles: Iterable[str] = ("conversation", "relationship"),
         rule_limit: int = 6,
         example_limit: int = 4,
@@ -407,17 +589,103 @@ class KnowledgeRepository:
         profile_set = {str(value) for value in profiles}
         if "sales" in profile_set:
             profile_set.remove("sales")
-        terms = tokenize(query, relationship_stage)
+        normalized_scenario = str(scenario or "").strip()[:128]
+        terms = tokenize(query, relationship_stage, normalized_scenario)
+        base_predicate = and_(
+            CONVERSATION_KNOWLEDGE_RULES.c.creator_id == self.creator_id,
+            CONVERSATION_KNOWLEDGE_RULES.c.status == "active",
+            CONVERSATION_KNOWLEDGE_RULES.c.knowledge_profile.in_(profile_set),
+        )
         with self.engine.connect() as connection:
-            rule_rows = connection.execute(
-                select(CONVERSATION_KNOWLEDGE_RULES).where(
+            boundary_rows = connection.execute(
+                select(CONVERSATION_KNOWLEDGE_RULES)
+                .where(
                     and_(
-                        CONVERSATION_KNOWLEDGE_RULES.c.creator_id == self.creator_id,
-                        CONVERSATION_KNOWLEDGE_RULES.c.status == "active",
-                        CONVERSATION_KNOWLEDGE_RULES.c.knowledge_profile.in_(profile_set),
+                        base_predicate,
+                        CONVERSATION_KNOWLEDGE_RULES.c.knowledge_type
+                        == "boundary",
                     )
                 )
+                .order_by(desc(CONVERSATION_KNOWLEDGE_RULES.c.priority))
+                .limit(12)
             ).mappings().all()
+            rule_rows: list[dict] = []
+            fts_terms = sorted(
+                {
+                    normalized
+                    for term in terms
+                    if len(normalized := re.sub(r"[^a-z0-9]", "", term)) >= 2
+                }
+            )[:24]
+            if self.engine.dialect.name == "postgresql" and fts_terms:
+                vector = func.to_tsvector(
+                    "simple",
+                    func.coalesce(CONVERSATION_KNOWLEDGE_RULES.c.search_text, ""),
+                )
+                # TOKEN_RE makes this expression safe for to_tsquery while OR
+                # semantics preserve recall for short, informal fan messages.
+                tsquery = func.to_tsquery("simple", " | ".join(fts_terms))
+                rank = func.ts_rank_cd(vector, tsquery)
+                matched = connection.execute(
+                    select(CONVERSATION_KNOWLEDGE_RULES)
+                    .add_columns(rank.label("_fts_rank"))
+                    .where(
+                        and_(
+                            base_predicate,
+                            CONVERSATION_KNOWLEDGE_RULES.c.knowledge_type
+                            != "boundary",
+                            vector.op("@@")(tsquery),
+                        )
+                    )
+                    .order_by(
+                        rank.desc(),
+                        desc(CONVERSATION_KNOWLEDGE_RULES.c.priority),
+                    )
+                    .limit(24)
+                ).mappings().all()
+                rule_rows.extend(dict(row) for row in matched)
+
+            # Structured fallback keeps sparse playbooks useful when the fan's
+            # wording and the approved rule wording share no lexical token.
+            # It remains bounded and never pulls sales rules into replies.
+            if self.engine.dialect.name != "postgresql" or len(rule_rows) < rule_limit:
+                matched_ids = [int(row["id"]) for row in rule_rows]
+                fallback_query = (
+                    select(CONVERSATION_KNOWLEDGE_RULES)
+                    .where(
+                        and_(
+                            base_predicate,
+                            CONVERSATION_KNOWLEDGE_RULES.c.knowledge_type
+                            != "boundary",
+                        )
+                    )
+                    .order_by(
+                        desc(
+                            case(
+                                (
+                                    CONVERSATION_KNOWLEDGE_RULES.c.scenario
+                                    == normalized_scenario,
+                                    2,
+                                ),
+                                (
+                                    CONVERSATION_KNOWLEDGE_RULES.c.scenario
+                                    == "all",
+                                    1,
+                                ),
+                                else_=0,
+                            )
+                        ),
+                        desc(CONVERSATION_KNOWLEDGE_RULES.c.priority),
+                        desc(CONVERSATION_KNOWLEDGE_RULES.c.updated_at),
+                    )
+                    .limit(24)
+                )
+                if matched_ids:
+                    fallback_query = fallback_query.where(
+                        CONVERSATION_KNOWLEDGE_RULES.c.id.not_in(matched_ids)
+                    )
+                fallback = connection.execute(fallback_query).mappings().all()
+                rule_rows.extend(dict(row) for row in fallback)
             example_rows = connection.execute(
                 select(CONVERSATION_EXAMPLES).where(
                     and_(
@@ -427,16 +695,32 @@ class KnowledgeRepository:
                     )
                 )
             ).mappings().all()
-        rules = sorted(
-            (dict(row) for row in rule_rows),
+        normalized_rules = [dict(row) for row in rule_rows]
+        boundaries = sorted(
+            (dict(row) for row in boundary_rows),
             key=lambda row: (
+                int(row.get("priority") or 0),
+                float(row.get("_fts_rank") or 0.0),
+            ),
+            reverse=True,
+        )[:12]
+        rules = sorted(
+            (
+                row
+                for row in normalized_rules
+                if str(row.get("knowledge_type")) != "boundary"
+            ),
+            key=lambda row: (
+                str(row.get("scenario") or "") == normalized_scenario,
+                str(row.get("scenario") or "") == "all",
                 relationship_stage in list(row.get("relationship_stages") or []),
+                float(row.get("_fts_rank") or 0.0),
                 lexical_score(terms, row.get("search_text")),
                 int(row.get("priority") or 0),
             ),
             reverse=True,
         )[: max(1, min(int(rule_limit), 6))]
-        examples = sorted(
+        ranked_examples = sorted(
             (dict(row) for row in example_rows),
             key=lambda row: (
                 str(row.get("stage") or "") == relationship_stage,
@@ -447,13 +731,32 @@ class KnowledgeRepository:
                 int(row.get("revision") or 0),
             ),
             reverse=True,
-        )[: max(1, min(int(example_limit), 4))]
+        )
+        examples: list[dict] = []
+        structures: set[tuple[int, int, int]] = set()
+        for row in ranked_examples:
+            response = str(row.get("good_response") or "")
+            signature = (
+                int("?" in response),
+                min(len(response.split()) // 6, 6),
+                min(response.count(".") + response.count("!") + response.count("?"), 5),
+            )
+            if signature in structures:
+                continue
+            structures.add(signature)
+            examples.append(row)
+            if len(examples) >= max(1, min(int(example_limit), 4)):
+                break
         return {
             "rules": rules,
+            "boundaries": boundaries,
             "examples": examples,
             "fingerprint": _fingerprint(
                 {
                     "rules": [(row["id"], row["version"]) for row in rules],
+                    "boundaries": [
+                        (row["id"], row["version"]) for row in boundaries
+                    ],
                     "examples": [(row["id"], row["revision"]) for row in examples],
                 }
             ),
@@ -479,11 +782,18 @@ class KnowledgeRepository:
                     )
                 )
             ).mappings().all()
+            examples = connection.execute(
+                select(CONVERSATION_EXAMPLES)
+                .where(CONVERSATION_EXAMPLES.c.creator_id == self.creator_id)
+                .order_by(desc(CONVERSATION_EXAMPLES.c.updated_at))
+                .limit(100)
+            ).mappings().all()
         return {
             "documents": [self._sanitize_document(row) for row in documents],
             "rules": [self._sanitize_rule(row) for row in rules],
             "open_conflicts": len(conflicts),
             "conflicts": [self._sanitize_conflict(row) for row in conflicts],
+            "examples": [self._sanitize_example(row) for row in examples],
         }
 
     @staticmethod
@@ -506,6 +816,14 @@ class KnowledgeRepository:
         item.pop("resolution", None)
         return item
 
+    @staticmethod
+    def _sanitize_example(row) -> dict:
+        item = dict(row)
+        item.pop("good_response", None)
+        item.pop("anti_example", None)
+        item.pop("conversation_context", None)
+        return item
+
 
 class IntelligenceRepository:
     """Store evidence changes and privacy-safe V3 shadow telemetry."""
@@ -513,6 +831,35 @@ class IntelligenceRepository:
     def __init__(self, engine, *, creator_id: str):
         self.engine = engine
         self.creator_id = creator_id
+
+    def verified_creator_facts(self, *, limit: int = 24) -> list[dict]:
+        """Return source-backed creator facts only; never infer persona facts."""
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(CREATOR_FACTS)
+                .where(
+                    and_(
+                        CREATOR_FACTS.c.creator_id == self.creator_id,
+                        CREATOR_FACTS.c.status == "active",
+                        CREATOR_FACTS.c.source_document_id.is_not(None),
+                        CREATOR_FACTS.c.confidence >= 0.8,
+                    )
+                )
+                .order_by(
+                    desc(CREATOR_FACTS.c.confidence),
+                    desc(CREATOR_FACTS.c.last_confirmed_at),
+                )
+                .limit(max(1, min(int(limit), 40)))
+            ).mappings().all()
+        return [
+            {
+                "fact_key": str(row["fact_key"])[:128],
+                "fact_value": str(row["fact_value"])[:500],
+                "confidence": round(float(row["confidence"]), 4),
+                "source_document_id": int(row["source_document_id"]),
+            }
+            for row in rows
+        ]
 
     def record_transition(self, *, fan_id: str, transition: dict) -> bool:
         values = {
@@ -539,6 +886,47 @@ class IntelligenceRepository:
                 return False
             connection.execute(insert(FAN_STATE_TRANSITIONS).values(**values))
         return True
+
+    def shadow_state(self, *, fan_id: str, base: dict | None = None) -> dict:
+        """Reconstruct the latest shadow overlay without mutating live Brain state."""
+        state = dict(base or {})
+        aliases = {
+            "current_emotion": state.get("current_mood"),
+            "active_topic": state.get("active_thread"),
+            "openness": state.get("openness_estimate"),
+            "uncertainty": state.get("uncertainty_estimate"),
+        }
+        state.update({key: value for key, value in aliases.items() if value is not None})
+        latest_ids = (
+            select(func.max(FAN_STATE_TRANSITIONS.c.id))
+            .where(
+                and_(
+                    FAN_STATE_TRANSITIONS.c.creator_id == self.creator_id,
+                    FAN_STATE_TRANSITIONS.c.fan_id == fan_id,
+                    FAN_STATE_TRANSITIONS.c.shadow.is_(True),
+                )
+            )
+            .group_by(FAN_STATE_TRANSITIONS.c.field_name)
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(FAN_STATE_TRANSITIONS).where(
+                    FAN_STATE_TRANSITIONS.c.id.in_(latest_ids)
+                )
+            ).mappings().all()
+        for row in rows:
+            state[str(row["field_name"])] = row["new_value"]
+        if rows:
+            latest = max(
+                rows,
+                key=lambda row: (_aware(row["source_timestamp"]), int(row["id"])),
+            )
+            state["last_source_message_id"] = latest["source_message_id"]
+            state["last_source_timestamp"] = latest["source_timestamp"]
+            state["version"] = max(int(row["state_version"]) for row in rows)
+        else:
+            state["version"] = int(state.get("state_version") or 0)
+        return state
 
     def upsert_callback(self, *, fan_id: str, callback: dict) -> int:
         subject = str(callback["subject"]).strip()[:2_000]
@@ -604,6 +992,46 @@ class IntelligenceRepository:
             ).mappings().all()
         return [dict(row) for row in rows]
 
+    def mark_callback_used(
+        self,
+        *,
+        fan_id: str,
+        callback_id: int,
+        used_at: datetime,
+    ) -> bool:
+        """Apply a durable cooldown only to a callback explicitly selected by V3."""
+        used_at = _aware(used_at)
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(FAN_CALLBACKS).where(
+                    and_(
+                        FAN_CALLBACKS.c.id == int(callback_id),
+                        FAN_CALLBACKS.c.creator_id == self.creator_id,
+                        FAN_CALLBACKS.c.fan_id == fan_id,
+                        FAN_CALLBACKS.c.resolved.is_(False),
+                    )
+                )
+            ).mappings().first()
+            if row is None:
+                return False
+            sensitive = str(row["emotional_sensitivity"]) != "standard"
+            connection.execute(
+                update(FAN_CALLBACKS)
+                .where(FAN_CALLBACKS.c.id == int(callback_id))
+                .values(
+                    last_used_at=used_at,
+                    times_referenced=int(row["times_referenced"] or 0) + 1,
+                    earliest_safe_reuse_at=used_at
+                    + timedelta(days=30 if sensitive else 7),
+                    current_relevance=max(
+                        0.1,
+                        float(row["current_relevance"] or 0.5) * 0.6,
+                    ),
+                    updated_at=utcnow(),
+                )
+            )
+        return True
+
     def record_run(self, payload: dict) -> int:
         allowed = {
             "fan_id",
@@ -649,17 +1077,17 @@ class IntelligenceRepository:
 
     def record_feedback(self, payload: dict, *, reviewer: str) -> int:
         allowed_types = {
-            "great",
-            "acceptable",
+            "good",
+            "bad",
             "too_generic",
-            "wrong_tone",
-            "wrong_memory",
             "repetitive",
-            "overly_sexual",
+            "wrong_context",
+            "wrong_tone",
             "too_long",
-            "too_cold",
-            "unsafe",
-            "manual_rewrite",
+            "too_sexual",
+            "missed_question",
+            "memory_error",
+            "operator_edited",
         }
         feedback_type = str(payload.get("feedback_type") or "").strip()
         if feedback_type not in allowed_types:
@@ -777,6 +1205,15 @@ class IntelligenceRepository:
                 )
                 .group_by(CONVERSATION_QUALITY_FEEDBACK.c.feedback_type)
             ).all()
+            attributed_outcomes = CONVERSATION_OUTCOMES.join(
+                CONVERSATION_INTELLIGENCE_RUNS,
+                and_(
+                    CONVERSATION_OUTCOMES.c.conversation_decision_id
+                    == CONVERSATION_INTELLIGENCE_RUNS.c.current_decision_id,
+                    CONVERSATION_OUTCOMES.c.creator_id
+                    == CONVERSATION_INTELLIGENCE_RUNS.c.creator_id,
+                ),
+            )
             outcome_row = connection.execute(
                 select(
                     func.count(CONVERSATION_OUTCOMES.c.id),
@@ -803,9 +1240,80 @@ class IntelligenceRepository:
                         ),
                         0,
                     ),
-                ).where(CONVERSATION_OUTCOMES.c.creator_id == self.creator_id)
+                    func.coalesce(
+                        func.sum(
+                            func.cast(CONVERSATION_OUTCOMES.c.correction_signal, Integer)
+                        ),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            func.cast(CONVERSATION_OUTCOMES.c.boundary_signal, Integer)
+                        ),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            func.cast(
+                                CONVERSATION_OUTCOMES.c.manual_creator_takeover,
+                                Integer,
+                            )
+                        ),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            func.cast(
+                                CONVERSATION_OUTCOMES.c.continued_three_turns,
+                                Integer,
+                            )
+                        ),
+                        0,
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            func.cast(
+                                CONVERSATION_OUTCOMES.c.returned_within_24h,
+                                Integer,
+                            )
+                        ),
+                        0,
+                    ),
+                    func.avg(CONVERSATION_OUTCOMES.c.reply_latency_seconds),
+                    func.avg(CONVERSATION_OUTCOMES.c.disclosure_depth),
+                )
+                .select_from(attributed_outcomes)
+                .where(
+                    CONVERSATION_INTELLIGENCE_RUNS.c.creator_id == self.creator_id
+                )
             ).one()
         outcome_count = int(outcome_row[0] or 0)
+        fingerprints = [
+            item
+            for row in runs
+            for item in list(row.get("candidate_fingerprints") or [])
+            if isinstance(item, dict)
+        ]
+        opener_counts = Counter(
+            item.get("opener_sha256") for item in fingerprints if item.get("opener_sha256")
+        )
+        skeleton_counts = Counter(
+            item.get("skeleton") for item in fingerprints if item.get("skeleton")
+        )
+        act_counts = Counter(
+            str((row.get("strategy") or {}).get("primary_act") or "unknown")
+            for row in runs
+        )
+        question_counts = Counter(
+            str(item.get("question_type") or "none") for item in fingerprints
+        )
+        pet_counts = Counter(str(item.get("pet_name") or "none") for item in fingerprints)
+        emoji_counts = Counter(str(item.get("emoji_count") or 0) for item in fingerprints)
+        fallback_runs = sum(
+            1
+            for row in runs
+            if str(row.get("status") or "") in {"grounded_fallback", "operator_review_required"}
+        )
         return {
             "statuses": {str(key): int(value) for key, value in status_rows},
             "feedback": {str(key): int(value) for key, value in feedback_rows},
@@ -827,6 +1335,31 @@ class IntelligenceRepository:
                 ),
                 "negative_signals": int(outcome_row[4] or 0),
                 "bot_suspicion_signals": int(outcome_row[5] or 0),
+                "correction_signals": int(outcome_row[6] or 0),
+                "boundary_signals": int(outcome_row[7] or 0),
+                "manual_takeovers": int(outcome_row[8] or 0),
+                "continued_three_turns": int(outcome_row[9] or 0),
+                "returned_within_24h": int(outcome_row[10] or 0),
+                "average_reply_latency_seconds": (
+                    round(float(outcome_row[11]), 2)
+                    if outcome_row[11] is not None
+                    else None
+                ),
+                "average_disclosure_depth": (
+                    round(float(outcome_row[12]), 4)
+                    if outcome_row[12] is not None
+                    else None
+                ),
+            },
+            "diversity": {
+                "candidate_sample": len(fingerprints),
+                "repeated_opener_clusters": sum(1 for value in opener_counts.values() if value > 1),
+                "repeated_structure_clusters": sum(1 for value in skeleton_counts.values() if value > 1),
+                "act_distribution": dict(act_counts),
+                "question_type_distribution": dict(question_counts),
+                "pet_name_distribution": dict(pet_counts),
+                "emoji_count_distribution": dict(emoji_counts),
+                "fallback_rate": round(fallback_runs / max(1, len(runs)), 4),
             },
             "recent_runs": [self._sanitize_run(row) for row in runs],
         }
@@ -913,13 +1446,17 @@ class IntelligenceRepository:
             ],
             "facts": [
                 {
+                    "id": int(row["id"]),
                     "memory_type": row["memory_type"],
                     "memory_key": row["memory_key"],
                     "display_value": row["display_value"],
                     "confidence": row["confidence"],
                     "importance": row["importance"],
+                    "status": row["status"],
+                    "sensitivity_class": row["sensitivity_class"],
                     "contradiction_status": row["contradiction_status"],
                     "source_timestamp": row["source_timestamp"],
+                    "expires_at": row["expires_at"],
                 }
                 for row in memories
             ],

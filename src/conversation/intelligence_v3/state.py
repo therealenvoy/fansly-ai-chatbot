@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import re
 
 from src.conversation.intelligence_v3.contracts import RelationshipSnapshot
@@ -18,6 +18,12 @@ STAGE_ORDER = (
     "established",
 )
 SPECIAL_STAGES = {"cooling", "repair_needed", "boundary_limited"}
+
+
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 BOUNDARY_RE = re.compile(
     r"\b(stop|don't|do not|not comfortable|too much|leave me alone|no thanks)\b",
     re.IGNORECASE,
@@ -40,6 +46,19 @@ OPENNESS_RE = re.compile(
     re.IGNORECASE,
 )
 PLAY_RE = re.compile(r"(?:😂|🤣|😏|😉|\blol\b|\bhaha+\b)", re.IGNORECASE)
+LOW_ENERGY_RE = re.compile(r"\b(tired|exhausted|sleepy|drained|quiet|down)\b", re.IGNORECASE)
+HIGH_ENERGY_RE = re.compile(r"\b(excited|amazing|omg|can't wait|so happy|hyped)\b", re.IGNORECASE)
+UNCERTAINTY_RE = re.compile(r"\b(maybe|not sure|i don't know|i dont know|confused|unsure)\b", re.IGNORECASE)
+SEXUAL_INTENSITY_RE = re.compile(
+    r"\b(horny|turned on|naked|nude|sex|fuck|cum|cock|pussy|fantasy)\b",
+    re.IGNORECASE,
+)
+FAN_PROMISE_RE = re.compile(r"\b(i(?:'ll| will| promise)|you have my word)\b", re.IGNORECASE)
+TOPIC_RE = re.compile(
+    r"\b(interview|exam|school|work|job|birthday|trip|appointment|doctor|"
+    r"hospital|surgery|family|dog|cat|relationship|weekend)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +69,15 @@ class StateProposal:
     boundary_signal: str | None
     direct_question: str | None
     unresolved_emotional_thread: str | None
+    current_emotion: str
+    current_energy: str
+    openness: float
+    sexual_intensity: float
+    uncertainty: float
+    active_topic: str | None
+    fan_promise: str | None
+    future_callback: str | None
+    recommended_next_act: str
     source_message_id: str
     source_timestamp: datetime
 
@@ -80,6 +108,13 @@ def infer_deterministic_proposal(
     correction = CORRECTION_RE.search(text)
     openness = bool(OPENNESS_RE.search(text))
     playful = bool(PLAY_RE.search(text))
+    low_energy = bool(LOW_ENERGY_RE.search(text))
+    high_energy = bool(HIGH_ENERGY_RE.search(text))
+    uncertain = bool(UNCERTAINTY_RE.search(text))
+    sexual = bool(SEXUAL_INTENSITY_RE.search(text))
+    topic = TOPIC_RE.search(text)
+    callback = CALLBACK_RE.search(text)
+    fan_promise = FAN_PROMISE_RE.search(text)
     direct_question = text[:500] if "?" in text else None
     stage = str(previous.get("stage") or previous.get("relationship_stage") or "new")
     if stage not in set(STAGE_ORDER) | SPECIAL_STAGES:
@@ -142,6 +177,53 @@ def infer_deterministic_proposal(
         boundary_signal=boundary.group(0).lower() if boundary else None,
         direct_question=direct_question,
         unresolved_emotional_thread="personal_disclosure" if openness else None,
+        current_emotion=(
+            "boundary_assertion"
+            if boundary
+            else "frustrated_correction"
+            if correction
+            else "vulnerable"
+            if openness
+            else "playful"
+            if playful
+            else "neutral"
+        ),
+        current_energy=(
+            "low" if low_energy else "high" if high_energy else "medium"
+        ),
+        openness=1.0 if openness else _bounded(previous.get("openness", 0.0)),
+        sexual_intensity=(
+            0.8
+            if sexual
+            else _bounded(previous.get("sexual_intensity", 0.0) * 0.8)
+        ),
+        uncertainty=(
+            0.8
+            if uncertain
+            else _bounded(previous.get("uncertainty", 0.0) * 0.75)
+        ),
+        active_topic=(
+            topic.group(0).lower()
+            if topic
+            else str(previous.get("active_topic") or "").strip()[:128] or None
+        ),
+        fan_promise=text[:500] if fan_promise else previous.get("fan_promise"),
+        future_callback=(
+            callback.group(0).lower()
+            if callback
+            else previous.get("future_callback")
+        ),
+        recommended_next_act=(
+            "give_space"
+            if boundary
+            else "repair"
+            if correction
+            else "support"
+            if openness
+            else "answer"
+            if direct_question
+            else "maintain"
+        ),
         source_message_id=str(source_message_id)[:128],
         source_timestamp=source_timestamp,
     )
@@ -197,12 +279,24 @@ class RelationshipStateReducer:
         "boundary_signal",
         "direct_unanswered_question",
         "unresolved_emotional_thread",
+        "current_emotion",
+        "current_energy",
+        "openness",
+        "sexual_intensity",
+        "uncertainty",
+        "active_topic",
+        "creator_promise",
+        "fan_promise",
+        "future_callback",
+        "last_successful_act",
+        "recent_failed_acts",
+        "recommended_next_act",
     )
 
     def reduce(self, previous: dict | None, proposal: StateProposal) -> StateReduction:
         previous = dict(previous or {})
         last_timestamp = previous.get("last_source_timestamp")
-        if last_timestamp is not None and proposal.source_timestamp <= last_timestamp:
+        if last_timestamp is not None and _aware(proposal.source_timestamp) <= _aware(last_timestamp):
             return StateReduction(False, "stale_source", previous, ())
         if str(previous.get("last_source_message_id") or "") == proposal.source_message_id:
             return StateReduction(False, "duplicate_source", previous, ())
@@ -273,6 +367,18 @@ class RelationshipStateReducer:
             "boundary_signal": proposal.boundary_signal,
             "direct_unanswered_question": proposal.direct_question,
             "unresolved_emotional_thread": proposal.unresolved_emotional_thread,
+            "current_emotion": proposal.current_emotion,
+            "current_energy": proposal.current_energy,
+            "openness": proposal.openness,
+            "sexual_intensity": proposal.sexual_intensity,
+            "uncertainty": proposal.uncertainty,
+            "active_topic": proposal.active_topic,
+            "creator_promise": previous.get("creator_promise"),
+            "fan_promise": proposal.fan_promise,
+            "future_callback": proposal.future_callback,
+            "last_successful_act": previous.get("last_successful_act"),
+            "recent_failed_acts": list(previous.get("recent_failed_acts") or [])[-5:],
+            "recommended_next_act": proposal.recommended_next_act,
         }
 
     @staticmethod

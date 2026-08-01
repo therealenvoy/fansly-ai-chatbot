@@ -26,8 +26,22 @@ Extract these fields (omit any you can't determine):
 - "emotional_triggers": list of things they respond strongly to (compliments, specific topics)
 - "hard_limits": list of boundaries or things they explicitly don't want
 - "facts": list of other personal details worth remembering (location, pets, schedule, life events, things they told you about themselves)
+- "memory_candidates": optional list of durable memory objects. Each object must contain:
+  - "type": one of identity_fact, interest, preference, dislike, boundary,
+    recurring_life_event, emotional_sensitivity, relationship_event, fan_promise,
+    correction, callback, fantasy_theme, uncertain_hypothesis
+  - "value": the exact concise fact supported by these messages
+  - "confidence": 0.0-1.0 (use less than 0.7 for an uncertain hypothesis)
+  - "importance": 0.0-1.0
+  - "sensitivity_class": standard, sensitive, or private
+  - "temporary_days": null for durable facts, otherwise 1-365
+  - "contradiction_key": a stable short key only when a correction or mutually
+    exclusive fact should supersede an older value
 
-Be conservative — only extract what's actually stated or strongly implied.
+Be conservative — only extract what is explicitly stated. Never turn a guess,
+flirtation, roleplay, hypothetical, or assistant suggestion into a confirmed fact.
+Use uncertain_hypothesis for a useful but uncertain interpretation. Boundaries and
+corrections must be explicit. Do not infer creator promises from fan messages.
 
 Messages:
 {messages}
@@ -64,8 +78,7 @@ class LLMFactExtractor:
     def extract(self, messages: list[str]) -> dict:
         """Extract facts from a batch of fan messages.
 
-        Returns dict with optional keys: display_name, occupation,
-        preferences, emotional_triggers, hard_limits, facts.
+        Returns legacy note fields plus optional validated memory_candidates.
         Returns empty dict on any failure or when disabled.
         """
         with self._lock:
@@ -122,6 +135,29 @@ class LLMFactExtractor:
                 val = parsed.get(key)
                 if isinstance(val, list):
                     result[key] = [str(v) for v in val if v]
+            candidates = parsed.get("memory_candidates")
+            if isinstance(candidates, list):
+                normalized_candidates = []
+                for candidate in candidates[:24]:
+                    if not isinstance(candidate, dict):
+                        continue
+                    value = str(candidate.get("value") or "").strip()
+                    memory_type = str(candidate.get("type") or "").strip()
+                    if not value or not memory_type:
+                        continue
+                    normalized_candidates.append(
+                        {
+                            "type": memory_type,
+                            "value": value[:2_000],
+                            "confidence": candidate.get("confidence"),
+                            "importance": candidate.get("importance"),
+                            "sensitivity_class": candidate.get("sensitivity_class"),
+                            "temporary_days": candidate.get("temporary_days"),
+                            "contradiction_key": candidate.get("contradiction_key"),
+                        }
+                    )
+                if normalized_candidates:
+                    result["memory_candidates"] = normalized_candidates
             return result
 
         except Exception as exc:

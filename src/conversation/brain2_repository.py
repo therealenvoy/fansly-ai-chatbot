@@ -290,6 +290,7 @@ class FanMemoryV2Repository(_Repository):
         sensitivity_class: str = "standard",
         contradiction_status: str = "clear",
         source_event_id: str | None = None,
+        supersede_across_types: bool = False,
     ) -> int:
         now = utcnow()
         memory_key = contradiction_key or (
@@ -357,13 +358,18 @@ class FanMemoryV2Repository(_Repository):
                 )
             ).scalar_one()
             if memory_key:
+                same_fact_family = (
+                    FAN_MEMORIES_V2.c.memory_type != "boundary"
+                    if supersede_across_types
+                    else FAN_MEMORIES_V2.c.memory_type == memory_type
+                )
                 connection.execute(
                     update(FAN_MEMORIES_V2)
                     .where(
                         and_(
                             FAN_MEMORIES_V2.c.creator_id == creator_id,
                             FAN_MEMORIES_V2.c.fan_id == fan_id,
-                            FAN_MEMORIES_V2.c.memory_type == memory_type,
+                            same_fact_family,
                             FAN_MEMORIES_V2.c.memory_key == memory_key,
                             FAN_MEMORIES_V2.c.id != memory_id,
                             FAN_MEMORIES_V2.c.status == "active",
