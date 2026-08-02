@@ -10,7 +10,7 @@ import math
 import re
 import time
 from types import UnionType
-from typing import Any, Callable, get_args, get_origin
+from typing import Any, Callable, Literal, get_args, get_origin
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -149,6 +149,104 @@ def _prune_transport_fields(value: Any, annotation: Any) -> tuple[Any, bool]:
             changed = changed or item_changed
         return normalized, changed
     return value, False
+
+
+_CONSERVATIVE_LITERAL_DEFAULTS: dict[str, object] = {
+    "relationship.stage": "new",
+    "relationship.pet_name_tolerance": "unknown",
+    "relationship.momentum": "steady",
+    "relationship.intimacy_ceiling": "neutral",
+    "strategy.primary_act": "maintain",
+    "strategy.secondary_act": None,
+    "delivery.energy": "medium",
+    "delivery.length": "short",
+    "candidates.act": "maintain",
+    "replacement_candidate.act": "maintain",
+}
+
+
+def _contract_path(path: tuple[object, ...]) -> str:
+    """Return a privacy-safe schema path without list indexes or values."""
+    return ".".join(str(part) for part in path if not isinstance(part, int))
+
+
+def _literal_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+
+
+def _normalize_contract_literals(
+    value: Any,
+    annotation: Any,
+    *,
+    path: tuple[object, ...] = (),
+) -> tuple[Any, set[str]]:
+    """Normalize provider enum transport safely, never message content.
+
+    Case and separator-only aliases are canonicalized. Unknown planning metadata
+    is downgraded to an explicit conservative default; content and safety gates
+    remain untouched and strict domain validation still runs afterward.
+    """
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        if value in args:
+            return value, set()
+        if isinstance(value, str) and all(isinstance(item, str) for item in args):
+            token = _literal_token(value)
+            matches = [item for item in args if _literal_token(item) == token]
+            if len(matches) == 1:
+                return matches[0], {_contract_path(path)}
+        key = _contract_path(path)
+        if key in _CONSERVATIVE_LITERAL_DEFAULTS:
+            return _CONSERVATIVE_LITERAL_DEFAULTS[key], {key}
+        return value, set()
+    if origin in (list, tuple) and isinstance(value, list) and args:
+        normalized = []
+        changed: set[str] = set()
+        for index, item in enumerate(value):
+            clean, item_changed = _normalize_contract_literals(
+                item,
+                args[0],
+                path=(*path, index),
+            )
+            normalized.append(clean)
+            changed.update(item_changed)
+        return normalized, changed
+    if origin in (dict,) or origin is not None and origin.__name__ == "dict":
+        return value, set()
+    if origin in (UnionType,) or str(origin) == "typing.Union":
+        if value is None and type(None) in args:
+            return None, set()
+        for option in args:
+            option_origin = get_origin(option)
+            if option_origin is Literal or (
+                isinstance(option, type) and issubclass(option, BaseModel)
+            ):
+                clean, changed = _normalize_contract_literals(
+                    value,
+                    option,
+                    path=path,
+                )
+                if changed:
+                    return clean, changed
+        return value, set()
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if not isinstance(value, dict):
+            return value, set()
+        normalized = dict(value)
+        changed: set[str] = set()
+        for key, field in annotation.model_fields.items():
+            if key not in value:
+                continue
+            clean, item_changed = _normalize_contract_literals(
+                value[key],
+                field.annotation,
+                path=(*path, key),
+            )
+            normalized[key] = clean
+            changed.update(item_changed)
+        return normalized, changed
+    return value, set()
 
 
 def _validation_code(error: ValidationError) -> str:
@@ -789,6 +887,7 @@ class DeepSeekV3Planner:
                 model_calls=0,
             )
         example = self._example(schema)
+        json_schema = schema.model_json_schema()
         request_fn = request or self._request
         schema_label = _schema_name(schema)
         try:
@@ -806,7 +905,9 @@ class DeepSeekV3Planner:
                         {
                             "role": "system",
                             "content": (
-                                "Return JSON only and match this shape: "
+                                "Return JSON only and satisfy this exact JSON Schema: "
+                                + json.dumps(json_schema, separators=(",", ":"))
+                                + ". Example shape: "
                                 + json.dumps(example, separators=(",", ":"))
                                 + ". "
                                 + instruction
@@ -943,6 +1044,12 @@ class DeepSeekV3Planner:
         cleaned, extras_removed = _prune_transport_fields(decoded, schema)
         if extras_removed:
             degradations.add("provider_extra_fields_ignored")
+        cleaned, normalized_literals = _normalize_contract_literals(cleaned, schema)
+        degradations.update(
+            f"provider_enum_defaulted:{path}"
+            for path in sorted(normalized_literals)
+            if path
+        )
         try:
             parsed = schema.model_validate(cleaned)
         except ValidationError as error:

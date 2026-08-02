@@ -313,6 +313,9 @@ def test_fast_planner_generates_two_distinct_candidates_in_one_call():
 
     assert len(calls) == 1
     assert calls[0]["messages"][1]["content"].find('"candidate_count":2') >= 0
+    system_prompt = calls[0]["messages"][0]["content"]
+    assert '"enum":["new","recognition","comfortable"' in system_prompt
+    assert "developing_trust" in system_prompt
     assert len(result.plan.candidates) == 2
     assert result.selected_message is not None
     assert result.model_calls == 1
@@ -357,22 +360,58 @@ def test_transport_adapter_accepts_fenced_json_extra_fields_and_one_candidate():
     assert "candidate_count_degraded" in result.degradation_codes
 
 
-@pytest.mark.parametrize(
-    ("mutate", "expected_code"),
-    [
-        (
-            lambda payload: payload["relationship"].update(stage="not-a-stage"),
-            "provider_contract_enum_invalid",
-        ),
-        (
-            lambda payload: payload["strategy"].pop("desired_effect"),
-            "provider_contract_missing_required",
-        ),
-    ],
-)
+def test_transport_adapter_defaults_unknown_planning_enums_conservatively():
+    payload = _planner_payload(
+        [
+            "interview nerves are real and i'm listening",
+            "the interview matters to u and that makes sense",
+        ]
+    )
+    payload["relationship"].update(
+        stage="bonded",
+        pet_name_tolerance="sometimes",
+        momentum="medium",
+        intimacy_ceiling="intimate",
+    )
+    payload["strategy"].update(primary_act="engage")
+    payload["delivery"].update(energy="gentle", length="brief")
+    payload["candidates"][0]["act"] = "engage"
+    planner = DeepSeekV3Planner(
+        api_key="secret",
+        request=lambda *args, **kwargs: _RawPlannerResponse(json.dumps(payload)),
+    )
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "i feel nervous",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+
+    result = planner.generate(
+        compiled,
+        strategic=False,
+        recent_fan_messages=[],
+        recent_creator_messages=[],
+    )
+
+    assert result.plan.relationship.stage == "new"
+    assert result.plan.relationship.pet_name_tolerance == "unknown"
+    assert result.plan.relationship.momentum == "steady"
+    assert result.plan.relationship.intimacy_ceiling == "neutral"
+    assert result.plan.strategy.primary_act == "maintain"
+    assert result.plan.delivery.energy == "medium"
+    assert result.plan.delivery.length == "short"
+    assert result.plan.candidates[0].act == "maintain"
+    assert "provider_enum_defaulted:relationship.stage" in result.degradation_codes
+    assert all("bonded" not in code for code in result.degradation_codes)
+
+
 def test_transport_adapter_reports_safe_specific_contract_failures(
-    mutate,
-    expected_code,
 ):
     payload = _planner_payload(
         [
@@ -380,7 +419,7 @@ def test_transport_adapter_reports_safe_specific_contract_failures(
             "the interview matters to u and that makes sense",
         ]
     )
-    mutate(payload)
+    payload["strategy"].pop("desired_effect")
     planner = DeepSeekV3Planner(
         api_key="secret",
         request=lambda *args, **kwargs: _RawPlannerResponse(json.dumps(payload)),
@@ -405,7 +444,7 @@ def test_transport_adapter_reports_safe_specific_contract_failures(
             recent_creator_messages=[],
         )
 
-    assert raised.value.code == expected_code
+    assert raised.value.code == "provider_contract_missing_required"
     assert raised.value.diagnostic["schema"] == "plan"
     assert "raw_content" not in raised.value.diagnostic
     assert raised.value.model_calls == 1
