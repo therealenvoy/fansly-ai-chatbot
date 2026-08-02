@@ -3158,6 +3158,7 @@ class FanslyBot:
                     and not self.conversation_intelligence_v3.can_decide_live(
                         fan_id=fan_id,
                         trigger_kind=trigger_kind,
+                        allow_inflight_probe=True,
                     )
                 ):
                     execution.update(
@@ -3227,7 +3228,7 @@ class FanslyBot:
                         continue
                 break
             if execution["authority"] == "conversation_intelligence_v3":
-                self.conversation_intelligence_v3.record_live_failure()
+                self.conversation_intelligence_v3.record_live_quality_failure()
                 execution.update(
                     authority="current",
                     brain_version="current-v1",
@@ -3287,6 +3288,23 @@ class FanslyBot:
                         "deterministic_style_repair"
                     ] = "approved"
                     break
+                soft_reasons = set(gate.reason_codes)
+                if soft_reasons and soft_reasons.issubset(diversity_reason_set):
+                    safe_fallback = self._safe_conversation_fallback(
+                        trigger_kind=trigger_kind,
+                        fan_message=context.get("fan_message"),
+                        question_streak=int(brain_state["question_streak"]),
+                    )
+                    approved = (
+                        self._approve_conversation_text(fan_id, safe_fallback)
+                        if safe_fallback
+                        else None
+                    )
+                    if approved:
+                        execution["gate_results"][
+                            "soft_diversity_degradation"
+                        ] = sorted(soft_reasons)
+                        break
                 logger.warning(
                     "Conversation decision rejected by final gates: %s",
                     gate.reason_codes or ("content_or_style_rejected",),

@@ -23,8 +23,10 @@ from src.conversation.intelligence_v3.planner import (
     MAX_CONTEXT_CHARS,
     MAX_CONTEXT_TOKENS,
     DeepSeekV3Planner,
+    PlanEnvelope,
     PlannerResult,
     PromptCompilerV3,
+    V3PlannerError,
 )
 from src.conversation.intelligence_v3.retrieval import MemoryRetrieverV3
 from src.conversation.intelligence_v3.repository import (
@@ -262,6 +264,20 @@ class _PlannerResponse:
         }
 
 
+class _RawPlannerResponse(_PlannerResponse):
+    def __init__(self, content, *, outer=None):
+        self.content = content
+        self.outer = outer
+
+    def json(self):
+        if self.outer is not None:
+            return self.outer
+        return {
+            "choices": [{"message": {"content": self.content}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 40},
+        }
+
+
 def test_fast_planner_generates_two_distinct_candidates_in_one_call():
     calls = []
 
@@ -301,6 +317,168 @@ def test_fast_planner_generates_two_distinct_candidates_in_one_call():
     assert result.selected_message is not None
     assert result.model_calls == 1
     assert result.selection_mode == "model_candidate"
+
+
+def test_transport_adapter_accepts_fenced_json_extra_fields_and_one_candidate():
+    payload = _planner_payload(["interview nerves make sense when it matters"])
+    payload["provider_note"] = "ignored transport metadata"
+    payload["strategy"]["provider_note"] = "ignored nested metadata"
+    payload["candidates"][0]["provider_note"] = "ignored candidate metadata"
+
+    planner = DeepSeekV3Planner(
+        api_key="secret",
+        request=lambda *args, **kwargs: _RawPlannerResponse(
+            "```json\n" + json.dumps(payload) + "\n```"
+        ),
+    )
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "i feel nervous about my interview tomorrow",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+
+    result = planner.generate(
+        compiled,
+        strategic=False,
+        recent_fan_messages=[],
+        recent_creator_messages=[],
+    )
+
+    assert result.selected_message == "interview nerves make sense when it matters"
+    assert result.model_calls == 1
+    assert "provider_json_fence_stripped" in result.degradation_codes
+    assert "provider_extra_fields_ignored" in result.degradation_codes
+    assert "candidate_count_degraded" in result.degradation_codes
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected_code"),
+    [
+        (
+            lambda payload: payload["relationship"].update(stage="not-a-stage"),
+            "provider_contract_enum_invalid",
+        ),
+        (
+            lambda payload: payload["strategy"].pop("desired_effect"),
+            "provider_contract_missing_required",
+        ),
+    ],
+)
+def test_transport_adapter_reports_safe_specific_contract_failures(
+    mutate,
+    expected_code,
+):
+    payload = _planner_payload(
+        [
+            "interview nerves are real and i'm listening",
+            "the interview matters to u and that makes sense",
+        ]
+    )
+    mutate(payload)
+    planner = DeepSeekV3Planner(
+        api_key="secret",
+        request=lambda *args, **kwargs: _RawPlannerResponse(json.dumps(payload)),
+    )
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "i feel nervous",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+
+    with pytest.raises(V3PlannerError) as raised:
+        planner.generate(
+            compiled,
+            strategic=False,
+            recent_fan_messages=[],
+            recent_creator_messages=[],
+        )
+
+    assert raised.value.code == expected_code
+    assert raised.value.diagnostic["schema"] == "plan"
+    assert "raw_content" not in raised.value.diagnostic
+    assert raised.value.model_calls == 1
+
+
+def test_transport_adapter_distinguishes_truncated_json_from_outer_shape_errors():
+    planner = DeepSeekV3Planner(api_key="secret")
+
+    with pytest.raises(V3PlannerError) as truncated:
+        planner._call(
+            instruction="return a plan",
+            payload={},
+            schema=PlanEnvelope,
+            request=lambda *args, **kwargs: _RawPlannerResponse('{"understanding":'),
+        )
+    assert truncated.value.code == "provider_content_json_truncated"
+
+    with pytest.raises(V3PlannerError) as shape:
+        planner._call(
+            instruction="return a plan",
+            payload={},
+            schema=PlanEnvelope,
+            request=lambda *args, **kwargs: _RawPlannerResponse(
+                "",
+                outer={"choices": []},
+            ),
+        )
+    assert shape.value.code == "provider_response_shape_invalid"
+
+
+def test_invalid_strategic_judge_uses_deterministic_safe_candidate_without_third_call():
+    responses = [
+        _PlannerResponse(
+            _planner_payload(
+                [
+                    "interview nerves are real and i'm listening",
+                    "the interview matters to u and that makes sense",
+                    "u care about tomorrow, so the nerves make sense",
+                ]
+            )
+        ),
+        _RawPlannerResponse("```json\n{\"assessments\":\n```"),
+    ]
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append(kwargs["json"])
+        return responses[len(calls) - 1]
+
+    planner = DeepSeekV3Planner(api_key="secret", request=request)
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "i feel nervous about my interview tomorrow",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+
+    result = planner.generate(
+        compiled,
+        strategic=True,
+        recent_fan_messages=[],
+        recent_creator_messages=[],
+    )
+
+    assert len(calls) == 2
+    assert result.selected_message is not None
+    assert result.selection_mode == "deterministic_judge_fallback"
+    assert "judge_provider_content_json_truncated" in result.degradation_codes
 
 
 def test_all_rejected_fast_candidates_use_only_evidence_grounded_fallback():
@@ -1047,6 +1225,7 @@ def test_live_decision_returns_candidate_without_outbox_or_provider_capability()
         def get_recent_creator_messages(self, creator_id, limit):
             return []
 
+    clock = [datetime(2026, 8, 2, tzinfo=timezone.utc)]
     service = ConversationIntelligenceV3Service(
         engine=engine,
         creator_id="creator-a",
@@ -1066,6 +1245,7 @@ def test_live_decision_returns_candidate_without_outbox_or_provider_capability()
         planner=Planner(),
         message_store=MessageStore(),
         shadow_percent=100,
+        clock=lambda: clock[0],
     )
     decision = service.decide_live(
         inbound_id=inbound.id,
@@ -1115,6 +1295,13 @@ def test_live_decision_returns_candidate_without_outbox_or_provider_capability()
         fan_id="fan-a",
         trigger_kind="unread",
     ) is False
+    clock[0] += timedelta(minutes=2, seconds=1)
+    assert service.can_decide_live(
+        fan_id="fan-a",
+        trigger_kind="unread",
+    ) is True
+    service.record_live_quality_failure()
+    assert service.safe_status()["live_circuit_state"] == "closed"
     status = service.safe_status()
     service.shutdown()
 
@@ -1124,7 +1311,7 @@ def test_live_decision_returns_candidate_without_outbox_or_provider_capability()
     assert status["live_send_authority"] is True
     assert status["outbox_write_capability"] is False
     assert status["provider_write_capability"] is False
-    assert status["live_circuit_open"] is True
+    assert status["live_circuit_open"] is False
 
 
 def test_frozen_suite_has_204_sanitized_cases_and_all_required_scenarios():

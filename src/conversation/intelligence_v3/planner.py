@@ -9,7 +9,8 @@ import json
 import math
 import re
 import time
-from typing import Callable
+from types import UnionType
+from typing import Any, Callable, get_args, get_origin
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -34,9 +35,19 @@ MAX_MODEL_CALLS_FAST = 1
 
 
 class V3PlannerError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(
+        self,
+        code: str,
+        *,
+        diagnostic: dict | None = None,
+        model_calls: int = 1,
+        infrastructure_failure: bool = True,
+    ):
         super().__init__(code)
         self.code = code
+        self.diagnostic = dict(diagnostic or {})
+        self.model_calls = max(0, int(model_calls))
+        self.infrastructure_failure = bool(infrastructure_failure)
 
 
 class PlanEnvelope(BaseModel):
@@ -46,14 +57,6 @@ class PlanEnvelope(BaseModel):
     strategy: StrategyDecision
     delivery: DeliveryDecision
     candidates: list[CandidateDraft] = Field(min_length=1, max_length=3)
-
-    @model_validator(mode="after")
-    def distinct_candidates(self):
-        moves = {(item.act, item.structure) for item in self.candidates}
-        if len(moves) != len(self.candidates):
-            raise ValueError("candidate moves must be distinct")
-        return self
-
 
 class JudgeEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -105,6 +108,75 @@ class PlannerResult:
     selection_mode: str
     fallback_reason: str | None
     requires_operator_review: bool
+    degradation_codes: tuple[str, ...] = ()
+
+
+def _schema_name(schema: type[BaseModel]) -> str:
+    return "judge" if schema is JudgeEnvelope else "plan"
+
+
+def _prune_transport_fields(value: Any, annotation: Any) -> tuple[Any, bool]:
+    """Drop provider-only fields before strict domain validation."""
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin in (list, tuple) and isinstance(value, list) and args:
+        changed = False
+        normalized = []
+        for item in value:
+            clean, item_changed = _prune_transport_fields(item, args[0])
+            normalized.append(clean)
+            changed = changed or item_changed
+        return normalized, changed
+    if origin in (dict,) or origin is not None and origin.__name__ == "dict":
+        return value, False
+    if origin in (UnionType,) or str(origin) == "typing.Union":
+        for option in args:
+            if isinstance(option, type) and issubclass(option, BaseModel):
+                if isinstance(value, dict):
+                    return _prune_transport_fields(value, option)
+        return value, False
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if not isinstance(value, dict):
+            return value, False
+        fields = annotation.model_fields
+        changed = any(key not in fields for key in value)
+        normalized = {}
+        for key, field in fields.items():
+            if key not in value:
+                continue
+            clean, item_changed = _prune_transport_fields(value[key], field.annotation)
+            normalized[key] = clean
+            changed = changed or item_changed
+        return normalized, changed
+    return value, False
+
+
+def _validation_code(error: ValidationError) -> str:
+    types = {str(item.get("type") or "") for item in error.errors()}
+    if "missing" in types:
+        return "provider_contract_missing_required"
+    if "literal_error" in types or "enum" in types:
+        return "provider_contract_enum_invalid"
+    if any(item.endswith("_type") or item.endswith("_parsing") for item in types):
+        return "provider_contract_type_invalid"
+    return "provider_contract_validation_invalid"
+
+
+def _validation_diagnostic(error: ValidationError, schema: type[BaseModel]) -> dict:
+    failures = error.errors()
+    return {
+        "stage": "schema_validation",
+        "schema": _schema_name(schema),
+        "error_count": len(failures),
+        "error_types": sorted({str(item.get("type") or "unknown") for item in failures}),
+        "fields": sorted(
+            {
+                ".".join(str(part)[:64] for part in item.get("loc") or ())[:160]
+                for item in failures
+                if item.get("loc")
+            }
+        )[:20],
+    }
 
 
 def _bounded_text(value: object, maximum: int) -> str:
@@ -333,7 +405,7 @@ class DeepSeekV3Planner:
     ) -> PlannerResult:
         started = time.monotonic()
         candidate_count = 3 if strategic else 2
-        plan_payload, plan_usage = self._call(
+        plan_payload, plan_usage, plan_degradations = self._call(
             instruction=(
                 "Return a strict JSON plan and candidate set. First understand the newest "
                 "turn using quoted evidence labels, then choose a primary act, optional "
@@ -355,9 +427,20 @@ class DeepSeekV3Planner:
             payload={"context": compiled.context, "candidate_count": candidate_count},
             schema=PlanEnvelope,
         )
-        candidates = list(plan_payload.candidates)
+        degradation_codes = set(plan_degradations)
+        candidates = []
+        seen_moves: set[tuple[str, str]] = set()
+        seen_ids: set[str] = set()
+        for candidate in plan_payload.candidates:
+            move = (candidate.act, candidate.structure.casefold())
+            if move in seen_moves or candidate.candidate_id in seen_ids:
+                degradation_codes.add("duplicate_candidate_ignored")
+                continue
+            seen_moves.add(move)
+            seen_ids.add(candidate.candidate_id)
+            candidates.append(candidate)
         if len(candidates) != candidate_count:
-            raise V3PlannerError("candidate_count_invalid")
+            degradation_codes.add("candidate_count_degraded")
         assessments: list[CandidateAssessment] = []
         deterministic_rejections: dict[str, tuple[str, ...]] = {}
         direct_question_required = bool(
@@ -396,6 +479,7 @@ class DeepSeekV3Planner:
                     sorted(rejection_codes)
                 )
         judge_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        selection_mode_override = None
         if strategic:
             blinded = [
                 {
@@ -407,112 +491,160 @@ class DeepSeekV3Planner:
                 }
                 for item in candidates
             ]
-            judge, judge_usage = self._call(
-                instruction=(
-                    "Independently assess every candidate 0-10 for newest-turn relevance, "
-                    "grounding, relationship-stage fit, emotional calibration, memory accuracy, "
-                    "naturalness, specificity, momentum, question balance, diversity, and safety. "
-                    "Reject any candidate with deterministic rejection codes, invented facts, "
-                    "ignored direct questions, boundary violations, canned empathy, repetitive "
-                    "templates, manipulative pressure, or unsupported intimacy. If and only if all "
-                    "original candidates fail, use their exact rejection codes to produce one "
-                    "replacement with a different act or structure and assess it in the same response. "
-                    "Do not return a replacement when any original candidate is approved. Return JSON only."
-                ),
-                payload={
-                    "understanding": plan_payload.understanding.model_dump(),
-                    "strategy": plan_payload.strategy.model_dump(),
-                    "candidates": blinded,
-                },
-                schema=JudgeEnvelope,
-            )
-            assessment_by_id = {
-                item.candidate_id: item
-                for item in judge.assessments
-                if item.candidate_id in {candidate.candidate_id for candidate in candidates}
-            }
-            assessments = []
-            for candidate in candidates:
-                assessed = assessment_by_id.get(candidate.candidate_id)
-                if assessed is None:
-                    assessments.append(
-                        CandidateAssessment(
-                            candidate_id=candidate.candidate_id,
-                            scores={"contract_completeness": 0.0},
-                            rejection_codes=["judge_assessment_missing"],
-                            approved=False,
+            try:
+                judge, judge_usage, judge_degradations = self._call(
+                    instruction=(
+                        "Independently assess every candidate 0-10 for newest-turn relevance, "
+                        "grounding, relationship-stage fit, emotional calibration, memory accuracy, "
+                        "naturalness, specificity, momentum, question balance, diversity, and safety. "
+                        "Reject any candidate with deterministic rejection codes, invented facts, "
+                        "ignored direct questions, boundary violations, canned empathy, repetitive "
+                        "templates, manipulative pressure, or unsupported intimacy. If and only if all "
+                        "original candidates fail, use their exact rejection codes to produce one "
+                        "replacement with a different act or structure and assess it in the same response. "
+                        "Do not return a replacement when any original candidate is approved. Return JSON only."
+                    ),
+                    payload={
+                        "understanding": plan_payload.understanding.model_dump(),
+                        "strategy": plan_payload.strategy.model_dump(),
+                        "candidates": blinded,
+                    },
+                    schema=JudgeEnvelope,
+                )
+                degradation_codes.update(judge_degradations)
+            except V3PlannerError as error:
+                degradation_codes.add(f"judge_{error.code}")
+                assessments = [
+                    CandidateAssessment(
+                        candidate_id=candidate.candidate_id,
+                        scores=self._deterministic_quality(
+                            candidate,
+                            compiled=compiled,
+                            recent_creator_messages=recent_creator_messages,
+                        ),
+                        rejection_codes=list(
+                            deterministic_rejections.get(candidate.candidate_id, ())
+                        ),
+                        approved=not deterministic_rejections.get(
+                            candidate.candidate_id, ()
+                        ),
+                    )
+                    for candidate in candidates
+                ]
+                approved = [item for item in assessments if item.approved]
+                winner_id = (
+                    max(
+                        approved,
+                        key=lambda item: sum(item.scores.values()) / len(item.scores),
+                    ).candidate_id
+                    if approved
+                    else None
+                )
+                rejection_codes_before_replacement = {
+                    code for item in assessments for code in item.rejection_codes
+                }
+                selection_mode_override = "deterministic_judge_fallback"
+            else:
+                assessment_by_id = {
+                    item.candidate_id: item
+                    for item in judge.assessments
+                    if item.candidate_id
+                    in {candidate.candidate_id for candidate in candidates}
+                }
+                assessments = []
+                for candidate in candidates:
+                    assessed = assessment_by_id.get(candidate.candidate_id)
+                    if assessed is None:
+                        assessments.append(
+                            CandidateAssessment(
+                                candidate_id=candidate.candidate_id,
+                                scores={"contract_completeness": 0.0},
+                                rejection_codes=["judge_assessment_missing"],
+                                approved=False,
+                            )
+                        )
+                        continue
+                    combined_codes = sorted(
+                        set(assessed.rejection_codes)
+                        | set(
+                            deterministic_rejections.get(candidate.candidate_id, ())
                         )
                     )
-                    continue
-                combined_codes = sorted(
-                    set(assessed.rejection_codes)
-                    | set(deterministic_rejections.get(candidate.candidate_id, ()))
-                )
-                assessments.append(
-                    CandidateAssessment(
-                        candidate_id=assessed.candidate_id,
-                        scores=assessed.scores,
-                        rejection_codes=combined_codes,
-                        approved=assessed.approved and not combined_codes,
+                    assessments.append(
+                        CandidateAssessment(
+                            candidate_id=assessed.candidate_id,
+                            scores=assessed.scores,
+                            rejection_codes=combined_codes,
+                            approved=assessed.approved and not combined_codes,
+                        )
                     )
+                approved_ids = {
+                    item.candidate_id for item in assessments if item.approved
+                }
+                winner_id = (
+                    judge.winner_id
+                    if not judge.all_rejected and judge.winner_id in approved_ids
+                    else None
                 )
-            approved_ids = {item.candidate_id for item in assessments if item.approved}
-            winner_id = (
-                judge.winner_id
-                if not judge.all_rejected and judge.winner_id in approved_ids
-                else None
-            )
-            rejection_codes_before_replacement = {
-                code
-                for assessment in assessments
-                for code in assessment.rejection_codes
-            }
-            if winner_id is None and judge.replacement_candidate is not None:
-                replacement = judge.replacement_candidate
-                replacement_assessment = judge.replacement_assessment
-                replacement_diversity = self.diversity.evaluate(
-                    replacement.message,
-                    recent_fan_messages=recent_fan_messages,
-                    recent_creator_messages=recent_creator_messages,
-                    creator_wide_messages=creator_wide_messages,
-                    primary_act=replacement.act,
-                    secondary_act=plan_payload.strategy.secondary_act,
-                )
-                replacement_codes = set(replacement_assessment.rejection_codes)
-                replacement_codes.update(replacement_diversity.rejection_codes)
-                replacement_safety = self.safety.evaluate(
-                    replacement.message,
-                    recent_creator_messages=recent_creator_messages,
-                    hard_boundaries=hard_boundaries,
-                    max_length=500,
-                )
-                replacement_codes.update(replacement_safety.reason_codes)
-                if direct_question_required and not replacement.addresses_direct_question:
-                    replacement_codes.add("ignored_direct_question")
-                replacement_has_question = "?" in replacement.message
-                if (
-                    replacement_has_question
-                    and not plan_payload.strategy.should_ask_question
-                ):
-                    replacement_codes.add("unnecessary_question")
-                if (
-                    plan_payload.strategy.should_ask_question
-                    and not replacement_has_question
-                ):
-                    replacement_codes.add("missing_planned_question")
-                approved_replacement = (
-                    replacement_assessment.approved and not replacement_codes
-                )
-                normalized_replacement_assessment = CandidateAssessment(
-                    candidate_id=replacement.candidate_id,
-                    scores=replacement_assessment.scores,
-                    rejection_codes=sorted(replacement_codes),
-                    approved=approved_replacement,
-                )
-                candidates = [*candidates[:-1], replacement]
-                assessments = [*assessments[:-1], normalized_replacement_assessment]
-                if approved_replacement:
-                    winner_id = replacement.candidate_id
+                rejection_codes_before_replacement = {
+                    code
+                    for assessment in assessments
+                    for code in assessment.rejection_codes
+                }
+                if winner_id is None and judge.replacement_candidate is not None:
+                    replacement = judge.replacement_candidate
+                    replacement_assessment = judge.replacement_assessment
+                    replacement_diversity = self.diversity.evaluate(
+                        replacement.message,
+                        recent_fan_messages=recent_fan_messages,
+                        recent_creator_messages=recent_creator_messages,
+                        creator_wide_messages=creator_wide_messages,
+                        primary_act=replacement.act,
+                        secondary_act=plan_payload.strategy.secondary_act,
+                    )
+                    replacement_codes = set(
+                        replacement_assessment.rejection_codes
+                    )
+                    replacement_codes.update(replacement_diversity.rejection_codes)
+                    replacement_safety = self.safety.evaluate(
+                        replacement.message,
+                        recent_creator_messages=recent_creator_messages,
+                        hard_boundaries=hard_boundaries,
+                        max_length=500,
+                    )
+                    replacement_codes.update(replacement_safety.reason_codes)
+                    if (
+                        direct_question_required
+                        and not replacement.addresses_direct_question
+                    ):
+                        replacement_codes.add("ignored_direct_question")
+                    replacement_has_question = "?" in replacement.message
+                    if (
+                        replacement_has_question
+                        and not plan_payload.strategy.should_ask_question
+                    ):
+                        replacement_codes.add("unnecessary_question")
+                    if (
+                        plan_payload.strategy.should_ask_question
+                        and not replacement_has_question
+                    ):
+                        replacement_codes.add("missing_planned_question")
+                    approved_replacement = (
+                        replacement_assessment.approved and not replacement_codes
+                    )
+                    normalized_replacement_assessment = CandidateAssessment(
+                        candidate_id=replacement.candidate_id,
+                        scores=replacement_assessment.scores,
+                        rejection_codes=sorted(replacement_codes),
+                        approved=approved_replacement,
+                    )
+                    candidates = [*candidates[:-1], replacement]
+                    assessments = [
+                        *assessments[:-1],
+                        normalized_replacement_assessment,
+                    ]
+                    if approved_replacement:
+                        winner_id = replacement.candidate_id
         else:
             rejection_codes_before_replacement = set()
             for candidate in candidates:
@@ -545,7 +677,13 @@ class DeepSeekV3Planner:
             (item.message for item in candidates if item.candidate_id == winner_id),
             None,
         )
-        selection_mode = "model_candidate" if selected else "operator_review"
+        selection_mode = (
+            selection_mode_override
+            if selected and selection_mode_override
+            else "model_candidate"
+            if selected
+            else "operator_review"
+        )
         fallback_reason = None
         if selected is None:
             selected, fallback_reason = self._grounded_fallback(compiled.context)
@@ -584,6 +722,7 @@ class DeepSeekV3Planner:
             selection_mode=selection_mode,
             fallback_reason=fallback_reason,
             requires_operator_review=selected is None,
+            degradation_codes=tuple(sorted(degradation_codes)),
         )
 
     @staticmethod
@@ -635,12 +774,25 @@ class DeepSeekV3Planner:
             return "you're right... i got that detail wrong", "explicit_correction_acknowledgement"
         return None, "no_grounded_fallback_available"
 
-    def _call(self, *, instruction: str, payload: dict, schema):
+    def _call(
+        self,
+        *,
+        instruction: str,
+        payload: dict,
+        schema: type[BaseModel],
+        request: Callable | None = None,
+    ):
         if not self.api_key:
-            raise V3PlannerError("provider_not_configured")
+            raise V3PlannerError(
+                "provider_not_configured",
+                diagnostic={"stage": "configuration", "schema": _schema_name(schema)},
+                model_calls=0,
+            )
         example = self._example(schema)
+        request_fn = request or self._request
+        schema_label = _schema_name(schema)
         try:
-            response = self._request(
+            response = request_fn(
                 f"{self.base_url}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {self.api_key}",
@@ -676,20 +828,139 @@ class DeepSeekV3Planner:
                 timeout=self.timeout,
             )
             response.raise_for_status()
+        except httpx.TimeoutException as error:
+            raise V3PlannerError(
+                "provider_timeout",
+                diagnostic={"stage": "transport", "schema": schema_label},
+            ) from error
+        except httpx.HTTPStatusError as error:
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            raise V3PlannerError(
+                "provider_http_error",
+                diagnostic={
+                    "stage": "transport",
+                    "schema": schema_label,
+                    "http_status": int(status_code) if status_code else None,
+                },
+            ) from error
+        except httpx.RequestError as error:
+            raise V3PlannerError(
+                "provider_network_error",
+                diagnostic={"stage": "transport", "schema": schema_label},
+            ) from error
+        try:
             envelope = response.json()
-            content = envelope["choices"][0]["message"]["content"]
-            parsed = schema.model_validate_json(content)
-            usage = envelope.get("usage") or {}
-            return parsed, {
+        except (TypeError, ValueError) as error:
+            raise V3PlannerError(
+                "provider_response_json_invalid",
+                diagnostic={"stage": "response_envelope", "schema": schema_label},
+            ) from error
+        if not isinstance(envelope, dict):
+            raise V3PlannerError(
+                "provider_response_shape_invalid",
+                diagnostic={"stage": "response_envelope", "schema": schema_label},
+            )
+        try:
+            choices = envelope["choices"]
+            content = choices[0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as error:
+            raise V3PlannerError(
+                "provider_response_shape_invalid",
+                diagnostic={"stage": "response_envelope", "schema": schema_label},
+            ) from error
+
+        degradations: set[str] = set()
+        if isinstance(content, dict):
+            decoded = content
+        elif isinstance(content, str):
+            normalized = content.strip()
+            fenced = re.fullmatch(
+                r"```(?:json)?\s*(.*?)\s*```",
+                normalized,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            if fenced:
+                normalized = fenced.group(1).strip()
+                degradations.add("provider_json_fence_stripped")
+            if not normalized:
+                raise V3PlannerError(
+                    "provider_content_empty",
+                    diagnostic={"stage": "content_decode", "schema": schema_label},
+                )
+            try:
+                decoded = json.loads(normalized)
+            except json.JSONDecodeError as first_error:
+                start = normalized.find("{")
+                if start >= 0:
+                    try:
+                        decoded, consumed = json.JSONDecoder().raw_decode(
+                            normalized[start:]
+                        )
+                        if normalized[start + consumed :].strip():
+                            degradations.add("provider_json_suffix_ignored")
+                        if start:
+                            degradations.add("provider_json_prefix_ignored")
+                    except json.JSONDecodeError as error:
+                        truncated = (
+                            error.pos >= max(0, len(normalized[start:]) - 2)
+                            or "unterminated" in error.msg.casefold()
+                            or "expecting value" in error.msg.casefold()
+                            and error.pos >= len(normalized[start:]) - 4
+                        )
+                        code = (
+                            "provider_content_json_truncated"
+                            if truncated
+                            else "provider_content_json_invalid"
+                        )
+                        raise V3PlannerError(
+                            code,
+                            diagnostic={
+                                "stage": "content_decode",
+                                "schema": schema_label,
+                                "json_error": error.msg[:80],
+                            },
+                        ) from error
+                else:
+                    raise V3PlannerError(
+                        "provider_content_json_invalid",
+                        diagnostic={
+                            "stage": "content_decode",
+                            "schema": schema_label,
+                            "json_error": first_error.msg[:80],
+                        },
+                    ) from first_error
+        else:
+            raise V3PlannerError(
+                "provider_content_type_invalid",
+                diagnostic={"stage": "content_decode", "schema": schema_label},
+            )
+        if not isinstance(decoded, dict):
+            raise V3PlannerError(
+                "provider_content_type_invalid",
+                diagnostic={"stage": "content_decode", "schema": schema_label},
+            )
+
+        cleaned, extras_removed = _prune_transport_fields(decoded, schema)
+        if extras_removed:
+            degradations.add("provider_extra_fields_ignored")
+        try:
+            parsed = schema.model_validate(cleaned)
+        except ValidationError as error:
+            raise V3PlannerError(
+                _validation_code(error),
+                diagnostic=_validation_diagnostic(error, schema),
+            ) from error
+        usage = envelope.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
+        return (
+            parsed,
+            {
                 "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                 "completion_tokens": int(usage.get("completion_tokens") or 0),
-            }
-        except httpx.TimeoutException as error:
-            raise V3PlannerError("provider_timeout") from error
-        except httpx.HTTPStatusError as error:
-            raise V3PlannerError("provider_http_error") from error
-        except (httpx.RequestError, KeyError, TypeError, ValueError, ValidationError) as error:
-            raise V3PlannerError("provider_contract_invalid") from error
+            },
+            tuple(sorted(degradations)),
+        )
 
     @staticmethod
     def _example(schema):

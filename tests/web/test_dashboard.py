@@ -408,6 +408,7 @@ def running_server(db_url, tmp_path):
         ai_settings=bot.ai_settings,
         chat_guidance=guidance,
         auto_messages_control=auto_messages_control,
+        conversation_intelligence_v3=bot.conversation_intelligence_v3,
     )
     port = server.server.server_address[1]
 
@@ -421,6 +422,37 @@ def running_server(db_url, tmp_path):
 
 
 class TestAutoMessagesControlCenter:
+    def test_conversation_intelligence_status_reports_effective_live_authority(
+        self,
+        running_server,
+    ):
+        host, bot, _ = running_server
+        service = bot.conversation_intelligence_v3
+        service.safe_status.return_value = {
+            "live_send_authority": True,
+            "outbox_write_capability": False,
+            "provider_write_capability": False,
+        }
+        service.knowledge.overview.return_value = {
+            "documents": [],
+            "rules": [],
+            "open_conflicts": 0,
+        }
+        service.intelligence.quality_overview.return_value = {
+            "statuses": {},
+            "feedback": {},
+            "estimated_cost": 0.0,
+            "model_calls": 0,
+        }
+
+        status, body = _get(host, "/api/conversation-intelligence/status")
+
+        assert status == 200, body
+        assert body["runtime_applied"] is True
+        assert body["send_authority"] is True
+        assert body["outbox_write_capability"] is False
+        assert body["provider_write_capability"] is False
+
     def test_status_is_aggregate_only_and_deployment_gated(
         self,
         running_server,

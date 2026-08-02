@@ -136,7 +136,7 @@ CONVERSATION_INTELLIGENCE_RUNS = Table(
     Column("fan_id", String(128), nullable=False),
     Column("inbound_message_id", ID, ForeignKey("inbound_messages.id"), nullable=False),
     Column("current_decision_id", ID, ForeignKey("conversation_decisions.id")),
-    Column("status", String(24), nullable=False),
+    Column("status", String(64), nullable=False),
     Column("shadow", Boolean, nullable=False, default=True),
     Column("versions", JSON, nullable=False, default=dict),
     Column("prompt_fingerprint", String(64), nullable=False),

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import threading
+from typing import Callable
 
 from src.conversation.brain2 import BrainRouter
 from src.conversation.brain2_repository import FanConversationStateRepository
@@ -72,6 +73,7 @@ class ConversationIntelligenceV3Service:
         message_store,
         shadow_percent: int = 10,
         max_workers: int = 1,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.creator_id = creator_id
         self.settings = settings
@@ -95,7 +97,13 @@ class ConversationIntelligenceV3Service:
         )
         self._lock = threading.Lock()
         self._futures: set[Future] = set()
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._live_circuit_open = False
+        self._live_circuit_state = "closed"
+        self._live_circuit_opened_at: datetime | None = None
+        self._live_circuit_cooldown_index = 0
+        self._live_half_open_probe = False
+        self._live_circuit_cooldowns = (120, 300, 900)
         self._consecutive_live_failures = 0
         self._live_failure_threshold = 3
 
@@ -114,17 +122,29 @@ class ConversationIntelligenceV3Service:
         ).digest()
         return int.from_bytes(digest[:8], "big") % 100 < self.settings.live_percent
 
-    def can_decide_live(self, *, fan_id: str, trigger_kind: str) -> bool:
+    def can_decide_live(
+        self,
+        *,
+        fan_id: str,
+        trigger_kind: str,
+        allow_inflight_probe: bool = False,
+    ) -> bool:
+        with self._lock:
+            circuit_available = self._circuit_available_locked(self._clock()) or bool(
+                allow_inflight_probe
+                and self._live_circuit_state == "half_open"
+                and self._live_half_open_probe
+            )
         eligible = bool(
             trigger_kind == "unread"
             and self.settings.live_send_authority
-            and not self._live_circuit_open
+            and circuit_available
             and self.is_live_sampled(fan_id)
         )
         if not eligible:
             return False
         try:
-            now = datetime.now(timezone.utc)
+            now = self._clock()
             day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             return self.intelligence.live_cost_since(day_start) < float(
                 self.settings.max_daily_cost
@@ -149,6 +169,8 @@ class ConversationIntelligenceV3Service:
         """Synchronously select a candidate for the existing safe send path."""
         if not self.can_decide_live(fan_id=fan_id, trigger_kind=trigger_kind):
             return None
+        if not self._begin_live_attempt():
+            return None
         decision = self._evaluate(
             inbound_id,
             str(inbound_message_id),
@@ -159,23 +181,82 @@ class ConversationIntelligenceV3Service:
             dict(context),
             shadow=False,
         )
-        if decision is None:
-            self.record_live_failure()
         return decision
 
     def record_live_success(self) -> None:
         with self._lock:
             self._consecutive_live_failures = 0
+            self._live_circuit_state = "closed"
+            self._live_circuit_open = False
+            self._live_circuit_opened_at = None
+            self._live_circuit_cooldown_index = 0
+            self._live_half_open_probe = False
+
+    def record_live_quality_failure(self) -> None:
+        """A policy/quality rejection is not provider infrastructure failure."""
+        with self._lock:
+            self._live_half_open_probe = False
+            if self._live_circuit_state == "half_open" or (
+                self._live_circuit_state == "open"
+                and self._circuit_available_locked(self._clock())
+            ):
+                self._consecutive_live_failures = 0
+                self._live_circuit_state = "closed"
+                self._live_circuit_open = False
+                self._live_circuit_opened_at = None
 
     def record_live_failure(self) -> None:
         with self._lock:
+            now = self._clock()
+            if self._live_circuit_state == "half_open":
+                self._live_circuit_cooldown_index = min(
+                    self._live_circuit_cooldown_index + 1,
+                    len(self._live_circuit_cooldowns) - 1,
+                )
+                self._live_circuit_state = "open"
+                self._live_circuit_open = True
+                self._live_circuit_opened_at = now
+                self._live_half_open_probe = False
+                return
             self._consecutive_live_failures += 1
             if self._consecutive_live_failures >= self._live_failure_threshold:
+                self._live_circuit_state = "open"
                 self._live_circuit_open = True
+                self._live_circuit_opened_at = now
+                self._live_half_open_probe = False
 
     def open_live_circuit(self) -> None:
         with self._lock:
+            self._live_circuit_state = "open"
             self._live_circuit_open = True
+            self._live_circuit_opened_at = self._clock()
+            self._live_circuit_cooldown_index = len(
+                self._live_circuit_cooldowns
+            ) - 1
+            self._live_half_open_probe = False
+
+    def _circuit_available_locked(self, now: datetime) -> bool:
+        if self._live_circuit_state == "closed":
+            return True
+        if self._live_circuit_state == "half_open":
+            return not self._live_half_open_probe
+        opened_at = self._live_circuit_opened_at
+        if opened_at is None:
+            return False
+        cooldown = self._live_circuit_cooldowns[
+            self._live_circuit_cooldown_index
+        ]
+        return now >= opened_at + timedelta(seconds=cooldown)
+
+    def _begin_live_attempt(self) -> bool:
+        with self._lock:
+            now = self._clock()
+            if not self._circuit_available_locked(now):
+                return False
+            if self._live_circuit_state == "open":
+                self._live_circuit_state = "half_open"
+                self._live_half_open_probe = True
+            return True
 
     def link_live_decision(self, *, run_id: int, decision_id: int) -> bool:
         return self.intelligence.link_run_decision(
@@ -488,6 +569,8 @@ class ConversationIntelligenceV3Service:
                     "status": (
                         "complete"
                         if result.selection_mode == "model_candidate"
+                        else "complete_degraded"
+                        if result.selected_message and not result.requires_operator_review
                         else "grounded_fallback"
                         if result.selection_mode == "grounded_fallback"
                         else "operator_review_required"
@@ -523,6 +606,7 @@ class ConversationIntelligenceV3Service:
                         "selection_mode": result.selection_mode,
                         "fallback_reason": result.fallback_reason,
                         "requires_operator_review": result.requires_operator_review,
+                        "degradation_codes": list(result.degradation_codes),
                     },
                     "delivery": result.plan.delivery.model_dump(),
                     "candidate_fingerprints": candidate_fingerprints,
@@ -536,6 +620,8 @@ class ConversationIntelligenceV3Service:
                 }
             )
             if shadow or not result.selected_message or result.requires_operator_review:
+                if not shadow:
+                    self.record_live_quality_failure()
                 return None
             return V3LiveDecision(
                 message=result.selected_message,
@@ -557,6 +643,11 @@ class ConversationIntelligenceV3Service:
                 intelligence_run_id=run_id,
             )
         except V3PlannerError as error:
+            if not shadow:
+                if error.infrastructure_failure:
+                    self.record_live_failure()
+                else:
+                    self.record_live_quality_failure()
             self._record_failure(
                 inbound_id,
                 fan_id,
@@ -565,8 +656,12 @@ class ConversationIntelligenceV3Service:
                 prompt_fingerprint,
                 compilation_report,
                 shadow=shadow,
+                diagnostic=error.diagnostic,
+                model_calls=error.model_calls,
             )
         except Exception as error:
+            if not shadow:
+                self.record_live_failure()
             logger.error(
                 "Conversation Intelligence V3 evaluation failure type=%s",
                 type(error).__name__,
@@ -592,17 +687,22 @@ class ConversationIntelligenceV3Service:
         compilation_report: dict,
         *,
         shadow: bool,
+        diagnostic: dict | None = None,
+        model_calls: int = 0,
     ) -> None:
+        safe_report = dict(compilation_report or {})
+        if diagnostic:
+            safe_report["provider_diagnostic"] = dict(diagnostic)
         self.intelligence.record_run(
             {
                 "fan_id": fan_id,
                 "inbound_message_id": inbound_id,
                 "current_decision_id": current_decision_id,
-                "status": str(status)[:24],
+                "status": str(status)[:64],
                 "shadow": shadow,
                 "versions": {"pipeline": "conversation-intelligence-v3.1"},
                 "prompt_fingerprint": prompt_fingerprint,
-                "compilation_report": compilation_report,
+                "compilation_report": safe_report,
                 "understanding": {},
                 "relationship": {},
                 "strategy": {},
@@ -610,7 +710,7 @@ class ConversationIntelligenceV3Service:
                 "candidate_fingerprints": [],
                 "rejection_codes": [str(status)[:64]],
                 "model": self.planner.model,
-                "model_calls": 0,
+                "model_calls": max(0, int(model_calls)),
                 "latency_ms": 0,
                 "estimated_cost": 0.0,
                 "completed_at": utcnow(),
@@ -631,6 +731,12 @@ class ConversationIntelligenceV3Service:
         self._executor.shutdown(wait=True, cancel_futures=False)
 
     def safe_status(self) -> dict:
+        with self._lock:
+            now = self._clock()
+            available = self._circuit_available_locked(now)
+            state = self._live_circuit_state
+            if state == "open" and available:
+                state = "half_open_ready"
         return {
             **self.settings.safe_status(),
             "creator_id": self.creator_id,
@@ -638,7 +744,11 @@ class ConversationIntelligenceV3Service:
             "outbox_write_capability": False,
             "provider_write_capability": False,
             "live_decision_capability": True,
-            "live_circuit_open": self._live_circuit_open,
+            "live_circuit_open": self._live_circuit_open and not available,
+            "live_circuit_state": state,
+            "live_circuit_cooldown_seconds": self._live_circuit_cooldowns[
+                self._live_circuit_cooldown_index
+            ],
             "consecutive_live_failures": self._consecutive_live_failures,
             "model": self.planner.model,
         }

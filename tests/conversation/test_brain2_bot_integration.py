@@ -340,8 +340,50 @@ def test_v3_gate_rejection_falls_back_to_current_brain_without_silence():
     assert stored.authority == "current"
     assert stored.fallback_used is True
     assert stored.fallback_reason == "v3_final_gate_rejected"
-    v3.record_live_failure.assert_called_once_with()
+    v3.record_live_quality_failure.assert_called_once_with()
     v3.record_live_success.assert_not_called()
+
+
+def test_soft_repetition_never_causes_terminal_silence_after_bounded_regeneration():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.side_effect = [
+        _decision("maintain", "reflect", "i hear u and that makes sense", None),
+        _decision("maintain", "reflect", "i hear u and that makes sense", None),
+    ]
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    bot.brain_quality_gate = MagicMock()
+    bot.brain_quality_gate.evaluate.return_value = SimpleNamespace(
+        approved=False,
+        reason_codes=("repeated_phrase",),
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="soft-repeat-1",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="i had a long day",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        persona=bot.persona,
+        history="",
+        fan_message=inbound.content,
+        known_facts=[],
+    )
+
+    assert reply is not None
+    assert reply.content == "tell me a little more?"
+    assert responder.decide.call_count == 2
 
 
 def test_advanced_authority_uses_advanced_decision_and_skips_current_generator():
@@ -847,7 +889,7 @@ def test_semantic_repetition_is_regenerated_once_before_send():
     assert stored.gate_results["diversity_regeneration"] == "approved"
 
 
-def test_second_semantically_repetitive_candidate_is_never_sent():
+def test_second_semantically_repetitive_candidate_uses_safe_nonrepetitive_fallback():
     responder = MagicMock()
     responder.enabled = True
     responder.model = "deepseek-v4-flash"
@@ -902,10 +944,12 @@ def test_second_semantically_repetitive_candidate_is_never_sent():
         known_facts=[],
     )
 
-    assert reply is None
+    assert reply is not None
+    assert reply.content == "tell me a little more?"
+    assert "hold u" not in reply.content
     assert responder.decide.call_count == 2
     v3.submit.assert_called_once()
-    assert v3.submit.call_args.kwargs["current_decision_id"] is None
+    assert isinstance(v3.submit.call_args.kwargs["current_decision_id"], int)
     assert v3.submit.call_args.kwargs["inbound_message_id"] == (
         "semantic-repeat-block"
     )

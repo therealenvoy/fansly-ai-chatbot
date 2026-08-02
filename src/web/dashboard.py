@@ -2067,9 +2067,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 {"error": "Conversation Intelligence status is unavailable"},
                 503,
             )
+        safe_settings = service.safe_status()
         return self.j(
             {
-                "settings": service.safe_status(),
+                "settings": safe_settings,
                 "knowledge": {
                     "documents": len(knowledge["documents"]),
                     "rules": len(knowledge["rules"]),
@@ -2082,7 +2083,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "model_calls": quality["model_calls"],
                 },
                 "runtime_applied": True,
-                "send_authority": False,
+                "send_authority": bool(
+                    safe_settings.get("live_send_authority")
+                ),
                 "outbox_write_capability": False,
                 "provider_write_capability": False,
             }
