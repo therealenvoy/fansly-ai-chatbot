@@ -6,6 +6,8 @@ import pytest
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
+from src.conversation.brain import ConversationDecision
+from src.conversation.repository import ConversationDecisionRepository
 from src.messaging.models import OutboundMessage
 from src.persistence.database import create_database_engine
 from src.persistence.migrations import alembic_config, upgrade_database
@@ -71,6 +73,15 @@ def test_postgres_migrations_and_runtime_tables_initialize(
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one() == expected_head
+
+    authority_column = next(
+        column
+        for column in inspect(postgres_engine).get_columns(
+            "conversation_decisions"
+        )
+        if column["name"] == "authority"
+    )
+    assert authority_column["type"].length == 64
 
 
 def test_postgres_pipeline_is_idempotent_ordered_and_durable(
@@ -143,6 +154,51 @@ def test_postgres_pipeline_is_idempotent_ordered_and_durable(
         older.platform_message_id,
     )
     assert pipeline.claim_next_inbound(creator_id).id == newer.id
+
+
+def test_postgres_persists_full_v3_authority_attribution(postgres_engine):
+    suffix = uuid4().hex[:12]
+    creator_id = f"ci-v3-{suffix}"
+    fan_id = f"fan-v3-{suffix}"
+    state = ConversationStateRepository(postgres_engine)
+    state.ensure_conversation(
+        creator_id,
+        fan_id,
+        f"chat-v3-{suffix}",
+    )
+    inbound, _ = MessageProcessingRepository(postgres_engine).insert_inbound(
+        creator_id=creator_id,
+        platform_message_id=f"message-v3-{suffix}",
+        fan_id=fan_id,
+        chat_id=f"chat-v3-{suffix}",
+        content="hello",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+    repository = ConversationDecisionRepository(postgres_engine)
+    decision_id = repository.save(
+        inbound_message_id=inbound.id,
+        creator_id=creator_id,
+        fan_id=fan_id,
+        trigger_kind="unread",
+        decision=ConversationDecision(
+            fan_state="engaged",
+            state_summary="Fan initiated a conversation.",
+            objective="respond",
+            tactic="direct_answer",
+            open_thread=None,
+            draft="hello",
+            critique=(),
+            final_message="hello",
+            confidence=0.8,
+        ),
+        model="deepseek-v4-flash",
+        execution={"authority": "conversation_intelligence_v3"},
+    )
+
+    stored = repository.get(inbound.id, creator_id=creator_id)
+    assert decision_id > 0
+    assert stored is not None
+    assert stored.authority == "conversation_intelligence_v3"
 
 
 def test_postgres_pilot_claim_does_not_wait_on_disallowed_fan(

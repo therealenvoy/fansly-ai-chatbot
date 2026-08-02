@@ -1248,6 +1248,54 @@ def test_outcome_observation_measures_more_than_reply_existence():
     assert score < 0
 
 
+def test_unlinked_live_run_is_visible_and_can_be_closed_safely():
+    engine = _engine()
+    ConversationStateRepository(engine).ensure_conversation(
+        "creator-a",
+        "fan-a",
+        "chat-a",
+    )
+    inbound, _ = MessageProcessingRepository(engine).insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="unlinked-live-run",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hello",
+        provider_created_at=utcnow(),
+    )
+    repository = IntelligenceRepository(engine, creator_id="creator-a")
+    run_id = repository.record_run(
+        {
+            "fan_id": "fan-a",
+            "inbound_message_id": inbound.id,
+            "current_decision_id": None,
+            "status": "complete",
+            "shadow": False,
+            "versions": {"pipeline": "conversation-intelligence-v3.1"},
+            "prompt_fingerprint": "f" * 64,
+            "compilation_report": {},
+            "understanding": {},
+            "relationship": {},
+            "strategy": {},
+            "delivery": {},
+            "candidate_fingerprints": [],
+            "selected_candidate_fingerprint": None,
+            "rejection_codes": [],
+            "model": "deepseek-v4-flash",
+            "model_calls": 1,
+            "latency_ms": 10,
+            "estimated_cost": 0.00001,
+            "completed_at": utcnow() - timedelta(minutes=3),
+        }
+    )
+
+    assert repository.quality_overview()["unlinked_live_runs"] == 1
+    assert repository.mark_live_persistence_failed(run_id=run_id) is True
+    quality = repository.quality_overview()
+    assert quality["unlinked_live_runs"] == 0
+    assert quality["statuses"]["decision_persistence_failed"] == 1
+
+
 def test_shadow_state_observation_makes_zero_model_calls_and_zero_outbox_writes():
     engine = _engine()
     ConversationStateRepository(engine).ensure_conversation(

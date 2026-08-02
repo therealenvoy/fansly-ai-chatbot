@@ -374,7 +374,7 @@ CONVERSATION_DECISIONS = Table(
     Column("final_message", Text, nullable=False),
     Column("confidence", Float, nullable=False),
     Column("model", String(128), nullable=False),
-    Column("authority", String(16), nullable=False, default="current"),
+    Column("authority", String(64), nullable=False, default="current"),
     Column("brain_version", String(64), nullable=False, default="current-v1"),
     Column("route", String(32)),
     Column("experiment_id", String(128)),

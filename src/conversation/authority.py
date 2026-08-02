@@ -8,6 +8,19 @@ import hashlib
 from src.conversation.brain2 import BrainRuntimeSettings
 
 
+AUTHORITY_CURRENT = "current"
+AUTHORITY_ADVANCED = "advanced"
+AUTHORITY_CONVERSATION_INTELLIGENCE_V3 = "conversation_intelligence_v3"
+AUTHORITY_MAX_LENGTH = 64
+SUPPORTED_AUTHORITIES = frozenset(
+    {
+        AUTHORITY_CURRENT,
+        AUTHORITY_ADVANCED,
+        AUTHORITY_CONVERSATION_INTELLIGENCE_V3,
+    }
+)
+
+
 @dataclass(frozen=True)
 class BrainAuthoritySelection:
     authority: str
@@ -35,25 +48,25 @@ class BrainAuthorityRouter:
         }
         if settings.mode != "advanced":
             return BrainAuthoritySelection(
-                authority="current",
+                authority=AUTHORITY_CURRENT,
                 reason=f"mode_{settings.mode}",
                 **common,
             )
         if not settings.allow_advanced_send:
             return BrainAuthoritySelection(
-                authority="current",
+                authority=AUTHORITY_CURRENT,
                 reason="deployment_guard_blocked",
                 **common,
             )
         if requested <= 0:
             return BrainAuthoritySelection(
-                authority="current",
+                authority=AUTHORITY_CURRENT,
                 reason="live_percent_zero",
                 **common,
             )
         if requested > int(settings.max_live_percent):
             return BrainAuthoritySelection(
-                authority="current",
+                authority=AUTHORITY_CURRENT,
                 reason="deployment_ceiling_exceeded",
                 **common,
             )
@@ -64,10 +77,18 @@ class BrainAuthorityRouter:
             ).encode("utf-8")
         ).digest()
         bucket = int.from_bytes(digest[:8], "big") % 10_000
-        authority = "advanced" if bucket < requested * 100 else "current"
+        authority = (
+            AUTHORITY_ADVANCED
+            if bucket < requested * 100
+            else AUTHORITY_CURRENT
+        )
         return BrainAuthoritySelection(
             authority=authority,
-            reason=("sticky_assignment" if authority == "advanced" else "control_assignment"),
+            reason=(
+                "sticky_assignment"
+                if authority == AUTHORITY_ADVANCED
+                else "control_assignment"
+            ),
             bucket=bucket,
             **common,
         )
@@ -117,7 +138,8 @@ class AutomaticRollbackEvaluator:
         advanced = [
             item
             for item in attempts
-            if item.get("authority") == "advanced" or item.get("fallback_used")
+            if item.get("authority") == AUTHORITY_ADVANCED
+            or item.get("fallback_used")
         ]
         for item in advanced:
             gate = item.get("gate_results") or {}

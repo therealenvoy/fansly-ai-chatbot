@@ -440,6 +440,7 @@ class TestAutoMessagesControlCenter:
         }
         service.intelligence.quality_overview.return_value = {
             "statuses": {},
+            "unlinked_live_runs": 0,
             "feedback": {},
             "estimated_cost": 0.0,
             "model_calls": 0,
@@ -450,6 +451,7 @@ class TestAutoMessagesControlCenter:
         assert status == 200, body
         assert body["runtime_applied"] is True
         assert body["send_authority"] is True
+        assert body["quality"]["unlinked_live_runs"] == 0
         assert body["outbox_write_capability"] is False
         assert body["provider_write_capability"] is False
 

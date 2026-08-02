@@ -7,11 +7,13 @@ from src.conversation.brain import ConversationDecision
 from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.intelligence_v3.service import V3LiveDecision
 from src.conversation.mode import BotMode
+from src.conversation.repository import DecisionMetadataValidationError
 from src.engagement.control_plane import (
     TriggerOwner,
     TriggerOwnershipRepository,
     TriggerType,
 )
+from src.persistence.pipeline import INBOUND_FAILED
 from tests.persistence.test_message_pipeline import _bot
 
 
@@ -262,6 +264,119 @@ def test_v3_live_candidate_uses_existing_decision_and_delivery_boundary():
     assert outbox.media_ids == ()
     assert outbox.price_millis is None
     v3.confirm_callback_use.assert_called_once()
+
+
+def test_v3_persistence_failure_falls_back_once_to_current_brain():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    responder.decide.return_value = _decision(
+        "support",
+        "validation",
+        "i hear u",
+        "interview",
+    )
+    v3 = MagicMock()
+    v3.decide_live.return_value = V3LiveDecision(
+        message="that interview has been sitting heavy on u",
+        emotion="nervous",
+        intent="seek_support",
+        active_thread="interview",
+        primary_act="support",
+        secondary_act="learn",
+        route="fast",
+        model="deepseek-v4-flash",
+        model_calls=1,
+        latency_ms=25,
+        prompt_tokens=120,
+        completion_tokens=30,
+        estimated_cost=0.000025,
+        selection_mode="model_candidate",
+        rejection_codes=(),
+        used_callback_ids=(),
+        intelligence_run_id=18,
+    )
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+        conversation_intelligence_v3=v3,
+    )
+    bot._approve_conversation_text = MagicMock(side_effect=lambda _, text: text)
+    original_save = bot.conversation_decision_repo.save
+    calls = 0
+
+    def save_with_one_failure(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise DecisionMetadataValidationError("authority", 64)
+        return original_save(**kwargs)
+
+    bot.conversation_decision_repo.save = MagicMock(
+        side_effect=save_with_one_failure
+    )
+    now = datetime.now(timezone.utc)
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="v3-persistence-fallback",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="my interview is tomorrow",
+        provider_created_at=now,
+    )
+
+    reply = bot._conversation_brain_reply(
+        inbound_id=inbound.id,
+        trigger_kind="unread",
+        fan_id="fan-a",
+        source_message_id=inbound.platform_message_id,
+        source_timestamp=now,
+        persona=bot.persona,
+        history="",
+        fan_message=inbound.content,
+        known_facts=[],
+    )
+
+    assert reply is not None
+    assert reply.content == "i hear u"
+    assert calls == 2
+    v3.decide_live.assert_called_once()
+    v3.record_live_persistence_failure.assert_called_once_with(run_id=18)
+    v3.open_live_circuit.assert_called_once_with()
+    stored = bot.conversation_decision_repo.get(
+        inbound.id,
+        creator_id="creator-a",
+    )
+    assert stored is not None
+    assert stored.authority == "current"
+
+
+def test_permanent_processing_error_is_not_retried_three_times():
+    responder = MagicMock()
+    responder.enabled = True
+    responder.model = "deepseek-v4-flash"
+    _, bot = _bot(
+        bot_mode=BotMode.CONVERSATION,
+        chat_responder=responder,
+    )
+    inbound, _ = bot.processing_repo.insert_inbound(
+        creator_id="creator-a",
+        platform_message_id="permanent-processing-error",
+        fan_id="fan-a",
+        chat_id="chat-a",
+        content="hello",
+        provider_created_at=datetime.now(timezone.utc),
+    )
+    bot._prepare_message = MagicMock(
+        side_effect=DecisionMetadataValidationError("authority", 64)
+    )
+    claimed = bot.processing_repo.claim_next_inbound("creator-a")
+
+    assert bot._process_claimed_inbound(claimed) is True
+    failed = bot.processing_repo.get_inbound(inbound.id)
+    assert failed is not None
+    assert failed.status == INBOUND_FAILED
+    assert failed.attempt_count == 1
 
 
 def test_v3_gate_rejection_falls_back_to_current_brain_without_silence():

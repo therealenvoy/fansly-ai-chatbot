@@ -265,6 +265,9 @@ class ConversationIntelligenceV3Service:
             shadow=False,
         )
 
+    def record_live_persistence_failure(self, *, run_id: int) -> bool:
+        return self.intelligence.mark_live_persistence_failed(run_id=run_id)
+
     def confirm_callback_use(
         self,
         *,

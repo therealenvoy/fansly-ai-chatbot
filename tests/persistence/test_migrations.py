@@ -32,7 +32,7 @@ def test_upgrade_creates_exact_durable_schema(tmp_path):
         assert compare_metadata(context, metadata) == []
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260802_29"
+        ).scalar_one() == "20260802_30"
 
 
 def test_upgrade_is_idempotent_and_downgrade_preserves_adopted_tables(tmp_path):
@@ -180,6 +180,7 @@ def test_postgresql_offline_upgrade_compiles_without_sqlite_types():
     assert "ix_conversation_rule_search_fts" in sql
     assert "to_tsvector('simple', coalesce(search_text, ''))" in sql
     assert "ALTER TABLE conversation_intelligence_runs" in sql
+    assert "ALTER TABLE conversation_decisions ALTER COLUMN authority" in sql
     assert "VARCHAR(64)" in sql
     assert "JSON NOT NULL" in sql
 

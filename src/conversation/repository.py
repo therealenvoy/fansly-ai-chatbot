@@ -9,7 +9,43 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from src.conversation.brain import ConversationDecision
+from src.conversation.authority import (
+    AUTHORITY_CURRENT,
+    AUTHORITY_MAX_LENGTH,
+    SUPPORTED_AUTHORITIES,
+)
 from src.persistence.schema import CONVERSATION_DECISIONS, utcnow
+
+
+class DecisionMetadataValidationError(ValueError):
+    """Reject incompatible decision metadata before opening a transaction."""
+
+    def __init__(self, field: str, limit: int, reason: str = "too_long"):
+        self.field = field
+        self.limit = int(limit)
+        self.reason = reason
+        super().__init__(
+            f"invalid decision metadata field={field} reason={reason} "
+            f"limit={limit}"
+        )
+
+
+DECISION_STRING_LIMITS = {
+    "creator_id": 64,
+    "fan_id": 128,
+    "trigger_kind": 32,
+    "fan_state": 64,
+    "objective": 64,
+    "tactic": 64,
+    "model": 128,
+    "authority": AUTHORITY_MAX_LENGTH,
+    "brain_version": 64,
+    "route": 32,
+    "experiment_id": 128,
+    "variant": 64,
+    "fallback_reason": 128,
+    "safety_rejection_reason": 128,
+}
 
 
 @dataclass(frozen=True)
@@ -21,7 +57,7 @@ class StoredConversationDecision:
     trigger_kind: str
     decision: ConversationDecision
     model: str
-    authority: str = "current"
+    authority: str = AUTHORITY_CURRENT
     brain_version: str = "current-v1"
     route: str | None = None
     experiment_id: str | None = None
@@ -75,7 +111,9 @@ class ConversationDecisionRepository:
             "final_message": decision.final_message,
             "confidence": decision.confidence,
             "model": model,
-            "authority": str(execution.get("authority") or "current"),
+            "authority": str(
+                execution.get("authority") or AUTHORITY_CURRENT
+            ),
             "brain_version": str(execution.get("brain_version") or "current-v1"),
             "route": execution.get("route"),
             "experiment_id": execution.get("experiment_id"),
@@ -96,6 +134,7 @@ class ConversationDecisionRepository:
             "created_at": now,
             "updated_at": now,
         }
+        self._validate_values(values)
         statement = self._insert().values(**values)
         excluded = statement.excluded
         statement = statement.on_conflict_do_update(
@@ -177,7 +216,7 @@ class ConversationDecisionRepository:
                 confidence=float(row["confidence"]),
             ),
             model=str(row["model"]),
-            authority=str(row["authority"] or "current"),
+            authority=str(row["authority"] or AUTHORITY_CURRENT),
             brain_version=str(row["brain_version"] or "current-v1"),
             route=row["route"],
             experiment_id=row["experiment_id"],
@@ -280,3 +319,19 @@ class ConversationDecisionRepository:
         raise RuntimeError(
             f"Unsupported database dialect: {self.engine.dialect.name}"
         )
+
+    @staticmethod
+    def _validate_values(values: dict) -> None:
+        for field, limit in DECISION_STRING_LIMITS.items():
+            value = values.get(field)
+            if value is None:
+                continue
+            if len(str(value)) > limit:
+                raise DecisionMetadataValidationError(field, limit)
+        authority = str(values.get("authority") or AUTHORITY_CURRENT)
+        if authority not in SUPPORTED_AUTHORITIES:
+            raise DecisionMetadataValidationError(
+                "authority",
+                AUTHORITY_MAX_LENGTH,
+                reason="unsupported_value",
+            )

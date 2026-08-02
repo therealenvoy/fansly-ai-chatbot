@@ -6,7 +6,9 @@ from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import inspect
 
+from src.conversation.authority import AUTHORITY_MAX_LENGTH
 from .database import normalize_database_url
 
 
@@ -35,3 +37,22 @@ def upgrade_database(database_url: str, *, engine=None) -> None:
     with engine.begin() as connection:
         config.attributes["connection"] = connection
         command.upgrade(config, "head")
+    assert_runtime_schema_compatible(engine)
+
+
+def assert_runtime_schema_compatible(engine) -> None:
+    """Fail startup before accepting traffic with an incompatible schema."""
+    columns = {
+        column["name"]: column
+        for column in inspect(engine).get_columns(
+            "conversation_decisions"
+        )
+    }
+    authority = columns.get("authority")
+    actual_length = getattr(
+        (authority or {}).get("type"),
+        "length",
+        None,
+    )
+    if actual_length is None or int(actual_length) < AUTHORITY_MAX_LENGTH:
+        raise RuntimeError("conversation_decision_authority_schema_incompatible")

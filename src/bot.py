@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, TYPE_CHECKING
 
+from sqlalchemy.exc import DataError, IntegrityError, ProgrammingError
+
 from .fansly_client import (
     FanslyApiClient, ChatInfo, MessageInfo, AuthError,
     PaymentRequiredError, ProviderDeliveryUnknownError,
@@ -24,8 +26,14 @@ from .webhooks.repository import WebhookEventRepository
 from .conversation.llm import DeepSeekChatResponder
 from .conversation.brain import ConversationDecision
 from .conversation.mode import BotMode, ConversationPolicy
-from .conversation.repository import ConversationDecisionRepository
+from .conversation.repository import (
+    ConversationDecisionRepository,
+    DecisionMetadataValidationError,
+)
 from .conversation.authority import (
+    AUTHORITY_ADVANCED,
+    AUTHORITY_CONVERSATION_INTELLIGENCE_V3,
+    AUTHORITY_CURRENT,
     AutomaticRollbackEvaluator,
     BrainAuthorityRouter,
 )
@@ -76,6 +84,7 @@ from .persistence.pipeline import (
     InboundMessageRecord,
     MessageProcessingRepository,
     OutboxMessageRecord,
+    INBOUND_PENDING,
     OUTBOX_PENDING,
     OUTBOX_SENDING,
 )
@@ -1816,7 +1825,7 @@ class FanslyBot:
                     if (
                         decision is not None
                         and decision.authority
-                        == "conversation_intelligence_v3"
+                        == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
                     ):
                         # V3 selects the Brain 2.0 reply; it is not a separate
                         # contact owner or delivery service.
@@ -1939,7 +1948,7 @@ class FanslyBot:
                         )
                         if (
                             stored_decision.authority
-                            == "conversation_intelligence_v3"
+                            == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
                             and self.conversation_intelligence_v3 is not None
                         ):
                             callback_ids = tuple(
@@ -1998,9 +2007,14 @@ class FanslyBot:
                 inbound.id
             )
             if current is None or current.status == OUTBOX_PENDING:
-                self.processing_repo.release_inbound(
+                released = self.processing_repo.release_inbound(
                     inbound.id,
                     processing_error,
+                    max_attempts=(
+                        1
+                        if self._is_permanent_processing_error(exc)
+                        else 3
+                    ),
                     retry_base_seconds=(
                         self.processing_retry_base_seconds
                     ),
@@ -2008,7 +2022,7 @@ class FanslyBot:
                         self.processing_retry_max_seconds
                     ),
                 )
-                terminal = False
+                terminal = released.status != INBOUND_PENDING
             elif current.status == OUTBOX_SENDING:
                 self.processing_repo.mark_delivery_unknown(
                     current.id,
@@ -2703,6 +2717,10 @@ class FanslyBot:
         """Generate the authoritative live turn with durable continuity."""
         if not self.chat_responder:
             return None
+        v3_persistence_fallback_attempted = bool(
+            context.pop("_v3_persistence_fallback_attempted", False)
+        )
+        fallback_context = dict(context)
         recent_decisions = self.conversation_decision_repo.latest_for_fan(
             creator_id=self.creator_id,
             fan_id=fan_id,
@@ -2845,7 +2863,7 @@ class FanslyBot:
         )
         requested_authority = authority_selection.authority
         execution = {
-            "authority": "current",
+            "authority": AUTHORITY_CURRENT,
             "brain_version": "current-v1",
             "route": None,
             "experiment_id": authority_selection.experiment_id,
@@ -2875,6 +2893,7 @@ class FanslyBot:
             and source_message_id
             and source_timestamp is not None
             and self.conversation_intelligence_v3 is not None
+            and not v3_persistence_fallback_attempted
         ):
             try:
                 persona_snapshot = (
@@ -2922,7 +2941,7 @@ class FanslyBot:
                     confidence=0.85,
                 )
                 execution.update(
-                    authority="conversation_intelligence_v3",
+                    authority=AUTHORITY_CONVERSATION_INTELLIGENCE_V3,
                     brain_version="conversation-intelligence-v3.1",
                     route=v3_outcome.route,
                     variant="v3-live",
@@ -3154,7 +3173,8 @@ class FanslyBot:
                             type(exc).__name__,
                         )
                 if (
-                    execution["authority"] == "conversation_intelligence_v3"
+                    execution["authority"]
+                    == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
                     and not self.conversation_intelligence_v3.can_decide_live(
                         fan_id=fan_id,
                         trigger_kind=trigger_kind,
@@ -3227,7 +3247,10 @@ class FanslyBot:
                             return None
                         continue
                 break
-            if execution["authority"] == "conversation_intelligence_v3":
+            if (
+                execution["authority"]
+                == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
+            ):
                 self.conversation_intelligence_v3.record_live_quality_failure()
                 execution.update(
                     authority="current",
@@ -3358,28 +3381,62 @@ class FanslyBot:
         approved_decision = decision.with_approved_message(approved)
         current_decision_id = None
         if inbound_id is not None:
-            current_decision_id = self.conversation_decision_repo.save(
-                inbound_message_id=inbound_id,
-                creator_id=self.creator_id,
-                fan_id=fan_id,
-                trigger_kind=trigger_kind,
-                decision=approved_decision,
-                model=(
-                    v3_outcome.model
-                    if (
-                        execution["authority"]
-                        == "conversation_intelligence_v3"
-                        and v3_outcome is not None
+            try:
+                current_decision_id = self.conversation_decision_repo.save(
+                    inbound_message_id=inbound_id,
+                    creator_id=self.creator_id,
+                    fan_id=fan_id,
+                    trigger_kind=trigger_kind,
+                    decision=approved_decision,
+                    model=(
+                        v3_outcome.model
+                        if (
+                            execution["authority"]
+                            == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
+                            and v3_outcome is not None
+                        )
+                        else
+                        advanced_outcome.model
+                        if execution["authority"] == AUTHORITY_ADVANCED
+                        and advanced_outcome is not None
+                        else self.chat_responder.model
+                    ),
+                    execution=execution,
+                )
+            except (DecisionMetadataValidationError, DataError) as exc:
+                if (
+                    execution["authority"]
+                    == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
+                    and v3_outcome is not None
+                    and not v3_persistence_fallback_attempted
+                ):
+                    try:
+                        v3_service = self.conversation_intelligence_v3
+                        v3_service.record_live_persistence_failure(
+                            run_id=v3_outcome.intelligence_run_id,
+                        )
+                    except Exception:
+                        logger.error(
+                            "V3 persistence diagnostic update failed safely"
+                        )
+                    self.conversation_intelligence_v3.open_live_circuit()
+                    logger.error(
+                        "V3 decision persistence failed; using current brain: %s",
+                        type(exc).__name__,
                     )
-                    else
-                    advanced_outcome.model
-                    if execution["authority"] == "advanced" and advanced_outcome is not None
-                    else self.chat_responder.model
-                ),
-                execution=execution,
-            )
+                    return self._conversation_brain_reply(
+                        inbound_id=inbound_id,
+                        trigger_kind=trigger_kind,
+                        fan_id=fan_id,
+                        source_message_id=source_message_id,
+                        source_timestamp=source_timestamp,
+                        _v3_persistence_fallback_attempted=True,
+                        **fallback_context,
+                    )
+                raise
             if (
-                execution["authority"] == "conversation_intelligence_v3"
+                execution["authority"]
+                == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
                 and v3_outcome is not None
             ):
                 linked = self.conversation_intelligence_v3.link_live_decision(
@@ -3387,8 +3444,28 @@ class FanslyBot:
                     decision_id=current_decision_id,
                 )
                 if not linked:
+                    try:
+                        v3_service = self.conversation_intelligence_v3
+                        v3_service.record_live_persistence_failure(
+                            run_id=v3_outcome.intelligence_run_id,
+                        )
+                    except Exception:
+                        logger.error(
+                            "V3 link diagnostic update failed safely"
+                        )
                     self.conversation_intelligence_v3.open_live_circuit()
-                    raise RuntimeError("v3_live_decision_link_failed")
+                    logger.error(
+                        "V3 decision attribution failed; using current brain"
+                    )
+                    return self._conversation_brain_reply(
+                        inbound_id=inbound_id,
+                        trigger_kind=trigger_kind,
+                        fan_id=fan_id,
+                        source_message_id=source_message_id,
+                        source_timestamp=source_timestamp,
+                        _v3_persistence_fallback_attempted=True,
+                        **fallback_context,
+                    )
         if (
             requested_authority == "advanced"
             and runtime_settings.auto_rollback
@@ -3546,7 +3623,10 @@ class FanslyBot:
                     "Failed to submit episode generation: %s",
                     type(exc).__name__,
                 )
-        if execution["authority"] == "conversation_intelligence_v3":
+        if (
+            execution["authority"]
+            == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
+        ):
             self.conversation_intelligence_v3.record_live_success()
         return OutboundMessage.text(approved)
 
@@ -3716,6 +3796,18 @@ class FanslyBot:
         ):
             return "conversation_generation_no_approved_reply"
         return type(exc).__name__
+
+    @staticmethod
+    def _is_permanent_processing_error(exc: Exception) -> bool:
+        return isinstance(
+            exc,
+            (
+                DecisionMetadataValidationError,
+                DataError,
+                IntegrityError,
+                ProgrammingError,
+            ),
+        )
 
     @staticmethod
     def _safe_conversation_fallback(

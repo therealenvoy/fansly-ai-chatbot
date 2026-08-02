@@ -1207,6 +1207,29 @@ class IntelligenceRepository:
             )
         return bool(result.rowcount)
 
+    def mark_live_persistence_failed(self, *, run_id: int) -> bool:
+        """Close an unlinked live run with a bounded diagnostic status."""
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(CONVERSATION_INTELLIGENCE_RUNS)
+                .where(
+                    and_(
+                        CONVERSATION_INTELLIGENCE_RUNS.c.id == int(run_id),
+                        CONVERSATION_INTELLIGENCE_RUNS.c.creator_id
+                        == self.creator_id,
+                        CONVERSATION_INTELLIGENCE_RUNS.c.shadow.is_(False),
+                        CONVERSATION_INTELLIGENCE_RUNS.c.current_decision_id.is_(
+                            None
+                        ),
+                    )
+                )
+                .values(
+                    status="decision_persistence_failed",
+                    completed_at=utcnow(),
+                )
+            )
+        return bool(result.rowcount)
+
     def live_cost_since(self, since: datetime) -> float:
         with self.engine.connect() as connection:
             value = connection.execute(
@@ -1356,6 +1379,27 @@ class IntelligenceRepository:
                 )
                 .group_by(CONVERSATION_QUALITY_FEEDBACK.c.feedback_type)
             ).all()
+            unlinked_live_runs = connection.execute(
+                select(func.count(CONVERSATION_INTELLIGENCE_RUNS.c.id)).where(
+                    and_(
+                        CONVERSATION_INTELLIGENCE_RUNS.c.creator_id
+                        == self.creator_id,
+                        CONVERSATION_INTELLIGENCE_RUNS.c.shadow.is_(False),
+                        CONVERSATION_INTELLIGENCE_RUNS.c.current_decision_id.is_(
+                            None
+                        ),
+                        CONVERSATION_INTELLIGENCE_RUNS.c.status.in_(
+                            (
+                                "complete",
+                                "complete_degraded",
+                                "grounded_fallback",
+                            )
+                        ),
+                        CONVERSATION_INTELLIGENCE_RUNS.c.completed_at
+                        < utcnow() - timedelta(minutes=2),
+                    )
+                )
+            ).scalar_one()
             attributed_outcomes = CONVERSATION_OUTCOMES.join(
                 CONVERSATION_INTELLIGENCE_RUNS,
                 and_(
@@ -1467,6 +1511,7 @@ class IntelligenceRepository:
         )
         return {
             "statuses": {str(key): int(value) for key, value in status_rows},
+            "unlinked_live_runs": int(unlinked_live_runs or 0),
             "feedback": {str(key): int(value) for key, value in feedback_rows},
             "estimated_cost": float(total_cost or 0.0),
             "model_calls": int(total_calls or 0),

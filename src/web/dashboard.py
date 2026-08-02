@@ -2078,6 +2078,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 },
                 "quality": {
                     "statuses": quality["statuses"],
+                    "unlinked_live_runs": quality[
+                        "unlinked_live_runs"
+                    ],
                     "feedback": quality["feedback"],
                     "estimated_cost": quality["estimated_cost"],
                     "model_calls": quality["model_calls"],
