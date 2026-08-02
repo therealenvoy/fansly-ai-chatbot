@@ -357,7 +357,44 @@ def test_transport_adapter_accepts_fenced_json_extra_fields_and_one_candidate():
     assert result.model_calls == 1
     assert "provider_json_fence_stripped" in result.degradation_codes
     assert "provider_extra_fields_ignored" in result.degradation_codes
-    assert "candidate_count_degraded" in result.degradation_codes
+    assert "provider_candidate_count_degraded" in result.degradation_codes
+
+
+def test_transport_adapter_normalizes_ids_and_deduplicates_candidate_messages():
+    payload = _planner_payload(
+        [
+            "interview nerves make sense when it matters",
+            "interview nerves make sense when it matters",
+        ]
+    )
+    payload["candidates"][0]["candidate_id"] = "same-provider-id"
+    payload["candidates"][1]["candidate_id"] = "same-provider-id"
+    planner = DeepSeekV3Planner(
+        api_key="secret",
+        request=lambda *args, **kwargs: _RawPlannerResponse(json.dumps(payload)),
+    )
+    compiled = PromptCompilerV3().compile(
+        {
+            "safety": {"conversation_only": True},
+            "newest_turn": "i feel nervous",
+            "direct_unresolved_question": "",
+            "recent_history": [],
+            "relationship_state": {},
+            "boundaries": [],
+            "verified_creator_facts": [],
+        }
+    )
+
+    result = planner.generate(
+        compiled,
+        strategic=False,
+        recent_fan_messages=[],
+        recent_creator_messages=[],
+    )
+
+    assert [item.candidate_id for item in result.plan.candidates] == ["c1"]
+    assert "provider_duplicate_candidate_moves" in result.degradation_codes
+    assert "provider_candidate_count_degraded" in result.degradation_codes
 
 
 def test_transport_adapter_defaults_unknown_planning_enums_conservatively():
@@ -444,10 +481,34 @@ def test_transport_adapter_reports_safe_specific_contract_failures(
             recent_creator_messages=[],
         )
 
-    assert raised.value.code == "provider_contract_missing_required"
+    assert raised.value.code == "provider_schema_missing_field"
     assert raised.value.diagnostic["schema"] == "plan"
     assert "raw_content" not in raised.value.diagnostic
     assert raised.value.model_calls == 1
+
+
+def test_transport_adapter_classifies_wrong_required_field_type():
+    payload = _planner_payload(
+        [
+            "interview nerves are real and i'm listening",
+            "the interview matters to u and that makes sense",
+        ]
+    )
+    payload["delivery"]["bubble_count"] = "one"
+    planner = DeepSeekV3Planner(
+        api_key="secret",
+        request=lambda *args, **kwargs: _RawPlannerResponse(json.dumps(payload)),
+    )
+
+    with pytest.raises(V3PlannerError) as raised:
+        planner._call(
+            instruction="return a plan",
+            payload={},
+            schema=PlanEnvelope,
+        )
+
+    assert raised.value.code == "provider_schema_invalid_type"
+    assert raised.value.diagnostic["fields"] == ["delivery.bubble_count"]
 
 
 def test_transport_adapter_distinguishes_truncated_json_from_outer_shape_errors():
@@ -460,7 +521,7 @@ def test_transport_adapter_distinguishes_truncated_json_from_outer_shape_errors(
             schema=PlanEnvelope,
             request=lambda *args, **kwargs: _RawPlannerResponse('{"understanding":'),
         )
-    assert truncated.value.code == "provider_content_json_truncated"
+    assert truncated.value.code == "provider_truncated_json"
 
     with pytest.raises(V3PlannerError) as shape:
         planner._call(
@@ -472,7 +533,44 @@ def test_transport_adapter_distinguishes_truncated_json_from_outer_shape_errors(
                 outer={"choices": []},
             ),
         )
-    assert shape.value.code == "provider_response_shape_invalid"
+    assert shape.value.code == "provider_missing_choices"
+
+
+def test_transport_adapter_classifies_outer_shape_and_empty_content_safely():
+    planner = DeepSeekV3Planner(api_key="secret")
+
+    with pytest.raises(V3PlannerError) as not_object:
+        planner._call(
+            instruction="return a plan",
+            payload={},
+            schema=PlanEnvelope,
+            request=lambda *args, **kwargs: _RawPlannerResponse(
+                "",
+                outer=["not", "an", "object"],
+            ),
+        )
+    assert not_object.value.code == "provider_response_not_object"
+
+    with pytest.raises(V3PlannerError) as missing_message:
+        planner._call(
+            instruction="return a plan",
+            payload={},
+            schema=PlanEnvelope,
+            request=lambda *args, **kwargs: _RawPlannerResponse(
+                "",
+                outer={"choices": [{}]},
+            ),
+        )
+    assert missing_message.value.code == "provider_missing_message"
+
+    with pytest.raises(V3PlannerError) as empty:
+        planner._call(
+            instruction="return a plan",
+            payload={},
+            schema=PlanEnvelope,
+            request=lambda *args, **kwargs: _RawPlannerResponse("   "),
+        )
+    assert empty.value.code == "provider_empty_content"
 
 
 def test_invalid_strategic_judge_uses_deterministic_safe_candidate_without_third_call():
@@ -517,7 +615,8 @@ def test_invalid_strategic_judge_uses_deterministic_safe_candidate_without_third
     assert len(calls) == 2
     assert result.selected_message is not None
     assert result.selection_mode == "deterministic_judge_fallback"
-    assert "judge_provider_content_json_truncated" in result.degradation_codes
+    assert "provider_judge_contract_invalid" in result.degradation_codes
+    assert "judge:provider_truncated_json" in result.degradation_codes
 
 
 def test_all_rejected_fast_candidates_use_only_evidence_grounded_fallback():

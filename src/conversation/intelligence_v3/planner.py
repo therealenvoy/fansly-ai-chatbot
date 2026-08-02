@@ -252,12 +252,14 @@ def _normalize_contract_literals(
 def _validation_code(error: ValidationError) -> str:
     types = {str(item.get("type") or "") for item in error.errors()}
     if "missing" in types:
-        return "provider_contract_missing_required"
+        return "provider_schema_missing_field"
+    if "extra_forbidden" in types:
+        return "provider_schema_extra_field"
     if "literal_error" in types or "enum" in types:
-        return "provider_contract_enum_invalid"
+        return "provider_schema_invalid_enum"
     if any(item.endswith("_type") or item.endswith("_parsing") for item in types):
-        return "provider_contract_type_invalid"
-    return "provider_contract_validation_invalid"
+        return "provider_schema_invalid_type"
+    return "provider_contract_unknown"
 
 
 def _validation_diagnostic(error: ValidationError, schema: type[BaseModel]) -> dict:
@@ -528,17 +530,21 @@ class DeepSeekV3Planner:
         degradation_codes = set(plan_degradations)
         candidates = []
         seen_moves: set[tuple[str, str]] = set()
-        seen_ids: set[str] = set()
-        for candidate in plan_payload.candidates:
+        seen_messages: set[str] = set()
+        for index, provider_candidate in enumerate(plan_payload.candidates, start=1):
+            candidate = provider_candidate.model_copy(
+                update={"candidate_id": f"c{index}"}
+            )
             move = (candidate.act, candidate.structure.casefold())
-            if move in seen_moves or candidate.candidate_id in seen_ids:
-                degradation_codes.add("duplicate_candidate_ignored")
+            normalized_message = " ".join(candidate.message.casefold().split())
+            if move in seen_moves or normalized_message in seen_messages:
+                degradation_codes.add("provider_duplicate_candidate_moves")
                 continue
             seen_moves.add(move)
-            seen_ids.add(candidate.candidate_id)
+            seen_messages.add(normalized_message)
             candidates.append(candidate)
         if len(candidates) != candidate_count:
-            degradation_codes.add("candidate_count_degraded")
+            degradation_codes.add("provider_candidate_count_degraded")
         assessments: list[CandidateAssessment] = []
         deterministic_rejections: dict[str, tuple[str, ...]] = {}
         direct_question_required = bool(
@@ -611,7 +617,8 @@ class DeepSeekV3Planner:
                 )
                 degradation_codes.update(judge_degradations)
             except V3PlannerError as error:
-                degradation_codes.add(f"judge_{error.code}")
+                degradation_codes.add("provider_judge_contract_invalid")
+                degradation_codes.add(f"judge:{error.code}")
                 assessments = [
                     CandidateAssessment(
                         candidate_id=candidate.candidate_id,
@@ -880,6 +887,7 @@ class DeepSeekV3Planner:
         schema: type[BaseModel],
         request: Callable | None = None,
     ):
+        started = time.monotonic()
         if not self.api_key:
             raise V3PlannerError(
                 "provider_not_configured",
@@ -932,7 +940,11 @@ class DeepSeekV3Planner:
         except httpx.TimeoutException as error:
             raise V3PlannerError(
                 "provider_timeout",
-                diagnostic={"stage": "transport", "schema": schema_label},
+                diagnostic={
+                    "stage": "transport",
+                    "schema": schema_label,
+                    "latency_ms": int((time.monotonic() - started) * 1_000),
+                },
             ) from error
         except httpx.HTTPStatusError as error:
             status_code = getattr(getattr(error, "response", None), "status_code", None)
@@ -941,34 +953,71 @@ class DeepSeekV3Planner:
                 diagnostic={
                     "stage": "transport",
                     "schema": schema_label,
-                    "http_status": int(status_code) if status_code else None,
+                    "http_status_class": (
+                        f"{int(status_code) // 100}xx" if status_code else None
+                    ),
+                    "latency_ms": int((time.monotonic() - started) * 1_000),
                 },
             ) from error
         except httpx.RequestError as error:
             raise V3PlannerError(
-                "provider_network_error",
-                diagnostic={"stage": "transport", "schema": schema_label},
+                "provider_request_error",
+                diagnostic={
+                    "stage": "transport",
+                    "schema": schema_label,
+                    "latency_ms": int((time.monotonic() - started) * 1_000),
+                },
             ) from error
         try:
             envelope = response.json()
         except (TypeError, ValueError) as error:
             raise V3PlannerError(
-                "provider_response_json_invalid",
+                "provider_response_not_object",
                 diagnostic={"stage": "response_envelope", "schema": schema_label},
             ) from error
         if not isinstance(envelope, dict):
             raise V3PlannerError(
-                "provider_response_shape_invalid",
+                "provider_response_not_object",
                 diagnostic={"stage": "response_envelope", "schema": schema_label},
             )
-        try:
-            choices = envelope["choices"]
-            content = choices[0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as error:
+        choices = envelope.get("choices")
+        if not isinstance(choices, list) or not choices:
             raise V3PlannerError(
-                "provider_response_shape_invalid",
+                "provider_missing_choices",
+                diagnostic={
+                    "stage": "response_envelope",
+                    "schema": schema_label,
+                    "response_top_level_keys": sorted(
+                        str(key)[:64] for key in envelope
+                    )[:20],
+                },
+            )
+        choice = choices[0]
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if not isinstance(message, dict) or "content" not in message:
+            raise V3PlannerError(
+                "provider_missing_message",
                 diagnostic={"stage": "response_envelope", "schema": schema_label},
-            ) from error
+            )
+        content = message["content"]
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        usage = envelope.get("usage") or {}
+        if not isinstance(usage, dict):
+            usage = {}
+        base_diagnostic = {
+            "schema": schema_label,
+            "finish_reason": _bounded_text(finish_reason, 32) or None,
+            "response_content_length": (
+                len(content)
+                if isinstance(content, str)
+                else len(json.dumps(content, default=str, separators=(",", ":")))
+                if isinstance(content, dict)
+                else 0
+            ),
+            "response_top_level_keys": sorted(str(key)[:64] for key in envelope)[:20],
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+        }
 
         degradations: set[str] = set()
         if isinstance(content, dict):
@@ -985,8 +1034,8 @@ class DeepSeekV3Planner:
                 degradations.add("provider_json_fence_stripped")
             if not normalized:
                 raise V3PlannerError(
-                    "provider_content_empty",
-                    diagnostic={"stage": "content_decode", "schema": schema_label},
+                    "provider_empty_content",
+                    diagnostic={"stage": "content_decode", **base_diagnostic},
                 )
             try:
                 decoded = json.loads(normalized)
@@ -1009,36 +1058,36 @@ class DeepSeekV3Planner:
                             and error.pos >= len(normalized[start:]) - 4
                         )
                         code = (
-                            "provider_content_json_truncated"
+                            "provider_truncated_json"
                             if truncated
-                            else "provider_content_json_invalid"
+                            else "provider_non_json_content"
                         )
                         raise V3PlannerError(
                             code,
                             diagnostic={
                                 "stage": "content_decode",
-                                "schema": schema_label,
+                                **base_diagnostic,
                                 "json_error": error.msg[:80],
                             },
                         ) from error
                 else:
                     raise V3PlannerError(
-                        "provider_content_json_invalid",
+                        "provider_non_json_content",
                         diagnostic={
                             "stage": "content_decode",
-                            "schema": schema_label,
+                            **base_diagnostic,
                             "json_error": first_error.msg[:80],
                         },
                     ) from first_error
         else:
             raise V3PlannerError(
-                "provider_content_type_invalid",
-                diagnostic={"stage": "content_decode", "schema": schema_label},
+                "provider_non_json_content",
+                diagnostic={"stage": "content_decode", **base_diagnostic},
             )
         if not isinstance(decoded, dict):
             raise V3PlannerError(
-                "provider_content_type_invalid",
-                diagnostic={"stage": "content_decode", "schema": schema_label},
+                "provider_response_not_object",
+                diagnostic={"stage": "content_decode", **base_diagnostic},
             )
 
         cleaned, extras_removed = _prune_transport_fields(decoded, schema)
@@ -1053,13 +1102,20 @@ class DeepSeekV3Planner:
         try:
             parsed = schema.model_validate(cleaned)
         except ValidationError as error:
+            diagnostic = _validation_diagnostic(error, schema)
+            diagnostic.update(base_diagnostic)
+            diagnostic["candidates_parsed"] = (
+                len(decoded.get("candidates") or [])
+                if isinstance(decoded.get("candidates"), list)
+                else 0
+            )
+            diagnostic["latency_ms"] = int(
+                (time.monotonic() - started) * 1_000
+            )
             raise V3PlannerError(
                 _validation_code(error),
-                diagnostic=_validation_diagnostic(error, schema),
+                diagnostic=diagnostic,
             ) from error
-        usage = envelope.get("usage") or {}
-        if not isinstance(usage, dict):
-            usage = {}
         return (
             parsed,
             {
