@@ -7,6 +7,11 @@ from src.conversation.intelligence_v3.contracts import (
     RelationshipSnapshot,
 )
 from src.conversation.intelligence_v3.settings import V3RuntimeSettings
+from src.conversation.intelligence_v3.corpus import (
+    CorpusIngestor,
+    compile_tiffany_corpus,
+    load_compiled_corpus,
+)
 
 __all__ = [
     "CandidateAssessment",
@@ -14,4 +19,7 @@ __all__ = [
     "HighEQPlan",
     "RelationshipSnapshot",
     "V3RuntimeSettings",
+    "CorpusIngestor",
+    "compile_tiffany_corpus",
+    "load_compiled_corpus",
 ]

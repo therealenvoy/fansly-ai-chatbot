@@ -21,6 +21,29 @@ from src.persistence.schema import metadata, utcnow
 
 ID = BigInteger().with_variant(Integer, "sqlite")
 
+CONVERSATION_CORPUS_RELEASES = Table(
+    "conversation_corpus_releases",
+    metadata,
+    Column("id", ID, primary_key=True, autoincrement=True),
+    Column("creator_id", String(64), ForeignKey("creators.id"), nullable=False),
+    Column("release_key", String(96), nullable=False),
+    Column("version", String(32), nullable=False),
+    Column("status", String(24), nullable=False, default="draft"),
+    Column("manifest_fingerprint", String(64), nullable=False),
+    Column("runtime_manifest", JSON, nullable=False, default=dict),
+    Column("validation_report", JSON, nullable=False, default=dict),
+    Column("approved_by", String(64), nullable=False),
+    Column("activated_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    Column("updated_at", DateTime(timezone=True), nullable=False, default=utcnow),
+    UniqueConstraint(
+        "creator_id",
+        "release_key",
+        "version",
+        name="uq_conversation_corpus_release_version",
+    ),
+)
+
 CONVERSATION_DOCUMENT_PAGES = Table(
     "conversation_document_pages",
     metadata,
@@ -176,6 +199,12 @@ CONVERSATION_QUALITY_FEEDBACK = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, default=utcnow),
 )
 
+Index(
+    "ix_conversation_corpus_release_active",
+    CONVERSATION_CORPUS_RELEASES.c.creator_id,
+    CONVERSATION_CORPUS_RELEASES.c.status,
+    CONVERSATION_CORPUS_RELEASES.c.release_key,
+)
 Index(
     "ix_conversation_document_page_lookup",
     CONVERSATION_DOCUMENT_PAGES.c.creator_id,

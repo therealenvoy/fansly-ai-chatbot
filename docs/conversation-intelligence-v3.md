@@ -98,6 +98,35 @@ an explicit operator and deployment decision. A three-consecutive-failure
 runtime circuit fails back to the current Brain pipeline without granting V3
 any outbox or provider capability.
 
+## Tiffany training release
+
+`tiffany-training-v1` is compiled deterministically from the owner-approved
+Parts 00, 01, 02, and 04-10. Part 03 is intentionally excluded. The compiler
+produces ten versioned source documents, source-page rules, paired positive and
+negative examples, the Part 09 memory policy, and the Part 10 feedback schema.
+Negative examples are stored only as contrastive anti-examples and are never
+selected as positive response demonstrations.
+
+The artifact fingerprint covers every source-backed document, rule, example,
+and runtime policy. Ingestion validates that fingerprint and stores the release
+atomically for one creator. The default ingestion mode is `shadow`: live
+retrieval excludes every document belonging to that release, while shadow
+evaluation may retrieve it. Promotion to `active` is a separate explicit
+operation. Repeated ingestion of the same version is idempotent; reusing a
+version with different content fails closed. Prior releases remain archived
+for rollback. Corpus ingestion cannot create an outbox row or call a provider.
+
+Runtime prompts do not contain the entire corpus. Retrieval contributes only
+the relevant rule guidance, boundaries, examples, non-quotable memory controls,
+and release identity for the current turn. This keeps prompt size bounded while
+making every choice traceable to an approved source page.
+
+When the active release supplies Part 09, memory categories become an allowlist.
+Low-confidence or unknown categories are excluded. Contextual memories require
+current-turn relevance. Operator-only memories such as boundaries, corrections,
+sensitivities, and style preferences become non-quotable generation controls
+rather than facts the bot may repeat.
+
 ## Multi-bubble delivery
 
 The existing Human Delivery foundation owns durable plans, bubble sequencing,

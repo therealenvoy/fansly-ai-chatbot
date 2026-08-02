@@ -425,15 +425,24 @@ class ConversationIntelligenceV3Service:
                     fan_id=fan_id,
                     query=str(context.get("fan_message") or ""),
                     now=provider_created_at,
+                    shadow=shadow,
                 )
                 if self.settings.memory_retrieval_v3_mode == active_mode
-                else {"memories": [], "callbacks": [], "conflicts_excluded": 0}
+                else {
+                    "memories": [],
+                    "controls": [],
+                    "callbacks": [],
+                    "conflicts_excluded": 0,
+                    "policy_version": "off",
+                    "release": None,
+                }
             )
             playbook = (
                 self.knowledge.retrieve(
                     query=str(context.get("fan_message") or ""),
                     relationship_stage=str(state.get("relationship_stage") or "new"),
                     scenario=str(proposal.current_intent or ""),
+                    shadow=shadow,
                 )
                 if self.settings.playbook_engine_mode == active_mode
                 else {
@@ -441,6 +450,7 @@ class ConversationIntelligenceV3Service:
                     "boundaries": [],
                     "examples": [],
                     "fingerprint": "off",
+                    "release": None,
                 }
             )
             creator_facts = self.intelligence.verified_creator_facts()
@@ -458,6 +468,16 @@ class ConversationIntelligenceV3Service:
                         "fan_content_untrusted": True,
                         "respect_boundaries": True,
                     },
+                    "training_release": (
+                        {
+                            "release_key": playbook["release"]["release_key"],
+                            "version": playbook["release"]["version"],
+                            "manifest_fingerprint": playbook["release"]["manifest_fingerprint"],
+                            "memory_policy_version": memory.get("policy_version"),
+                        }
+                        if playbook.get("release")
+                        else None
+                    ),
                     "newest_turn": str(context.get("fan_message") or "")[:4_000],
                     "direct_unresolved_question": (
                         proposal.direct_question
@@ -472,11 +492,13 @@ class ConversationIntelligenceV3Service:
                             "scenario": row["scenario"],
                             "conditions": row["conditions"],
                             "forbidden_acts": row["forbidden_acts"],
+                            "guidance": str(row.get("search_text") or "")[:1_200],
                             "source_page": row["source_page"],
                         }
                         for row in playbook.get("boundaries", [])
                     ],
                     "verified_creator_facts": creator_facts,
+                    "memory_controls": memory.get("controls") or [],
                     "memories": memory["memories"],
                     "playbook_rules": [
                         {
@@ -486,6 +508,7 @@ class ConversationIntelligenceV3Service:
                             "conditions": row["conditions"],
                             "recommended_acts": row["recommended_acts"],
                             "forbidden_acts": row["forbidden_acts"],
+                            "guidance": str(row.get("search_text") or "")[:1_200],
                             "source_page": row["source_page"],
                         }
                         for row in playbook["rules"]
@@ -512,7 +535,20 @@ class ConversationIntelligenceV3Service:
                 }
             )
             prompt_fingerprint = compiled.fingerprint
-            compilation_report = compiled.report
+            compilation_report = {
+                **compiled.report,
+                "training_release": (
+                    {
+                        "release_key": playbook["release"]["release_key"],
+                        "version": playbook["release"]["version"],
+                        "manifest_fingerprint": playbook["release"]["manifest_fingerprint"],
+                    }
+                    if playbook.get("release")
+                    else None
+                ),
+                "memory_policy_version": memory.get("policy_version"),
+                "memory_controls": len(memory.get("controls") or []),
+            }
             has_memory_conflict = int(memory.get("conflicts_excluded") or 0) > 0
             context_confidence = 0.8
             if not reduction.accepted or has_memory_conflict:
@@ -579,6 +615,12 @@ class ConversationIntelligenceV3Service:
                     "versions": {
                         "pipeline": "conversation-intelligence-v3.1",
                         "playbook": playbook["fingerprint"],
+                        "corpus": (
+                            f"{playbook['release']['release_key']}@{playbook['release']['version']}"
+                            if playbook.get("release")
+                            else "none"
+                        ),
+                        "memory_policy": str(memory.get("policy_version") or "legacy"),
                     },
                     "prompt_fingerprint": prompt_fingerprint,
                     "compilation_report": compilation_report,

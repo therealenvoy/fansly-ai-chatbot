@@ -18,6 +18,7 @@ from src.conversation.intelligence_v3.knowledge import (
     tokenize,
 )
 from src.conversation.intelligence_v3.schema import (
+    CONVERSATION_CORPUS_RELEASES,
     CONVERSATION_DOCUMENT_PAGES,
     CONVERSATION_INTELLIGENCE_RUNS,
     CONVERSATION_KNOWLEDGE_CONFLICTS,
@@ -58,6 +59,7 @@ class KnowledgeRepository:
         *,
         actor: str = "operator",
         document_type: str = "conversation_playbook",
+        source: str = "pdf_upload",
     ) -> dict:
         normalized_type = str(document_type or "conversation_playbook").strip().lower()
         if normalized_type not in {
@@ -68,6 +70,15 @@ class KnowledgeRepository:
             "decision_rules",
             "approved_examples",
             "boundaries",
+            "objectives",
+            "brand_bible",
+            "voice_style",
+            "relationship_stages",
+            "situation_handling",
+            "winning_examples",
+            "negative_examples",
+            "fan_memory_policy",
+            "feedback_outcomes",
         }:
             raise ValueError("invalid knowledge document type")
         now = utcnow()
@@ -108,7 +119,7 @@ class KnowledgeRepository:
                     page_count=len(extracted.pages),
                     character_count=len(extracted.content),
                     conflict_findings=[],
-                    source="pdf_upload",
+                    source=str(source or "corpus_compiler")[:64],
                     created_by=str(actor)[:64],
                     created_at=now,
                     updated_at=now,
@@ -121,6 +132,7 @@ class KnowledgeRepository:
                         document_id=document_id,
                         creator_id=self.creator_id,
                         page_number=page.page_number,
+                        section=(str(page.section)[:256] if page.section else None),
                         content=page.content,
                         content_fingerprint=page.fingerprint,
                         extraction_quality=page.quality,
@@ -585,18 +597,37 @@ class KnowledgeRepository:
         profiles: Iterable[str] = ("conversation", "relationship"),
         rule_limit: int = 6,
         example_limit: int = 4,
+        shadow: bool = False,
     ) -> dict:
         profile_set = {str(value) for value in profiles}
         if "sales" in profile_set:
             profile_set.remove("sales")
         normalized_scenario = str(scenario or "").strip()[:128]
         terms = tokenize(query, relationship_stage, normalized_scenario)
-        base_predicate = and_(
-            CONVERSATION_KNOWLEDGE_RULES.c.creator_id == self.creator_id,
-            CONVERSATION_KNOWLEDGE_RULES.c.status == "active",
-            CONVERSATION_KNOWLEDGE_RULES.c.knowledge_profile.in_(profile_set),
-        )
         with self.engine.connect() as connection:
+            release, corpus_document_ids, selected_document_ids = self._corpus_scope(
+                connection,
+                shadow=shadow,
+            )
+            corpus_rule_scope = True
+            corpus_example_scope = True
+            if corpus_document_ids:
+                corpus_rule_scope = or_(
+                    CONVERSATION_KNOWLEDGE_RULES.c.source_document_id.is_(None),
+                    CONVERSATION_KNOWLEDGE_RULES.c.source_document_id.not_in(corpus_document_ids),
+                    CONVERSATION_KNOWLEDGE_RULES.c.source_document_id.in_(selected_document_ids),
+                )
+                corpus_example_scope = or_(
+                    CONVERSATION_EXAMPLES.c.source_document_id.is_(None),
+                    CONVERSATION_EXAMPLES.c.source_document_id.not_in(corpus_document_ids),
+                    CONVERSATION_EXAMPLES.c.source_document_id.in_(selected_document_ids),
+                )
+            base_predicate = and_(
+                CONVERSATION_KNOWLEDGE_RULES.c.creator_id == self.creator_id,
+                CONVERSATION_KNOWLEDGE_RULES.c.status == "active",
+                CONVERSATION_KNOWLEDGE_RULES.c.knowledge_profile.in_(profile_set),
+                corpus_rule_scope,
+            )
             boundary_rows = connection.execute(
                 select(CONVERSATION_KNOWLEDGE_RULES)
                 .where(
@@ -692,6 +723,7 @@ class KnowledgeRepository:
                         CONVERSATION_EXAMPLES.c.creator_id == self.creator_id,
                         CONVERSATION_EXAMPLES.c.status == "active",
                         CONVERSATION_EXAMPLES.c.safety_class == "conversation_only",
+                        corpus_example_scope,
                     )
                 )
             ).mappings().all()
@@ -760,7 +792,50 @@ class KnowledgeRepository:
                     "examples": [(row["id"], row["revision"]) for row in examples],
                 }
             ),
+            "release": release,
         }
+
+    def active_corpus_release(self, *, shadow: bool = False) -> dict | None:
+        """Return the release visible to the requested evaluation mode."""
+        with self.engine.connect() as connection:
+            release, _, _ = self._corpus_scope(connection, shadow=shadow)
+        return release
+
+    def _corpus_scope(self, connection, *, shadow: bool) -> tuple[dict | None, list[int], list[int]]:
+        rows = connection.execute(
+            select(CONVERSATION_CORPUS_RELEASES)
+            .where(CONVERSATION_CORPUS_RELEASES.c.creator_id == self.creator_id)
+            .order_by(desc(CONVERSATION_CORPUS_RELEASES.c.updated_at))
+        ).mappings().all()
+        all_document_ids: set[int] = set()
+        selected = None
+        preferred_statuses = ("shadow", "active") if shadow else ("active",)
+        for status in preferred_statuses:
+            selected = next((row for row in rows if str(row["status"]) == status), None)
+            if selected is not None:
+                break
+        for row in rows:
+            manifest = dict(row.get("runtime_manifest") or {})
+            all_document_ids.update(
+                int(value)
+                for value in manifest.get("_corpus_document_ids") or []
+                if int(value) > 0
+            )
+        if selected is None:
+            return None, sorted(all_document_ids), []
+        runtime_manifest = dict(selected.get("runtime_manifest") or {})
+        selected_document_ids = sorted(
+            int(value)
+            for value in runtime_manifest.pop("_corpus_document_ids", [])
+            if int(value) > 0
+        )
+        return {
+            "release_key": str(selected["release_key"]),
+            "version": str(selected["version"]),
+            "status": str(selected["status"]),
+            "manifest_fingerprint": str(selected["manifest_fingerprint"]),
+            "runtime_manifest": runtime_manifest,
+        }, sorted(all_document_ids), selected_document_ids
 
     def overview(self) -> dict:
         with self.engine.connect() as connection:

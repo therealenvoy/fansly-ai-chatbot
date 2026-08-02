@@ -32,7 +32,7 @@ def test_upgrade_creates_exact_durable_schema(tmp_path):
         assert compare_metadata(context, metadata) == []
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == "20260802_28"
+        ).scalar_one() == "20260802_29"
 
 
 def test_upgrade_is_idempotent_and_downgrade_preserves_adopted_tables(tmp_path):

@@ -288,11 +288,13 @@ class PromptCompilerV3:
 
     sections = (
         "safety",
+        "training_release",
         "newest_turn",
         "direct_unresolved_question",
         "recent_history",
         "relationship_state",
         "boundaries",
+        "memory_controls",
         "verified_creator_facts",
         "memories",
         "playbook_rules",

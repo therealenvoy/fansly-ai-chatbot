@@ -28,6 +28,7 @@ class ExtractedPage:
     fingerprint: str
     quality: float
     unreadable: bool
+    section: str | None = None
 
 
 @dataclass(frozen=True)
