@@ -1816,29 +1816,7 @@ class FanslyBot:
                     )
                     return True
                 outbound = self._coerce_outbound(prepared)
-                service_role = "current_brain"
-                if self.bot_mode == BotMode.CONVERSATION:
-                    decision = self.conversation_decision_repo.get(
-                        inbound.id,
-                        creator_id=self.creator_id,
-                    )
-                    if (
-                        decision is not None
-                        and decision.authority
-                        == AUTHORITY_CONVERSATION_INTELLIGENCE_V3
-                    ):
-                        # V3 selects the Brain 2.0 reply; it is not a separate
-                        # contact owner or delivery service.
-                        service_role = "brain2"
-                    elif decision is not None and (
-                        decision.authority == "advanced"
-                        or (
-                            decision.fallback_used
-                            and decision.fallback_reason
-                            != "stale_authority_after_generation"
-                        )
-                    ):
-                        service_role = "brain2"
+                service_role = self._delivery_service_role(inbound)
                 try:
                     outbox, _ = self.processing_repo.enqueue_outbox(
                         inbound=inbound,
@@ -2036,6 +2014,43 @@ class FanslyBot:
                 type(exc).__name__,
             )
             return terminal
+
+    def _delivery_service_role(
+        self,
+        inbound: InboundMessageRecord,
+    ) -> str:
+        """Return the configured sender, independently of reply generation."""
+        if inbound.trigger_kind == "unread":
+            runtime_settings = (
+                self.brain_settings_service.snapshot()
+                if self.brain_settings_service is not None
+                else BrainRuntimeSettings()
+            )
+            return (
+                "brain2"
+                if runtime_settings.mode == "advanced"
+                and runtime_settings.live_percent > 0
+                else "current_brain"
+            )
+
+        service_role = "current_brain"
+        if self.bot_mode != BotMode.CONVERSATION:
+            return service_role
+        decision = self.conversation_decision_repo.get(
+            inbound.id,
+            creator_id=self.creator_id,
+        )
+        if decision is not None and (
+            decision.authority
+            in {AUTHORITY_ADVANCED, AUTHORITY_CONVERSATION_INTELLIGENCE_V3}
+            or (
+                decision.fallback_used
+                and decision.fallback_reason
+                != "stale_authority_after_generation"
+            )
+        ):
+            service_role = "brain2"
+        return service_role
 
     @staticmethod
     def _coerce_outbound(

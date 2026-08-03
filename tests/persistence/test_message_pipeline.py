@@ -7,6 +7,7 @@ from sqlalchemy import select
 from src.bot import FanslyBot
 from src.conversation.mode import BotMode
 from src.conversation.brain import ConversationDecision
+from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.brain2_schema import CONVERSATION_OUTCOMES
 from src.engagement.control_plane import (
     TriggerOwner,
@@ -113,9 +114,17 @@ def test_delivery_outcome_preserves_advanced_authority_attribution():
     responder = MagicMock()
     responder.enabled = True
     responder.model = "deepseek-v4-flash"
+    brain_settings = MagicMock()
+    brain_settings.snapshot.return_value = BrainRuntimeSettings(
+        mode="advanced",
+        live_percent=100,
+        max_live_percent=100,
+        allow_advanced_send=True,
+    )
     engine, bot = _bot(
         bot_mode=BotMode.CONVERSATION,
         chat_responder=responder,
+        brain_settings_service=brain_settings,
     )
     now = datetime.now(timezone.utc)
     inbound, _ = bot.processing_repo.insert_inbound(
@@ -175,7 +184,7 @@ def test_delivery_outcome_preserves_advanced_authority_attribution():
     assert outcome["experiment_id"] == "canary-v2"
 
 
-def test_brain_fallback_keeps_brain2_contact_ownership():
+def test_current_fallback_keeps_configured_current_contact_ownership():
     responder = MagicMock()
     responder.enabled = True
     responder.model = "deepseek-v4-flash"
@@ -217,13 +226,6 @@ def test_brain_fallback_keeps_brain2_contact_ownership():
             "fallback_reason": "advanced_quality_gate_rejected",
         },
     )
-    TriggerOwnershipRepository(engine).assign(
-        "creator-a",
-        TriggerType.INBOUND_REPLY,
-        TriggerOwner.BRAIN2,
-        actor="test",
-        reason="brain fallback ownership test",
-    )
     bot._prepare_message = MagicMock(
         return_value=OutboundMessage.text("safe fallback reply")
     )
@@ -236,7 +238,7 @@ def test_brain_fallback_keeps_brain2_contact_ownership():
     assert bot._process_claimed_inbound(claimed) is True
 
     outbox = _rows(engine, OUTBOX_MESSAGES)[0]
-    assert outbox["service_role"] == "brain2"
+    assert outbox["service_role"] == "current_brain"
     assert outbox["status"] == "sent"
 
 

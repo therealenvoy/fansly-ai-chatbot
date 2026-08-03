@@ -8,11 +8,6 @@ from src.conversation.brain2 import BrainRuntimeSettings
 from src.conversation.intelligence_v3.service import V3LiveDecision
 from src.conversation.mode import BotMode
 from src.conversation.repository import DecisionMetadataValidationError
-from src.engagement.control_plane import (
-    TriggerOwner,
-    TriggerOwnershipRepository,
-    TriggerType,
-)
 from src.persistence.pipeline import INBOUND_FAILED
 from tests.persistence.test_message_pipeline import _bot
 
@@ -243,13 +238,6 @@ def test_v3_live_candidate_uses_existing_decision_and_delivery_boundary():
     v3.record_live_success.assert_called_once_with()
 
     bot._prepare_message = MagicMock(return_value=reply)
-    TriggerOwnershipRepository(bot.note_repo.engine).assign(
-        "creator-a",
-        TriggerType.INBOUND_REPLY,
-        TriggerOwner.BRAIN2,
-        actor="test",
-        reason="V3 uses the Brain 2.0 delivery owner",
-    )
     bot.client.send_message.return_value = SimpleNamespace(
         success=True,
         message_id="v3-live-outbound-1",
@@ -259,7 +247,7 @@ def test_v3_live_candidate_uses_existing_decision_and_delivery_boundary():
     outbox = bot.processing_repo.get_outbox_for_inbound(inbound.id)
     assert outbox is not None
     assert outbox.status == "sent"
-    assert outbox.service_role == "brain2"
+    assert outbox.service_role == "current_brain"
     assert outbox.message_kind == "text"
     assert outbox.media_ids == ()
     assert outbox.price_millis is None
