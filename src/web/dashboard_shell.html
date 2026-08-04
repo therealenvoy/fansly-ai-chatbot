@@ -1363,8 +1363,7 @@ function bulkNextWallDate(parts){var next=new Date(Date.UTC(parts.year,parts.mon
 function bulkQuickScheduleValue(time,currentValue,now){
   if(!/^\d{2}:\d{2}$/.test(String(time||'')))return currentValue||'';
   var selected=String(currentValue||'').match(/^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}/);
-  if(selected)return selected[1]+'T'+time;
-  var instant=now instanceof Date?now:new Date(),parts=bulkSchedulingParts(instant),value=bulkWallDate(parts)+'T'+time,converted=bulkSchedulingIso(value);
+  var instant=now instanceof Date?now:new Date(),parts=bulkSchedulingParts(instant),selectedDate=selected?selected[1]:bulkWallDate(parts),value=selectedDate+'T'+time,converted=bulkSchedulingIso(value);
   if(!converted||new Date(converted).getTime()<=instant.getTime())value=bulkNextWallDate(parts)+'T'+time;
   return value;
 }

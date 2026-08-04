@@ -268,5 +268,7 @@ def test_bulk_posting_dashboard_has_new_york_quick_time_picker():
     assert "Quick New York schedule times" in DASHBOARD_HTML
     assert "bulkQuickScheduleValue" in DASHBOARD_HTML
     assert "applyBulkQuickTime" in DASHBOARD_HTML
+    assert "selectedDate=selected?selected[1]:bulkWallDate(parts)" in DASHBOARD_HTML
+    assert "if(selected)return selected[1]+'T'+time" not in DASHBOARD_HTML
     for value, label in presets.items():
         assert f"['{value}','{label}']" in DASHBOARD_HTML
