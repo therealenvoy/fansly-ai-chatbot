@@ -251,3 +251,22 @@ def test_bulk_posting_dashboard_contains_only_required_control_surface():
     assert "Delivery Rate" in DASHBOARD_HTML
     assert "Group multiple media as one carousel" in DASHBOARD_HTML
     assert "Use first image as paid-post preview" in DASHBOARD_HTML
+
+
+def test_bulk_posting_dashboard_has_new_york_quick_time_picker():
+    presets = {
+        "21:00": "9 PM",
+        "13:00": "1 PM",
+        "08:00": "8 AM",
+        "01:30": "1:30 AM",
+        "22:30": "10:30 PM",
+        "23:00": "11 PM",
+        "23:30": "11:30 PM",
+        "00:00": "Midnight",
+    }
+
+    assert "Quick New York schedule times" in DASHBOARD_HTML
+    assert "bulkQuickScheduleValue" in DASHBOARD_HTML
+    assert "applyBulkQuickTime" in DASHBOARD_HTML
+    for value, label in presets.items():
+        assert f"['{value}','{label}']" in DASHBOARD_HTML
